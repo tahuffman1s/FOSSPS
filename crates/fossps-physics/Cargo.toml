@@ -1,0 +1,20 @@
+[package]
+name = "fossps-physics"
+description = "Collision with a level and the FPS character controller for FOSSPS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fossps-assets = { path = "../fossps-assets", default-features = false }
+# Only the questions "what does this capsule hit" against the level's
+# triangles. `enhanced-determinism` swaps the platform's math functions for
+# software ones, so a move works out the same on every machine.
+parry3d = { version = "0.31", default-features = false, features = ["required-features", "std", "alloc", "enhanced-determinism"] }
+
+# Sine and cosine that give the same digits on every machine.
+libm = "0.2"
+
+[lints]
+workspace = true

@@ -16,6 +16,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 - PBR shading: textures, metallic-roughness materials, normal maps and a sun light (#59)
 - A game shows its level: `level.glb` in the game folder, and a camera scripts can move (#60)
 - Collision and an FPS character controller (walk, jump, crouch, sprint) (#6)
+- The player walks the level: movement actions drive the character controller, with the camera at their eyes (#64)
 - Weapons: hitscan and projectile, recoil, reload, exposed to scripts (#7)
 - HUD and menus, fully navigable with a controller (#8)
 - Audio: positional sound, footsteps, gunfire (#9)
