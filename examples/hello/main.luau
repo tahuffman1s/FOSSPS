@@ -1,12 +1,14 @@
--- A first FOSSPS game. From the FOSSPS folder, run it with:
---     cargo run -- examples/hello
--- print() writes to the terminal you ran that from, not to the game window.
+-- hello: a FOSSPS game.
+--
+-- Play it by running this in the game's folder:
+--     fossps run
 -- Change anything here and save: the running game picks it up.
+-- print() writes to the terminal you ran that from, not to the game window.
 
 local jumps = 0
 
 game.onStart(function()
-    print("Hello from Luau! Click the game window, then press jump:")
+    print("Welcome to hello! Click the game window, then press jump:")
     print("Space on a keyboard, or the bottom face button on a gamepad.")
 end)
 

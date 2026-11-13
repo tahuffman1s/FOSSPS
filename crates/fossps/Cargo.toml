@@ -7,11 +7,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["window"]
+default = ["window", "cli"]
 # Opens a window, draws into it and reads keyboard, mouse and gamepads. A
 # dedicated server builds without it and links no windowing, graphics or
 # gamepad libraries.
 window = ["dep:winit", "dep:gilrs", "dep:fossps-render"]
+# The `fossps` command (`fossps new`, `fossps run`). Off when the crate is used
+# as a library, so a game written in Rust does not build a command-line parser.
+cli = ["dep:clap"]
 
 [dependencies]
 fossps-input = { path = "../fossps-input" }
@@ -20,10 +23,19 @@ fossps-render = { path = "../fossps-render", optional = true }
 log = "0.4"
 winit = { version = "0.30", optional = true }
 gilrs = { version = "0.11", optional = true }
+clap = { version = "4.5", optional = true, default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+    "color",
+] }
 
 [[bin]]
 name = "fossps"
-required-features = ["window"]
+required-features = ["window", "cli"]
 
 [lints]
 workspace = true

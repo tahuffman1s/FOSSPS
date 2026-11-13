@@ -30,15 +30,18 @@ sudo dnf install gcc-c++ systemd-devel    # Fedora
 ```sh
 cargo build
 cargo test
-cargo run                     # opens the input demo window
-cargo run -- examples/hello   # plays a scripted game
+cargo run -- new my-game      # creates a game in the folder my-game
+cargo run -- run my-game      # plays it
+cargo run -- demo             # opens the input demo window
 ```
 
-Running it needs a graphics driver with Vulkan 1.3; building does not need the Vulkan SDK. If the demo says Vulkan is missing or too old, update your graphics driver (on Linux, also install your distribution's Vulkan loader package, for example `sudo dnf install vulkan-loader`). The demo draws a triangle and shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
+`cargo run --` stands in for the `fossps` command until there are packaged builds; to get a real `fossps` command now, run `cargo install --path crates/fossps`.
+
+Running it needs a graphics driver with Vulkan 1.3; building does not need the Vulkan SDK. If it says Vulkan is missing or too old, update your graphics driver (on Linux, also install your distribution's Vulkan loader package, for example `sudo dnf install vulkan-loader`). The input demo draws a triangle and shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
 
 ## Scripting
 
-A game is a folder with a `main.luau` in it. The engine runs that file, and loads it again every time you save it, without restarting:
+A game is a folder with a `main.luau` in it. `fossps new my-game` creates one that already plays, and `fossps run` plays the game in the folder you are in (or `fossps run my-game` from outside it). The engine runs `main.luau`, and loads it again every time you save it, without restarting:
 
 ```lua
 game.onStart(function()
@@ -63,7 +66,7 @@ Script error in main.luau, line 1:
   The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.
 ```
 
-So far scripts can react to the game starting, to each tick and to input, and a game is a single `main.luau` (`require` comes later, as does the game-mode API). For autocomplete in your editor, point the Luau language server at [`crates/fossps-script/types/fossps.d.luau`](crates/fossps-script/types/fossps.d.luau).
+So far scripts can react to the game starting, to each tick and to input, and a game is a single `main.luau` (`require` comes later, as does the game-mode API). A new game comes with autocomplete set up for VS Code: install the [Luau Language Server](https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp) extension and open the game's folder. For another editor, point the Luau language server at the `fossps.d.luau` in the game's folder.
 
 ## Contributing
 

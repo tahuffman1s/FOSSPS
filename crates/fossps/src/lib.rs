@@ -1,7 +1,7 @@
 //! FOSSPS: a free, open-source engine for multiplayer FPS games.
 //!
 //! A game is usually a folder with a Luau script, `main.luau`, run through
-//! [`ScriptGame`]. A game can also be written in Rust: implement [`Game`] and
+//! [`ScriptGame`]; `fossps new` creates one and `fossps run` plays it. A game can also be written in Rust: implement [`Game`] and
 //! hand it to [`run`], which opens a window, draws into it with Vulkan, reads
 //! keyboard, mouse and gamepad through one action map, and calls the game at a
 //! fixed tick rate.
@@ -29,6 +29,7 @@ mod app;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;
+pub mod scaffold;
 mod script_game;
 mod tick;
 #[cfg(feature = "window")]
