@@ -11,7 +11,10 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 
 ## M1 — Playable offline
 
-- glTF level and model loading with PBR materials (#5)
+- Read glTF levels and models into engine data: meshes, PBR materials, textures (#5)
+- Draw loaded meshes: vertex and index buffers, a depth buffer and a camera (#58)
+- PBR shading: textures, metallic-roughness materials, normal maps and a sun light (#59)
+- A game shows its level: `level.glb` in the game folder, and a camera scripts can move (#60)
 - Collision and an FPS character controller (walk, jump, crouch, sprint) (#6)
 - Weapons: hitscan and projectile, recoil, reload, exposed to scripts (#7)
 - HUD and menus, fully navigable with a controller (#8)
