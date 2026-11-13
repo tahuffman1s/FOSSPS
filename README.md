@@ -32,6 +32,7 @@ cargo build
 cargo test
 cargo run -- new my-game      # creates a game in the folder my-game
 cargo run -- run my-game      # plays it (the first "run" is cargo's)
+cargo run -- check my-game    # tests its script without opening a window
 cargo run -- demo             # opens the input demo window
 ```
 
@@ -66,7 +67,9 @@ Script error in main.luau, line 1:
   The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.
 ```
 
-So far scripts can react to the game starting, to each tick and to input, and a game is a single `main.luau` (`require` comes later, as does the game-mode API). A new game comes with autocomplete set up for VS Code: install the [Luau Language Server](https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp) extension and open the game's folder. For another editor, point the Luau language server at the `fossps.d.luau` in the game's folder.
+So far scripts can react to the game starting, to each tick and to input, and a game is a single `main.luau` (`require` comes later, as does the game-mode API). A new game is also set up for [Claude Code](https://claude.com/claude-code): it has a `CLAUDE.md` that explains the script API and tells Claude to test each change with `fossps check`, which runs a second of the game with no window and fails if the script has a mistake.
+
+A new game comes with autocomplete set up for VS Code: install the [Luau Language Server](https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp) extension and open the game's folder. For another editor, point the Luau language server at the `fossps.d.luau` in the game's folder.
 
 ## Contributing
 

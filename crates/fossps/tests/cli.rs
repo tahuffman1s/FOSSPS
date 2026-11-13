@@ -51,6 +51,8 @@ fn new_creates_a_game_and_says_how_to_play_it() {
         "README.md",
         "fossps.d.luau",
         ".vscode/settings.json",
+        "CLAUDE.md",
+        ".claude/settings.json",
     ] {
         assert!(folder.join("my-game").join(file).is_file(), "{file}");
     }
@@ -174,4 +176,57 @@ fn a_misspelled_command_suggests_the_right_one() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("'run'"), "{}", stderr(&output));
+}
+
+#[test]
+fn check_passes_a_new_game_without_a_window() {
+    let folder = scratch("check-ok");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("main.luau is fine"),
+        "{}",
+        stdout(&output)
+    );
+    // The start handler really ran.
+    assert!(
+        stderr(&output).contains("Welcome to game!"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn check_fails_on_a_mistake_that_only_shows_while_running() {
+    let folder = scratch("check-broken");
+    fs::write(
+        folder.join("main.luau"),
+        "game.onTick(function(step)\n    local nothing = nil\n    print(nothing.x)\nend)\n",
+    )
+    .unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("Script error in main.luau, line 3"), "{said}");
+    assert!(said.contains("run `fossps check` again"), "{said}");
+}
+
+#[test]
+fn check_fails_on_a_script_that_does_not_load() {
+    let folder = scratch("check-typo");
+    fs::write(folder.join("main.luau"), "game.onTik(function() end)\n").unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("Did you mean game.onTick?"),
+        "{}",
+        stderr(&output)
+    );
 }
