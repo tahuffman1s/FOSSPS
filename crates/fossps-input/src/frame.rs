@@ -21,11 +21,27 @@ pub struct ActionState {
 ///
 /// This is plain data. The simulation reads it, and it is also what gets
 /// recorded for replays and sent to the server.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct InputFrame {
     /// Which tick this is. The first tick is 1; 0 means no tick has run yet.
     pub tick: u64,
     pub(crate) actions: Vec<ActionState>,
+}
+
+impl Clone for InputFrame {
+    fn clone(&self) -> Self {
+        Self {
+            tick: self.tick,
+            actions: self.actions.clone(),
+        }
+    }
+
+    /// Copies `source` into this frame, reusing its memory: a frame that is
+    /// refreshed every tick this way does not allocate.
+    fn clone_from(&mut self, source: &Self) {
+        self.tick = source.tick;
+        self.actions.clone_from(&source.actions);
+    }
 }
 
 impl InputFrame {

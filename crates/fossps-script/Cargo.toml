@@ -1,0 +1,15 @@
+[package]
+name = "fossps-script"
+description = "Luau scripting for FOSSPS: runs a game's main.luau, reloads it on save and explains script errors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fossps-input = { path = "../fossps-input" }
+log = "0.4"
+mlua = { version = "0.12", features = ["luau"] }
+
+[lints]
+workspace = true
