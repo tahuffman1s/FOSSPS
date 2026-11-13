@@ -22,6 +22,8 @@ Start here:
 #[derive(Parser)]
 #[command(
     name = "fossps",
+    // Otherwise help on Windows says `fossps.exe`, unlike every example.
+    bin_name = "fossps",
     version,
     about = "Make and play multiplayer first-person shooters.",
     after_help = GETTING_STARTED
