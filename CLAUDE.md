@@ -33,7 +33,7 @@ The owner wants to give very little input. `/next` builds the next roadmap issue
 
 - Issues are the source of truth. Roadmap work carries the `roadmap` label and a milestone (M0–M4); `ROADMAP.md` is only an overview. New work found along the way becomes an issue, not a TODO.
 - Every change goes through a PR from a branch named `<issue>-<slug>`, with `Closes #<issue>`. Never commit to `main` directly, never force-push.
-- The owner has authorized Claude to open, review and merge its own PRs without asking. Review the diff with `code-reviewer`, post the outcome with `gh pr review --comment` (GitHub does not allow approving a PR from the same account), then squash-merge once CI is green. CI (Linux, Windows, macOS) is the final check.
+- The owner has authorized Claude to open, review and merge its own PRs without asking. Review the diff with `code-reviewer` before pushing. On the PR, the Claude GitHub app (`claude[bot]`, workflow `claude-code-review.yml`) gives an independent review: wait for it, then fix or answer every comment it leaves. Squash-merge once that is settled and CI (Linux, Windows, macOS) is green.
 - Ask for JSON and only the fields you need (`gh ... --json number,title`); never dump full issue or PR lists.
 - Never publish releases, change repo settings or visibility, or delete branches other than your own merged ones without being asked.
 - The website is `site/` (plain HTML, no build step), deployed to GitHub Pages on merge. Keep its claims in line with what actually works.
