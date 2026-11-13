@@ -53,6 +53,16 @@ enum Command {
         /// The game's folder. Leave it out to play the game in the folder you are in
         folder: Option<PathBuf>,
     },
+    /// Test a game's script without opening a window
+    #[command(
+        after_help = "Loads main.luau, starts the game and runs one second of it with nothing \
+                      pressed.\nAnything the script prints is shown first. Prints any script error and fails if there was one, so it can be \
+                      used by scripts,\nautomated checks and AI assistants."
+    )]
+    Check {
+        /// The game's folder. Leave it out to check the game in the folder you are in
+        folder: Option<PathBuf>,
+    },
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
 }
@@ -85,6 +95,7 @@ fn main() -> ExitCode {
     let outcome = match Cli::parse().command {
         Some(Command::New { folder }) => new(&folder),
         Some(Command::Run { folder }) => run(folder.as_deref().unwrap_or(Path::new("."))),
+        Some(Command::Check { folder }) => check(folder.as_deref().unwrap_or(Path::new("."))),
         Some(Command::Demo) => demo(),
         // Asking for nothing is not a mistake: show what there is to ask for.
         None => Cli::command()
@@ -121,12 +132,12 @@ fn new(folder: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `fossps run`: plays the game in `folder` until its window is closed.
-fn run(folder: &Path) -> Result<(), String> {
+/// Opens the game in `folder`, or says how to get one.
+fn open(folder: &Path, config: &Config) -> Result<ScriptGame, String> {
     if folder.is_file() {
         return Err(format!(
-            "{} is a file. `fossps run` takes the game's folder, the one with \
-             {ENTRY_SCRIPT} in it; inside that folder, plain `fossps run` is enough.",
+            "{} is a file. This command takes the game's folder, the one with \
+             {ENTRY_SCRIPT} in it; inside that folder, no folder name is needed.",
             folder.display()
         ));
     }
@@ -138,12 +149,10 @@ fn run(folder: &Path) -> Result<(), String> {
             quoted(&folder.display().to_string())
         ));
     }
-
-    let mut config = Config::default();
-    let game = ScriptGame::open(folder, &config.actions).map_err(|error| match error {
+    ScriptGame::open(folder, &config.actions).map_err(|error| match error {
         OpenError::Missing { .. } => format!(
             "There is no game here: {} has no {ENTRY_SCRIPT} in it.\n\
-             Run `fossps run` from inside a game's folder, or name the folder: \
+             Run this from inside a game's folder, or name the folder: \
              `fossps run my-game`.\n\
              To make a new game: `fossps new my-game`.",
             if folder == Path::new(".") {
@@ -153,7 +162,48 @@ fn run(folder: &Path) -> Result<(), String> {
             }
         ),
         other @ OpenError::Unreadable { .. } => other.to_string(),
-    })?;
+    })
+}
+
+/// `fossps check`: runs a second of the game with no window and nothing
+/// pressed, and fails if the script has a mistake.
+fn check(folder: &Path) -> Result<(), String> {
+    /// One second of game time.
+    const TICKS: u32 = 60;
+
+    let config = Config::default();
+    let mut game = open(folder, &config)?;
+    let mut input = fossps::input::Input::new(config.actions.clone());
+    let step = 1.0 / TICKS as f32;
+    // A script that fails to load never runs, so there is nothing to tick.
+    if game.host().last_error().is_none() {
+        for _ in 0..TICKS {
+            game.tick(input.tick(), step);
+        }
+    }
+
+    // The error itself was printed when it happened.
+    if game.host().last_error().is_some() {
+        return Err(format!(
+            "{ENTRY_SCRIPT} has a mistake (the error is shown above). No game is running \
+             during a check, so nothing reloads: fix it, then run `fossps check` again."
+        ));
+    }
+    println!(
+        "{ENTRY_SCRIPT} is fine: it loaded and ran for {TICKS} ticks (1 second of game time) \
+         with no errors."
+    );
+    println!(
+        "Nothing was pressed, so code that only runs on input was not run. \
+         Read that code carefully, and try it by playing with `fossps run`."
+    );
+    Ok(())
+}
+
+/// `fossps run`: plays the game in `folder` until its window is closed.
+fn run(folder: &Path) -> Result<(), String> {
+    let mut config = Config::default();
+    let game = open(folder, &config)?;
 
     match scaffold::refresh_types(folder) {
         Ok(true) => log::info!(

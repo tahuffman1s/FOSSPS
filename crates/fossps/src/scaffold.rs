@@ -1,7 +1,8 @@
 //! Creates a new game folder from the built-in template.
 //!
 //! This is what `fossps new` runs. A new game is a `main.luau` that already
-//! plays, a short README, and the files an editor needs for autocomplete.
+//! plays, a short README, the files an editor needs for autocomplete, and a
+//! `CLAUDE.md` so Claude Code knows how to work on the game.
 
 use std::fmt;
 use std::fs;
@@ -22,6 +23,8 @@ const NAME_PLACEHOLDER: &str = "{name}";
 const MAIN_SCRIPT: &str = include_str!("../template/main.luau");
 const README: &str = include_str!("../template/README.md");
 const EDITOR_SETTINGS: &str = include_str!("../template/vscode-settings.json");
+const CLAUDE_GUIDE: &str = include_str!("../template/CLAUDE.md");
+const CLAUDE_SETTINGS: &str = include_str!("../template/claude-settings.json");
 
 /// A game folder that [`new_game`] just created.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +156,7 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
     }
 
     let editor_folder = folder.join(".vscode");
+    let claude_folder = folder.join(".claude");
     let files = [
         (
             folder.join(ENTRY_SCRIPT),
@@ -167,16 +171,26 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
             editor_folder.join("settings.json"),
             EDITOR_SETTINGS.to_owned(),
         ),
+        (
+            folder.join("CLAUDE.md"),
+            CLAUDE_GUIDE.replace(NAME_PLACEHOLDER, &name),
+        ),
+        (
+            claude_folder.join("settings.json"),
+            CLAUDE_SETTINGS.to_owned(),
+        ),
     ];
 
     // Only what this call made is removed again if a later step fails, so a
     // file someone else put there in the meantime is never touched.
-    let had_editor_folder = editor_folder.is_dir();
     let mut made = 0;
-    let written = fs::create_dir_all(&editor_folder)
-        .map_err(|source| NewGameError::Io {
-            path: editor_folder.clone(),
-            source,
+    let written = [&editor_folder, &claude_folder]
+        .into_iter()
+        .try_for_each(|subfolder| {
+            fs::create_dir_all(subfolder).map_err(|source| NewGameError::Io {
+                path: subfolder.clone(),
+                source,
+            })
         })
         .and_then(|()| {
             files.iter().try_for_each(|(path, text)| {
@@ -192,13 +206,12 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
     if let Err(error) = written {
         // Removing is best effort: the error worth reporting is the one that
         // stopped the game being created. `remove_dir` only removes an empty
-        // folder.
+        // folder, and the game's folder was empty or missing when this began.
         for (path, _) in &files[..made] {
             let _ = fs::remove_file(path);
         }
-        if !had_editor_folder {
-            let _ = fs::remove_dir(&editor_folder);
-        }
+        let _ = fs::remove_dir(&editor_folder);
+        let _ = fs::remove_dir(&claude_folder);
         if !existed {
             let _ = fs::remove_dir(&folder);
         }
@@ -361,6 +374,11 @@ mod tests {
         );
         let settings = fs::read_to_string(game.folder.join(".vscode/settings.json")).unwrap();
         assert!(settings.contains(&format!("\"fossps\": \"{TYPES_FILE}\"")));
+        let guide = fs::read_to_string(game.folder.join("CLAUDE.md")).unwrap();
+        assert!(guide.starts_with("# my-game"));
+        assert!(guide.contains("fossps check"));
+        let allowed = fs::read_to_string(game.folder.join(".claude/settings.json")).unwrap();
+        assert!(allowed.contains("Bash(fossps check:*)"));
     }
 
     #[test]

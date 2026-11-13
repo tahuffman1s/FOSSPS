@@ -24,6 +24,14 @@ The window only shows a triangle for now: what the game does is printed in the t
 The game is `main.luau`. Edit it and save: the running game loads the new version by itself.
 If there is a mistake, the terminal shows the line and what to try, and the game keeps running the last version that worked.
 
+To test the script without opening a window, run `fossps check`.
+
+## Working with Claude
+
+This folder is set up for [Claude Code](https://claude.com/claude-code): `CLAUDE.md` tells it how the game
+works and how to test its changes with `fossps check`. Open the folder in Claude Code and say what you want
+the game to do. `CLAUDE.md` is yours: add your own rules and notes about the game to it.
+
 ## Autocomplete
 
 `fossps.d.luau` describes everything a script can use. In VS Code, install the
