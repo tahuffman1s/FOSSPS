@@ -1,0 +1,13 @@
+name: Idea or request
+description: Suggest a feature or an improvement to how something works
+labels: [idea]
+body:
+  - type: textarea
+    attributes:
+      label: What are you trying to make or do
+      description: Describe the goal, not just the feature. FOSSPS only targets multiplayer first-person shooters.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What would make it easy

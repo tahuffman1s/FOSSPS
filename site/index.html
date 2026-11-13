@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FOSSPS — FOSS Person Shooter</title>
+<meta name="description" content="FOSSPS (FOSS Person Shooter) is a free, open-source engine for multiplayer first-person shooters. Rust core, Luau scripting, Vulkan 1.3.">
+<meta property="og:title" content="FOSSPS — FOSS Person Shooter">
+<meta property="og:description" content="A free, open-source engine for multiplayer first-person shooters.">
+<meta name="color-scheme" content="dark light">
+<style>
+  :root {
+    --bg: #0d0f12; --panel: #15181d; --line: #262b33;
+    --text: #e8eaed; --muted: #9aa3ae; --accent: #ff7a1a; --accent-ink: #14100b;
+    --code-bg: #0a0c0f; --kw: #ff9d57; --str: #9bd68a; --com: #6b7480; --num: #7cc4ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f6f3; --panel: #ffffff; --line: #dedbd4;
+      --text: #17191c; --muted: #5b6370; --accent: #d9540a; --accent-ink: #ffffff;
+      --code-bg: #14171b; --kw: #ff9d57; --str: #9bd68a; --com: #7d8793; --num: #7cc4ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+  a { color: inherit; }
+  .mono { font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace; }
+
+  header { border-bottom: 1px solid var(--line); }
+  nav { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { font-weight: 800; letter-spacing: .06em; text-decoration: none; }
+  .brand span { color: var(--accent); }
+  nav ul { display: flex; gap: 22px; list-style: none; margin: 0; padding: 0; font-size: 15px; }
+  nav ul a { text-decoration: none; color: var(--muted); }
+  nav ul a:hover { color: var(--text); }
+
+  .hero { padding: 84px 0 72px; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; right: -80px; top: 50%; width: 420px; height: 420px;
+    transform: translateY(-50%); border: 1px solid var(--line); border-radius: 50%;
+    background:
+      linear-gradient(var(--line), var(--line)) center / 1px 100% no-repeat,
+      linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat;
+    opacity: .7; pointer-events: none;
+  }
+  .hero::after {
+    content: ""; position: absolute; right: 124px; top: 50%; width: 12px; height: 12px;
+    transform: translateY(-50%); border-radius: 50%; background: var(--accent); pointer-events: none;
+  }
+  .hero > .wrap { position: relative; z-index: 1; }
+  .status {
+    display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; margin-bottom: 26px;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+    font-size: 13px; color: var(--muted);
+  }
+  .status i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  h1 { font-size: clamp(44px, 9vw, 88px); line-height: 1; margin: 0 0 6px; letter-spacing: -.02em; font-weight: 800; }
+  h1 em { font-style: normal; color: var(--accent); }
+  .expand { font-size: 15px; letter-spacing: .28em; text-transform: uppercase; color: var(--muted); margin: 0 0 26px; }
+  .lead { font-size: clamp(19px, 2.6vw, 23px); max-width: 620px; margin: 0 0 34px; text-wrap: balance; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; }
+  .btn {
+    display: inline-block; padding: 12px 22px; border-radius: 8px; font-weight: 650;
+    text-decoration: none; border: 1px solid var(--line); background: var(--panel);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn:hover { filter: brightness(1.08); }
+
+  section { padding: 64px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 30px; margin: 0 0 8px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 32px; max-width: 640px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+  .card h3 { margin: 0 0 6px; font-size: 18px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  .card .n { color: var(--accent); font-size: 13px; margin-bottom: 10px; display: block; }
+
+  .split { display: grid; gap: 32px; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
+  @media (max-width: 800px) { .split { grid-template-columns: minmax(0, 1fr); } .hero::before, .hero::after { display: none; } nav ul li.hide { display: none; } }
+  pre {
+    margin: 0; padding: 20px; border-radius: 12px; background: var(--code-bg); color: #dfe3e8;
+    border: 1px solid var(--line); overflow-x: auto; font-size: 14.5px; line-height: 1.65;
+  }
+  .kw { color: var(--kw); } .str { color: var(--str); } .com { color: var(--com); } .num { color: var(--num); }
+  .note { font-size: 13.5px; color: var(--muted); margin-top: 10px; }
+  ul.checks { list-style: none; padding: 0; margin: 0; }
+  ul.checks li { padding: 9px 0 9px 26px; position: relative; border-bottom: 1px solid var(--line); }
+  ul.checks li::before { content: ""; position: absolute; left: 4px; top: 19px; width: 8px; height: 8px; border: 2px solid var(--accent); border-radius: 50%; }
+
+  ol.road { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  ol.road li { display: grid; grid-template-columns: 64px 1fr; gap: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; }
+  ol.road b { color: var(--accent); }
+  ol.road strong { display: block; }
+  ol.road span { color: var(--muted); font-size: 15.5px; }
+
+  footer { border-top: 1px solid var(--line); padding: 36px 0 56px; color: var(--muted); font-size: 14.5px; }
+  footer a { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <nav class="wrap" aria-label="Main">
+    <a class="brand mono" href="#top">FOSS<span>PS</span></a>
+    <ul>
+      <li class="hide"><a href="#why">Why</a></li>
+      <li class="hide"><a href="#scripting">Scripting</a></li>
+      <li><a href="#roadmap">Roadmap</a></li>
+      <li><a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="top">
+  <div class="hero">
+    <div class="wrap">
+      <div class="status"><i></i>Early development — nothing playable yet</div>
+      <h1>FOSS<em>PS</em></h1>
+      <p class="expand mono">FOSS Person Shooter</p>
+      <p class="lead">A free, open-source engine built for one thing: multiplayer first-person shooters that are fast to play and easy to make.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/tahuffman1s/FOSSPS">View on GitHub</a>
+        <a class="btn" href="#roadmap">See the roadmap</a>
+      </div>
+    </div>
+  </div>
+
+  <section id="why">
+    <div class="wrap">
+      <h2>What it is aiming for</h2>
+      <p class="sub">Four goals, in priority order. When they conflict, the earlier one wins.</p>
+      <div class="grid">
+        <div class="card"><span class="n mono">01</span><h3>Easy</h3><p>From install to a playable networked match in minutes, with error messages that tell you what to do next.</p></div>
+        <div class="card"><span class="n mono">02</span><h3>Fast</h3><p>High, stable frame rates and low input latency on mid-range hardware. Dedicated servers that are cheap to run.</p></div>
+        <div class="card"><span class="n mono">03</span><h3>Focused</h3><p>Only multiplayer shooters. No general-purpose engine features to learn around.</p></div>
+        <div class="card"><span class="n mono">04</span><h3>Modern</h3><p>Vulkan 1.3 rendering, FSR 3.1 upscaling and first-class controller support.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="scripting">
+    <div class="wrap split">
+      <div>
+        <h2>Scripting that reads like the game</h2>
+        <p class="sub">Game modes, weapons and rules are written in Luau, a small typed scripting language. The goal is that someone who has played shooters can read a script and guess what it does.</p>
+        <ul class="checks">
+          <li>Save the file and the running game updates</li>
+          <li>Autocomplete and type checking in your editor</li>
+          <li>Sandboxed, so community servers and mods are safe to run</li>
+          <li>The server decides what happens; clients can't cheat by editing scripts</li>
+        </ul>
+      </div>
+      <div>
+<pre class="mono"><span class="com">-- main.luau: a whole team deathmatch</span>
+<span class="kw">local</span> game = require(<span class="str">"fossps"</span>)
+
+game.mode {
+  name = <span class="str">"Team Deathmatch"</span>,
+  teams = { <span class="str">"Red"</span>, <span class="str">"Blue"</span> },
+  scoreToWin = <span class="num">50</span>,
+}
+
+game.onKill(<span class="kw">function</span>(killer, victim)
+  killer.team:addScore(<span class="num">1</span>)
+  victim:respawnAfter(<span class="num">3</span>)
+<span class="kw">end</span>)</pre>
+        <p class="note">A design sketch of the target experience. The API does not exist yet and will change.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="tech">
+    <div class="wrap">
+      <h2>Planned, not promised</h2>
+      <p class="sub">What the engine is being built toward. None of this ships today.</p>
+      <div class="grid">
+        <div class="card"><h3>Rust core</h3><p>Memory-safe engine and server code, built with one command.</p></div>
+        <div class="card"><h3>Server-authoritative netcode</h3><p>Client prediction, lag compensation and a headless dedicated server.</p></div>
+        <div class="card"><h3>Controller parity</h3><p>Every action bindable on a gamepad. Nothing keyboard-only.</p></div>
+        <div class="card"><h3>Linux, Windows, macOS</h3><p>AppImage and <span class="mono">.exe</span> builds, with macOS as a stretch goal.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <div class="wrap">
+      <h2>Roadmap</h2>
+      <p class="sub">Work is tracked in the open as <a href="https://github.com/tahuffman1s/FOSSPS/milestones">GitHub milestones</a>.</p>
+      <ol class="road">
+        <li><b class="mono">M0</b><div><strong>Foundations</strong><span>Window, input, a Vulkan triangle, a running Luau script and a one-command template game.</span></div></li>
+        <li><b class="mono">M1</b><div><strong>Playable offline</strong><span>Levels, movement, weapons, HUD and audio.</span></div></li>
+        <li><b class="mono">M2</b><div><strong>Multiplayer</strong><span>Dedicated servers, prediction, lag compensation and a sample team deathmatch.</span></div></li>
+        <li><b class="mono">M3</b><div><strong>Modern graphics</strong><span>Lighting, shadows, anti-aliasing, FSR 3.1 and performance budgets.</span></div></li>
+        <li><b class="mono">M4</b><div><strong>Ship</strong><span>Packaged builds for each platform, releases and a ten-minute tutorial.</span></div></li>
+      </ol>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    FOSSPS is free software under your choice of the <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/LICENSE-MIT">MIT</a> or <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/LICENSE-APACHE">Apache 2.0</a> license.
+    Follow or contribute on <a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a>; ideas and bug reports go in <a href="https://github.com/tahuffman1s/FOSSPS/issues">issues</a>.
+  </div>
+</footer>
+
+</body>
+</html>
