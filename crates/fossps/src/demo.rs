@@ -1,0 +1,70 @@
+//! The input demo: live input shown in the window title, to try a keyboard,
+//! mouse or gamepad by hand.
+
+use std::fmt::Write as _;
+
+use fossps::input::ActionKind;
+use fossps::{ActionId, ActionMap, Frame, Game, InputFrame};
+
+/// Shows which actions are active in the window title and logs every press.
+pub struct InputDemo {
+    map: ActionMap,
+    look: Option<ActionId>,
+    /// Total look movement, to show that mouse and stick both drive it.
+    aim: [f32; 2],
+    title: String,
+    shown: String,
+}
+
+impl InputDemo {
+    pub fn new(map: ActionMap) -> Self {
+        Self {
+            look: map.action("look").ok(),
+            map,
+            aim: [0.0; 2],
+            title: String::new(),
+            shown: String::new(),
+        }
+    }
+}
+
+impl Game for InputDemo {
+    fn tick(&mut self, input: &InputFrame, step: f32) {
+        const MOUSE_DEGREES_PER_COUNT: f32 = 0.05;
+        const STICK_DEGREES_PER_SECOND: f32 = 180.0;
+
+        if let Some(look) = self.look {
+            let mouse = input.delta(look);
+            let stick = input.axis2d(look);
+            for axis in 0..2 {
+                self.aim[axis] += mouse[axis] * MOUSE_DEGREES_PER_COUNT
+                    + stick[axis] * STICK_DEGREES_PER_SECOND * step;
+            }
+        }
+
+        self.title.clear();
+        // Writing to a String cannot fail.
+        let _ = write!(self.title, "aim {:.0}, {:.0}", self.aim[0], self.aim[1]);
+        for action in self.map.actions() {
+            let name = self.map.name(action);
+            if input.just_pressed(action) && self.map.kind(action) == Some(ActionKind::Button) {
+                log::info!("tick {}: {name} pressed", input.tick);
+            }
+            if input.pressed(action) && Some(action) != self.look {
+                let [x, y] = input.axis2d(action);
+                let _ = match self.map.kind(action) {
+                    Some(ActionKind::Axis2D) => write!(self.title, " | {name} {x:.2}, {y:.2}"),
+                    Some(ActionKind::Axis1D) => write!(self.title, " | {name} {x:.2}"),
+                    _ => write!(self.title, " | {name}"),
+                };
+            }
+        }
+    }
+
+    fn frame(&mut self, frame: &mut Frame) {
+        if self.title != self.shown {
+            self.shown.clone_from(&self.title);
+            frame.set_title(format!("FOSSPS input demo | {}", self.title));
+        }
+    }
+}

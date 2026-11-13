@@ -1,0 +1,177 @@
+//! Runs the built `fossps` command the way a person would.
+//!
+//! Playing a game needs a window and a graphics card, so `fossps run` is only
+//! tested up to the point where it would open one.
+
+#![cfg(all(feature = "window", feature = "cli"))]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// An empty folder for one test.
+fn scratch(test: &str) -> PathBuf {
+    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("cli-{test}"));
+    let _ = fs::remove_dir_all(&folder);
+    fs::create_dir_all(&folder).unwrap();
+    folder
+}
+
+/// Runs `fossps` with `args` from inside `folder`.
+fn fossps(folder: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_fossps"))
+        .args(args)
+        .current_dir(folder)
+        .output()
+        .unwrap()
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n")
+}
+
+#[test]
+fn new_creates_a_game_and_says_how_to_play_it() {
+    let folder = scratch("new");
+
+    let output = fossps(&folder, &["new", "my-game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(said.contains("Created the game \"my-game\""), "{said}");
+    assert!(said.contains("    cd my-game\n"), "{said}");
+    assert!(said.contains("    fossps run\n"), "{said}");
+    for file in [
+        "main.luau",
+        "README.md",
+        "fossps.d.luau",
+        ".vscode/settings.json",
+    ] {
+        assert!(folder.join("my-game").join(file).is_file(), "{file}");
+    }
+}
+
+#[test]
+fn new_in_the_current_folder_does_not_say_cd() {
+    let folder = scratch("new-here");
+
+    let output = fossps(&folder, &["new", "."]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("cd "), "{}", stdout(&output));
+    assert!(folder.join("main.luau").is_file());
+}
+
+#[test]
+fn new_refuses_a_folder_that_has_files() {
+    let folder = scratch("new-taken");
+    fs::create_dir(folder.join("taken")).unwrap();
+    fs::write(folder.join("taken/notes.txt"), "mine").unwrap();
+
+    let output = fossps(&folder, &["new", "taken"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("already has files in it"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read_dir(folder.join("taken")).unwrap().count(), 1);
+}
+
+#[test]
+fn new_refuses_a_name_that_breaks_on_windows() {
+    let folder = scratch("new-reserved");
+
+    let output = fossps(&folder, &["new", "con"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("Try a name like my-game"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!folder.join("con").exists());
+}
+
+#[test]
+fn new_without_a_name_shows_how_to_use_it() {
+    let folder = scratch("new-nameless");
+
+    let output = fossps(&folder, &["new"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("fossps new <FOLDER>"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn run_outside_a_game_says_how_to_get_one() {
+    let folder = scratch("run-empty");
+
+    let output = fossps(&folder, &["run"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("There is no game here"), "{said}");
+    assert!(said.contains("fossps new my-game"), "{said}");
+}
+
+#[test]
+fn run_with_a_folder_that_does_not_exist_says_so() {
+    let folder = scratch("run-missing");
+
+    let output = fossps(&folder, &["run", "nowhere"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("There is no folder called nowhere"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn run_with_a_file_asks_for_the_folder() {
+    let folder = scratch("run-file");
+    fs::write(folder.join("main.luau"), "").unwrap();
+
+    let output = fossps(&folder, &["run", "main.luau"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("main.luau is a file"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn no_arguments_shows_help_and_succeeds() {
+    let folder = scratch("bare");
+
+    let output = fossps(&folder, &[]);
+
+    assert!(output.status.success());
+    let said = stdout(&output);
+    assert!(said.contains("Usage: fossps"), "{said}");
+    assert!(said.contains("fossps new my-game"), "{said}");
+}
+
+#[test]
+fn a_misspelled_command_suggests_the_right_one() {
+    let folder = scratch("typo");
+
+    let output = fossps(&folder, &["runn"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("'run'"), "{}", stderr(&output));
+}
