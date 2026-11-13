@@ -6,7 +6,7 @@
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use fossps_script::{ENTRY_SCRIPT, TYPE_DEFINITIONS};
 
@@ -119,6 +119,13 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
     // Windows name such as `con` absolute turns it into a device path.
     if path.file_name().is_some() {
         game_name(path)?;
+    } else if path.components().next_back() == Some(Component::ParentDir) {
+        // Windows would resolve `..` to a real folder and other platforms would
+        // not; refuse it everywhere rather than create a game somewhere unexpected.
+        return Err(NewGameError::InvalidName {
+            name: path.display().to_string(),
+            reason: "it does not end in a folder name".to_owned(),
+        });
     }
     // Gives `.` a name: the folder it stands for. Reads nothing from disk.
     let folder = std::path::absolute(path).map_err(|source| NewGameError::Io {
@@ -439,8 +446,12 @@ mod tests {
         let types = game.folder.join(TYPES_FILE);
 
         assert!(!refresh_types(&game.folder).unwrap());
-        fs::write(&types, TYPE_DEFINITIONS.replace('\n', "\r\n")).unwrap();
-        assert!(!refresh_types(&game.folder).unwrap());
+        // The same text with the other platform's line endings is not stale.
+        let unix = TYPE_DEFINITIONS.replace("\r\n", "\n");
+        for text in [unix.replace('\n', "\r\n"), unix] {
+            fs::write(&types, text).unwrap();
+            assert!(!refresh_types(&game.folder).unwrap());
+        }
 
         fs::write(&types, "-- from an older engine").unwrap();
         assert!(refresh_types(&game.folder).unwrap());
