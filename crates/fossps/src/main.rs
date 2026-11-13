@@ -56,7 +56,7 @@ enum Command {
     /// Test a game's script without opening a window
     #[command(
         after_help = "Loads main.luau, starts the game and runs one second of it with nothing \
-                      pressed.\nPrints any script error and fails if there was one, so it can be \
+                      pressed.\nAnything the script prints is shown first. Prints any script error and fails if there was one, so it can be \
                       used by scripts,\nautomated checks and AI assistants."
     )]
     Check {
@@ -185,7 +185,8 @@ fn check(folder: &Path) -> Result<(), String> {
     // The error itself was printed when it happened.
     if game.host().last_error().is_some() {
         return Err(format!(
-            "{ENTRY_SCRIPT} has a mistake (shown above). Fix it and run `fossps check` again."
+            "{ENTRY_SCRIPT} has a mistake (the error is shown above). No game is running \
+             during a check, so nothing reloads: fix it, then run `fossps check` again."
         ));
     }
     println!(
@@ -194,7 +195,7 @@ fn check(folder: &Path) -> Result<(), String> {
     );
     println!(
         "Nothing was pressed, so code that only runs on input was not run. \
-         Try that with `fossps run`."
+         Read that code carefully, and try it by playing with `fossps run`."
     );
     Ok(())
 }
