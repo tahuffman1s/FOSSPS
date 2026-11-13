@@ -6,7 +6,7 @@ A free, open-source engine for multiplayer first-person shooters.
 
 [![CI](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml/badge.svg)](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml)
 
-**Status:** just started. Nothing is playable yet.
+**Status:** just started. Nothing is playable yet. So far: a window, a fixed-rate main loop, and keyboard, mouse and gamepad input through one action map.
 
 ## Goals
 
@@ -20,11 +20,20 @@ Planned platforms: Linux (AppImage), Windows, and macOS as a stretch goal.
 ## Building
 
 Requires stable [Rust](https://rustup.rs) and a C toolchain for linking (`gcc` or `clang`).
+On Linux, gamepad support also needs the libudev headers:
+
+```sh
+sudo apt install libudev-dev      # Debian, Ubuntu
+sudo dnf install systemd-devel    # Fedora
+```
 
 ```sh
 cargo build
 cargo test
+cargo run        # opens the input demo window
 ```
+
+The input demo shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
 
 ## Contributing
 

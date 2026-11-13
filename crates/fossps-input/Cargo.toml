@@ -1,0 +1,10 @@
+[package]
+name = "fossps-input"
+description = "Action map for FOSSPS: keyboard, mouse and gamepad feeding named actions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
