@@ -36,3 +36,5 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # A dedicated server reads levels without the image decoders.
+      - run: cargo test -p fossps-assets --no-default-features
