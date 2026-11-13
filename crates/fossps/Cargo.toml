@@ -8,17 +8,17 @@ publish.workspace = true
 
 [features]
 default = ["window"]
-# Opens a window and reads keyboard, mouse and gamepads. A dedicated server
-# builds without it and links no windowing or gamepad libraries.
-window = ["dep:winit", "dep:gilrs", "dep:softbuffer"]
+# Opens a window, draws into it and reads keyboard, mouse and gamepads. A
+# dedicated server builds without it and links no windowing, graphics or
+# gamepad libraries.
+window = ["dep:winit", "dep:gilrs", "dep:fossps-render"]
 
 [dependencies]
 fossps-input = { path = "../fossps-input" }
+fossps-render = { path = "../fossps-render", optional = true }
 log = "0.4"
 winit = { version = "0.30", optional = true }
 gilrs = { version = "0.11", optional = true }
-# Temporary: fills the window until the Vulkan renderer draws into it.
-softbuffer = { version = "0.4", optional = true }
 
 [[bin]]
 name = "fossps"

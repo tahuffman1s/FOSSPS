@@ -1,8 +1,8 @@
 //! FOSSPS: a free, open-source engine for multiplayer FPS games.
 //!
 //! A game implements [`Game`] and hands it to [`run`], which opens a window,
-//! reads keyboard, mouse and gamepad through one action map, and calls the game
-//! at a fixed tick rate.
+//! draws into it with Vulkan, reads keyboard, mouse and gamepad through one
+//! action map, and calls the game at a fixed tick rate.
 //!
 //! ```no_run
 //! use fossps::{Config, Game, InputFrame};
@@ -27,14 +27,14 @@ mod app;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;
-#[cfg(feature = "window")]
-mod placeholder;
 mod tick;
 #[cfg(feature = "window")]
 mod translate;
 
 pub use fossps_input as input;
 pub use fossps_input::{ActionId, ActionMap, InputFrame};
+#[cfg(feature = "window")]
+pub use fossps_render as render;
 
 #[cfg(feature = "window")]
 pub use app::{AppError, Config, run};
