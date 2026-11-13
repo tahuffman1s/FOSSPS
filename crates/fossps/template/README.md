@@ -11,6 +11,13 @@ fossps run
 ```
 
 Click the window to capture the mouse; Escape frees it.
+The window only shows a triangle for now: what the game does is printed in the terminal.
+
+| Action | Keyboard and mouse | Gamepad |
+| ------ | ------------------ | ------- |
+| Jump   | Space              | Bottom face button |
+| Fire   | Left mouse button  | Right trigger |
+| Move   | W A S D            | Left stick |
 
 ## Change it
 
@@ -22,4 +29,4 @@ If there is a mistake, the terminal shows the line and what to try, and the game
 `fossps.d.luau` describes everything a script can use. In VS Code, install the
 [Luau Language Server](https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp)
 extension and open this folder: `.vscode/settings.json` already points it at that file.
-`fossps run` keeps `fossps.d.luau` up to date, so don't edit it.
+`fossps.d.luau` belongs to the engine: `fossps run` rewrites it when FOSSPS is updated, so don't edit it.

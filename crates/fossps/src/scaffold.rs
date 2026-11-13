@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use fossps_script::{ENTRY_SCRIPT, TYPE_DEFINITIONS};
@@ -44,12 +44,12 @@ pub enum NewGameError {
     },
     /// The folder already has something in it.
     NotEmpty {
-        /// The folder.
+        /// The folder, as it was asked for.
         folder: PathBuf,
     },
     /// The path is taken by a file.
     NotAFolder {
-        /// The path.
+        /// The path, as it was asked for.
         path: PathBuf,
     },
     /// The operating system refused to create or write something.
@@ -71,10 +71,9 @@ impl fmt::Display for NewGameError {
             ),
             Self::NotEmpty { folder } => write!(
                 f,
-                "{} already has files in it, so nothing was changed. Pick a name that is \
-                 not taken yet. If that folder is already a game, play it with \
-                 `fossps run`.",
-                folder.display()
+                "{folder} already has files in it, so nothing was changed. Pick a new \
+                 folder name, or if it is already a game, play it with `fossps run {folder}`.",
+                folder = folder.display()
             ),
             Self::NotAFolder { path } => write!(
                 f,
@@ -129,7 +128,9 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
     let name = game_name(&folder)?;
 
     if folder.is_file() {
-        return Err(NewGameError::NotAFolder { path: folder });
+        return Err(NewGameError::NotAFolder {
+            path: path.to_owned(),
+        });
     }
     let existed = folder.is_dir();
     if existed {
@@ -138,7 +139,9 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
             source,
         })?;
         if entries.next().is_some() {
-            return Err(NewGameError::NotEmpty { folder });
+            return Err(NewGameError::NotEmpty {
+                folder: path.to_owned(),
+            });
         }
     }
 
@@ -159,24 +162,36 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
         ),
     ];
 
+    // Only what this call made is removed again if a later step fails, so a
+    // file someone else put there in the meantime is never touched.
+    let had_editor_folder = editor_folder.is_dir();
+    let mut made = 0;
     let written = fs::create_dir_all(&editor_folder)
         .map_err(|source| NewGameError::Io {
             path: editor_folder.clone(),
             source,
         })
         .and_then(|()| {
-            files
-                .iter()
-                .try_for_each(|(path, text)| write_new(path, text))
+            files.iter().try_for_each(|(path, text)| {
+                create_new(path)?;
+                made += 1;
+                fs::write(path, text).map_err(|source| NewGameError::Io {
+                    path: path.clone(),
+                    source,
+                })
+            })
         });
 
     if let Err(error) = written {
-        // Leave nothing half-made behind. Removing is best effort: the error
-        // worth reporting is the one that stopped the game being created.
-        for (path, _) in &files {
+        // Removing is best effort: the error worth reporting is the one that
+        // stopped the game being created. `remove_dir` only removes an empty
+        // folder.
+        for (path, _) in &files[..made] {
             let _ = fs::remove_file(path);
         }
-        let _ = fs::remove_dir(&editor_folder);
+        if !had_editor_folder {
+            let _ = fs::remove_dir(&editor_folder);
+        }
         if !existed {
             let _ = fs::remove_dir(&folder);
         }
@@ -211,13 +226,13 @@ pub fn refresh_types(folder: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Writes `text` to a file that must not exist yet.
-fn write_new(path: &Path, text: &str) -> Result<(), NewGameError> {
+/// Creates an empty file that must not exist yet.
+fn create_new(path: &Path) -> Result<(), NewGameError> {
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map(drop)
         .map_err(|source| NewGameError::Io {
             path: path.to_owned(),
             source,
@@ -275,7 +290,7 @@ fn name_problem(name: &str) -> Option<String> {
         return Some(if bad.is_control() {
             "it has a character that cannot be typed, such as a tab or a line break".to_owned()
         } else {
-            format!("it has a {bad} in it, which Windows does not allow in folder names")
+            format!("it contains '{bad}', which Windows does not allow in folder names")
         });
     }
     // Windows reserves these with any extension too: `nul.txt` is still `nul`.

@@ -140,6 +140,21 @@ fn run_with_a_folder_that_does_not_exist_says_so() {
 }
 
 #[test]
+fn run_with_a_file_asks_for_the_folder() {
+    let folder = scratch("run-file");
+    fs::write(folder.join("main.luau"), "").unwrap();
+
+    let output = fossps(&folder, &["run", "main.luau"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("main.luau is a file"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn no_arguments_shows_help_and_succeeds() {
     let folder = scratch("bare");
 

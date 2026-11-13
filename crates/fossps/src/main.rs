@@ -34,7 +34,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Create a new game that is ready to play
-    #[command(after_help = "Example:\n  fossps new my-game")]
+    #[command(
+        after_help = "Examples:\n  fossps new my-game\n  fossps new \"Zombie Night\"    \
+                            A name with a space needs quotes"
+    )]
     New {
         /// The folder to create. Its name becomes the game's name
         folder: PathBuf,
@@ -118,6 +121,13 @@ fn new(folder: &Path) -> Result<(), String> {
 
 /// `fossps run`: plays the game in `folder` until its window is closed.
 fn run(folder: &Path) -> Result<(), String> {
+    if folder.is_file() {
+        return Err(format!(
+            "{} is a file. `fossps run` takes the game's folder, the one with \
+             {ENTRY_SCRIPT} in it; inside that folder, plain `fossps run` is enough.",
+            folder.display()
+        ));
+    }
     if !folder.is_dir() {
         return Err(format!(
             "There is no folder called {}. Check the spelling, or create a game there \
@@ -129,12 +139,16 @@ fn run(folder: &Path) -> Result<(), String> {
 
     let mut config = Config::default();
     let game = ScriptGame::open(folder, &config.actions).map_err(|error| match error {
-        OpenError::Missing { path } => format!(
-            "There is no game here: {} does not exist.\n\
+        OpenError::Missing { .. } => format!(
+            "There is no game here: {} has no {ENTRY_SCRIPT} in it.\n\
              Run `fossps run` from inside a game's folder, or name the folder: \
              `fossps run my-game`.\n\
-             To create a new game: `fossps new my-game`.",
-            path.display()
+             To make a new game: `fossps new my-game`.",
+            if folder == Path::new(".") {
+                "this folder".to_owned()
+            } else {
+                folder.display().to_string()
+            }
         ),
         other @ OpenError::Unreadable { .. } => other.to_string(),
     })?;

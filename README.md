@@ -31,7 +31,7 @@ sudo dnf install gcc-c++ systemd-devel    # Fedora
 cargo build
 cargo test
 cargo run -- new my-game      # creates a game in the folder my-game
-cargo run -- run my-game      # plays it
+cargo run -- run my-game      # plays it (the first "run" is cargo's)
 cargo run -- demo             # opens the input demo window
 ```
 
