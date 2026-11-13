@@ -48,3 +48,14 @@ A graphical editor for FPS maps and game modes only, built after the engine ship
 - Play from where you stand, and return to editing with one key (#42)
 - Blockout boxes and ramps, and dropping in models (#43)
 - Checks that say what to fix before you play (#44)
+
+Making it easy without making it small:
+
+- The game mode writes your to-do list (#46)
+- Shapes sized to the player: cover, jump, climb (#47)
+- Build while standing in the map, with a controller (#48)
+- See travel time and sight lines on the map (#49)
+- Mirror mode for two-team maps (#50)
+- Script values become sliders (#51)
+- No save button, and a history you can scrub (#52)
+- One search box for everything, and panels that stay out of the way (#53)
