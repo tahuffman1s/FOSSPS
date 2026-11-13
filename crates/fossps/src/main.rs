@@ -1,10 +1,13 @@
-//! Opens a window and shows live input, so the action map can be tried by hand.
+//! Plays the game in a folder, or with no game shows live input so the action
+//! map can be tried by hand.
 
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use fossps::input::ActionKind;
-use fossps::{ActionId, ActionMap, Config, Frame, Game, InputFrame};
+use fossps::script::ENTRY_SCRIPT;
+use fossps::{ActionId, ActionMap, Config, Frame, Game, InputFrame, ScriptGame};
 
 /// Prints log messages to standard error.
 struct StderrLog;
@@ -88,20 +91,63 @@ impl Game for InputDemo {
     }
 }
 
+/// Runs `game` and turns the result into the program's exit code.
+fn play(config: Config, game: impl Game) -> ExitCode {
+    match fossps::run(config, game) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     // If another logger is already installed, messages go there instead.
     if log::set_logger(&LOG).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
     }
-    log::info!(
-        "Click the window to capture the mouse, then use keyboard, mouse or a gamepad. \
-         Escape frees the mouse."
-    );
 
-    let config = Config::default();
-    let demo = InputDemo::new(config.actions.clone());
-    match fossps::run(config, demo) {
-        Ok(()) => ExitCode::SUCCESS,
+    // `fossps <folder>` plays the game in that folder; plain `fossps` plays the
+    // game in the current folder if there is one.
+    let folder = match std::env::args_os().nth(1) {
+        Some(folder) => Some(PathBuf::from(folder)),
+        None => Path::new(ENTRY_SCRIPT)
+            .is_file()
+            .then(|| PathBuf::from(".")),
+    };
+    let mut config = Config::default();
+
+    let Some(folder) = folder else {
+        log::info!(
+            "No game folder given, so this is the input demo. To play a game, run \
+             `fossps <folder>` with a folder that has a {ENTRY_SCRIPT} in it."
+        );
+        log::info!(
+            "Click the window to capture the mouse, then use keyboard, mouse or a gamepad. \
+             Escape frees the mouse."
+        );
+        let demo = InputDemo::new(config.actions.clone());
+        return play(config, demo);
+    };
+
+    match ScriptGame::open(&folder, &config.actions) {
+        Ok(game) => {
+            let script = folder.join(ENTRY_SCRIPT);
+            log::info!(
+                "Playing {}. Edit the file and save it to see changes right away.",
+                script.display()
+            );
+            if let Some(name) = folder
+                .canonicalize()
+                .ok()
+                .as_deref()
+                .and_then(Path::file_name)
+            {
+                config.title = format!("{} | FOSSPS", name.to_string_lossy());
+            }
+            play(config, game)
+        }
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE

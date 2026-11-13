@@ -24,3 +24,13 @@ One dated line per non-obvious choice. Newest at the bottom.
 - 2026-11-13 — Frames are drawn in `RedrawRequested`, requested after each loop pass. Acquiring an image times out after 100 ms and a skipped frame pauses drawing for 250 ms, so a hidden window cannot stall the simulation.
 - 2026-11-13 — The swapchain is rebuilt on resize or `OUT_OF_DATE` only, never on `SUBOPTIMAL` alone, which can persist and cause a rebuild loop.
 - 2026-11-13 — The triangle is tested by drawing it without a window and checking pixels. The test skips where Vulkan 1.3 is missing unless `FOSSPS_REQUIRE_VULKAN=1`, which Linux CI sets after installing lavapipe.
+- 2026-11-13 — Scripting is its own crate, `fossps-script`, on `mlua` 0.12 with the `luau` feature. Luau is compiled from source, so building now needs a C++ compiler.
+- 2026-11-13 — Scripts get a ready-made `game` global instead of `require("fossps")`: one line less to learn, and the Luau language server types globals from one definitions file with no per-project setup.
+- 2026-11-13 — Scripts register functions (`game.onTick(function(step) ... end)`) rather than defining magic global names like LÖVE's `love.update`: a misspelled name is an error with a suggestion instead of silence, and editors can type the handler's arguments.
+- 2026-11-13 — Reading a member of `game` that does not exist is an error naming the closest real one; `game` is read-only.
+- 2026-11-13 — Each reload runs the saved file in a brand-new sandboxed VM. Script variables reset; engine state is untouched. `onStart` does not run again, `onReload` does. Keeping chosen script values across reloads is a follow-up.
+- 2026-11-13 — A reload that fails keeps the previous version running. A runtime error in one handler is reported once per version and the other handlers keep running.
+- 2026-11-13 — Saves are found by checking the file's time and size every 100 ms, and loaded once two checks agree. No file-watcher dependency: polling behaves the same on every platform and with editors that save by rename.
+- 2026-11-13 — One call into a script may run for 1 second and a script may use 256 MB. A script stopped for running too long is paused until the next save, so an endless loop cannot freeze the game on every tick; catching the stop with `pcall` does not avoid it.
+- 2026-11-13 — `require` is not available yet (a game is one `main.luau`); calling it says so. Multi-file games are a follow-up.
+- 2026-11-13 — `fossps <folder>` plays the game in that folder, and plain `fossps` plays the current folder if it has a `main.luau`; otherwise it shows the input demo. #4 replaces this with `fossps run`.

@@ -15,6 +15,7 @@ window = ["dep:winit", "dep:gilrs", "dep:fossps-render"]
 
 [dependencies]
 fossps-input = { path = "../fossps-input" }
+fossps-script = { path = "../fossps-script" }
 fossps-render = { path = "../fossps-render", optional = true }
 log = "0.4"
 winit = { version = "0.30", optional = true }

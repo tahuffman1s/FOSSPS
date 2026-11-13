@@ -6,7 +6,7 @@ A free, open-source engine for multiplayer first-person shooters.
 
 [![CI](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml/badge.svg)](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml)
 
-**Status:** just started. Nothing is playable yet. So far: a window with a Vulkan 1.3 triangle in it, a fixed-rate main loop, and keyboard, mouse and gamepad input through one action map.
+**Status:** just started. Nothing is playable yet. So far: a window with a Vulkan 1.3 triangle in it, a fixed-rate main loop, keyboard, mouse and gamepad input through one action map, and Luau scripts that reload when you save them.
 
 ## Goals
 
@@ -19,21 +19,51 @@ Planned platforms: Linux (AppImage), Windows, and macOS as a stretch goal.
 
 ## Building
 
-Requires stable [Rust](https://rustup.rs) and a C toolchain for linking (`gcc` or `clang`).
+Requires stable [Rust](https://rustup.rs) and a C and C++ compiler (`gcc` and `g++`, `clang`, or the Visual Studio build tools); the Luau scripting language is built from source.
 On Linux, gamepad support also needs the libudev headers:
 
 ```sh
-sudo apt install libudev-dev      # Debian, Ubuntu
-sudo dnf install systemd-devel    # Fedora
+sudo apt install g++ libudev-dev          # Debian, Ubuntu
+sudo dnf install gcc-c++ systemd-devel    # Fedora
 ```
 
 ```sh
 cargo build
 cargo test
-cargo run        # opens the demo window
+cargo run                     # opens the input demo window
+cargo run -- examples/hello   # plays a scripted game
 ```
 
 Running it needs a graphics driver with Vulkan 1.3; building does not need the Vulkan SDK. If the demo says Vulkan is missing or too old, update your graphics driver (on Linux, also install your distribution's Vulkan loader package, for example `sudo dnf install vulkan-loader`). The demo draws a triangle and shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
+
+## Scripting
+
+A game is a folder with a `main.luau` in it. The engine runs that file, and loads it again every time you save it, without restarting:
+
+```lua
+game.onStart(function()
+    print("Hello from Luau!")
+end)
+
+game.onTick(function(step)
+    if game.input.justPressed("jump") then
+        print("Jump!")
+    end
+end)
+```
+
+`print` writes to the terminal you started the game from. `game.input` reads actions by name (`jump`, `fire`, `move`, `look`, `reload` and [the rest of the standard set](crates/fossps-input/src/map.rs)), so the same line works for keyboard, mouse and gamepad. When a script has a mistake, the game keeps running and the terminal shows the file, the line and what to try:
+
+```text
+Script error in main.luau, line 1:
+
+     1 | game.onTik(function() end)
+
+  game.onTik does not exist. Did you mean game.onTick?
+  The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.
+```
+
+So far scripts can react to the game starting, to each tick and to input, and a game is a single `main.luau` (`require` comes later, as does the game-mode API). For autocomplete in your editor, point the Luau language server at [`crates/fossps-script/types/fossps.d.luau`](crates/fossps-script/types/fossps.d.luau).
 
 ## Contributing
 
