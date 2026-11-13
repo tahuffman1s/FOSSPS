@@ -28,7 +28,7 @@ cargo test
 
 ## Contributing
 
-Work is tracked in [issues](https://github.com/tahuffman1s/FOSSPS/issues) grouped by milestone. Changes land through pull requests that pass CI on Linux, Windows and macOS.
+Work is tracked in [issues](https://github.com/tahuffman1s/FOSSPS/issues) grouped by milestone. Changes land through pull requests that pass CI on Linux, Windows and macOS. Each pull request also gets an automated code review from Claude; you can ask it questions by mentioning `@claude` in a comment (maintainers only).
 
 ## License
 
