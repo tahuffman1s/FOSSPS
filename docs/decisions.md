@@ -14,5 +14,13 @@ One dated line per non-obvious choice. Newest at the bottom.
 - 2026-11-13 — A missing gamepad or keyboard binding is a startup warning, not an error, so a half-finished prototype still runs.
 - 2026-11-13 — All connected gamepads feed one player; the active pad is the one last pushed firmly (past half way), so drift on an idle pad cannot take over. Gamepad input is ignored while the window is unfocused.
 - 2026-11-13 — Simulation defaults to 60 ticks per second, with at most 5 catch-up ticks per frame and stalls over 250 ms dropped.
-- 2026-11-13 — Until the renderer exists the main loop sleeps until the next tick, and `softbuffer` fills the window with a solid colour because Wayland hides windows that have drawn nothing. Both are replaced in #2.
+- 2026-11-13 — Until the renderer exists the main loop sleeps until the next tick, and `softbuffer` fills the window with a solid colour because Wayland hides windows that have drawn nothing. Both are replaced in #2. (Done: superseded by the renderer entries below.)
 - 2026-11-13 — Escape always frees the mouse (and still reaches the action map); the click that captures the mouse is not passed to the game.
+- 2026-11-13 — The renderer is its own crate, `fossps-render`, on `ash` 0.38 with the `loaded` feature: raw Vulkan handles stay reachable for FSR, and building needs no Vulkan SDK because the library is found at startup.
+- 2026-11-13 — Shaders are WGSL compiled to SPIR-V by `naga` in `build.rs`: pure Rust, so no `glslc` or SDK to install. Revisit if a technique needs something naga cannot express.
+- 2026-11-13 — Dynamic rendering and synchronization2 (both core in Vulkan 1.3) are required from the start; there are no render pass or framebuffer objects.
+- 2026-11-13 — GPU choice: dedicated over built-in over software, first listed wins a tie. When none qualifies the error lists every card with its reason.
+- 2026-11-13 — `vsync` (default on) is the one display setting: on is FIFO; off is MAILBOX, else IMMEDIATE, else FIFO. No frame limiter yet.
+- 2026-11-13 — Frames are drawn in `RedrawRequested`, requested after each loop pass. Acquiring an image times out after 100 ms and a skipped frame pauses drawing for 250 ms, so a hidden window cannot stall the simulation.
+- 2026-11-13 — The swapchain is rebuilt on resize or `OUT_OF_DATE` only, never on `SUBOPTIMAL` alone, which can persist and cause a rebuild loop.
+- 2026-11-13 — The triangle is tested by drawing it without a window and checking pixels. The test skips where Vulkan 1.3 is missing unless `FOSSPS_REQUIRE_VULKAN=1`, which Linux CI sets after installing lavapipe.

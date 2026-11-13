@@ -6,7 +6,7 @@ A free, open-source engine for multiplayer first-person shooters.
 
 [![CI](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml/badge.svg)](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml)
 
-**Status:** just started. Nothing is playable yet. So far: a window, a fixed-rate main loop, and keyboard, mouse and gamepad input through one action map.
+**Status:** just started. Nothing is playable yet. So far: a window with a Vulkan 1.3 triangle in it, a fixed-rate main loop, and keyboard, mouse and gamepad input through one action map.
 
 ## Goals
 
@@ -30,10 +30,10 @@ sudo dnf install systemd-devel    # Fedora
 ```sh
 cargo build
 cargo test
-cargo run        # opens the input demo window
+cargo run        # opens the demo window
 ```
 
-The input demo shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
+Running it needs a graphics driver with Vulkan 1.3; building does not need the Vulkan SDK. If the demo says Vulkan is missing or too old, update your graphics driver (on Linux, also install your distribution's Vulkan loader package, for example `sudo dnf install vulkan-loader`). The demo draws a triangle and shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
 
 ## Contributing
 

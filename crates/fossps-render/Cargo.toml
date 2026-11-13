@@ -1,0 +1,22 @@
+[package]
+name = "fossps-render"
+description = "The FOSSPS Vulkan 1.3 renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `loaded` finds the Vulkan library when the game starts, so building FOSSPS
+# needs no Vulkan SDK.
+ash = { version = "0.38", default-features = false, features = ["loaded", "std", "debug"] }
+ash-window = "0.13"
+raw-window-handle = { version = "0.6", features = ["std"] }
+log = "0.4"
+
+[build-dependencies]
+# Compiles the shaders in `shaders/` to SPIR-V, so no system shader compiler is needed.
+naga = { version = "30", default-features = false, features = ["wgsl-in", "spv-out"] }
+
+[lints]
+workspace = true

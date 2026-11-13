@@ -27,7 +27,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        # mesa-vulkan-drivers brings lavapipe, a software Vulkan, so the
+        # renderer's drawing test runs for real instead of being skipped.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+          echo "FOSSPS_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

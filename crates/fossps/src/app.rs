@@ -2,9 +2,10 @@
 
 use std::fmt;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fossps_input::{ActionMap, Input, MouseWheel};
+use fossps_render::{RenderConfig, RenderError, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
@@ -14,7 +15,6 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::game::{Frame, Game};
 use crate::gamepad::Gamepads;
-use crate::placeholder::Placeholder;
 use crate::tick::TickClock;
 use crate::translate;
 
@@ -23,6 +23,13 @@ const PIXELS_PER_NOTCH: f32 = 40.0;
 
 /// The most wheel notches one scroll event may add up to.
 const MOST_NOTCHES_PER_EVENT: f32 = 16.0;
+
+/// How long to leave the window alone after a frame could not be drawn.
+///
+/// A hidden or minimised window cannot be drawn into, and on some systems
+/// finding that out takes a while. Trying only now and then keeps the
+/// simulation on time while the window is out of sight.
+const PAUSE_AFTER_SKIPPED_FRAME: Duration = Duration::from_millis(250);
 
 /// How the engine should start.
 #[derive(Debug, Clone)]
@@ -35,18 +42,32 @@ pub struct Config {
     pub height: u32,
     /// Simulation ticks per second.
     pub tick_rate: u32,
+    /// Wait for the display before showing each frame.
+    ///
+    /// On: no tearing, and the frame rate matches the display. Off: frames are
+    /// drawn as fast as possible for the lowest input delay, but this uses more
+    /// power and can show a visible split line (tearing).
+    ///
+    /// ```
+    /// let config = fossps::Config {
+    ///     vsync: false,
+    ///     ..fossps::Config::default()
+    /// };
+    /// ```
+    pub vsync: bool,
     /// The actions the game reads and what they are bound to.
     pub actions: ActionMap,
 }
 
 impl Default for Config {
-    /// A 1280x720 window, 60 ticks per second and the standard FPS controls.
+    /// A 1280x720 window, 60 ticks per second, vsync on and the standard FPS controls.
     fn default() -> Self {
         Self {
             title: "FOSSPS".to_owned(),
             width: 1280,
             height: 720,
             tick_rate: 60,
+            vsync: true,
             actions: ActionMap::default_fps(),
         }
     }
@@ -59,6 +80,8 @@ pub enum AppError {
     EventLoop(winit::error::EventLoopError),
     /// The window could not be created.
     Window(winit::error::OsError),
+    /// The renderer could not start or stopped working.
+    Render(RenderError),
 }
 
 impl fmt::Display for AppError {
@@ -75,6 +98,7 @@ impl fmt::Display for AppError {
                 "Could not open the game window: {error}. \
                  Check that your graphics drivers are installed and try a smaller window size."
             ),
+            Self::Render(error) => error.fmt(f),
         }
     }
 }
@@ -84,6 +108,7 @@ impl std::error::Error for AppError {
         match self {
             Self::EventLoop(error) => Some(error),
             Self::Window(error) => Some(error),
+            Self::Render(error) => error.source(),
         }
     }
 }
@@ -99,7 +124,9 @@ impl std::error::Error for AppError {
 ///
 /// # Errors
 ///
-/// Fails if the window system cannot be reached or the window cannot be created.
+/// Fails if the window system cannot be reached, the window cannot be created,
+/// or no graphics card here can draw with Vulkan 1.3. The error's message says
+/// what to do about it.
 pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
     for gap in config.actions.parity_gaps() {
         log::warn!("{gap}");
@@ -111,8 +138,10 @@ pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
         gamepads: Gamepads::new(),
         config,
         game,
+        renderer: None,
         window: None,
-        placeholder: None,
+        occluded: false,
+        draw_after: Instant::now(),
         focused: false,
         captured: false,
         scroll: 0.0,
@@ -130,10 +159,14 @@ struct App<G> {
     input: Input,
     clock: TickClock,
     gamepads: Gamepads,
+    /// Draws into the window. Declared before it so it is dropped first.
+    renderer: Option<Renderer>,
     /// Created once the window system is ready for it.
     window: Option<Rc<Window>>,
-    /// Fills the window until the renderer exists.
-    placeholder: Option<Placeholder>,
+    /// Whether the window is completely hidden, so drawing would be wasted.
+    occluded: bool,
+    /// Drawing is not tried before this time. Pushed back when a frame is skipped.
+    draw_after: Instant,
     focused: bool,
     /// Whether the mouse is captured for looking around.
     captured: bool,
@@ -201,7 +234,30 @@ impl<G: Game> App<G> {
         }
     }
 
-    /// Runs the ticks that are due, then presents one frame.
+    /// Draws one frame. A renderer failure ends the main loop.
+    fn draw(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.can_draw() {
+            return;
+        }
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        match renderer.render() {
+            Ok(true) => {}
+            Ok(false) => self.draw_after = Instant::now() + PAUSE_AFTER_SKIPPED_FRAME,
+            Err(error) => {
+                self.error = Some(AppError::Render(error));
+                event_loop.exit();
+            }
+        }
+    }
+
+    /// Whether it is worth trying to draw a frame right now.
+    fn can_draw(&self) -> bool {
+        !self.occluded && Instant::now() >= self.draw_after
+    }
+
+    /// Runs the ticks that are due and lets the game prepare the next frame.
     fn update(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame);
@@ -232,7 +288,18 @@ impl<G: Game> ApplicationHandler for App<G> {
         match event_loop.create_window(attributes) {
             Ok(window) => {
                 let window = Rc::new(window);
-                self.placeholder = Placeholder::new(&window);
+                let size = window.inner_size();
+                let config = RenderConfig {
+                    vsync: self.config.vsync,
+                };
+                match Renderer::new(Rc::clone(&window), size.width, size.height, config) {
+                    Ok(renderer) => self.renderer = Some(renderer),
+                    Err(error) => {
+                        self.error = Some(AppError::Render(error));
+                        event_loop.exit();
+                        return;
+                    }
+                }
                 window.request_redraw();
                 self.window = Some(window);
                 self.last_frame = Instant::now();
@@ -247,15 +314,17 @@ impl<G: Game> ApplicationHandler for App<G> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => {
-                if let Some(placeholder) = &mut self.placeholder {
-                    placeholder.draw();
+            WindowEvent::RedrawRequested => self.draw(event_loop),
+            WindowEvent::Resized(size) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(size.width, size.height);
                 }
+                // A window that was minimised may be back.
+                self.draw_after = Instant::now();
             }
-            WindowEvent::Resized(_) => {
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                self.draw_after = Instant::now();
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
@@ -329,8 +398,16 @@ impl<G: Game> ApplicationHandler for App<G> {
             return;
         }
         self.update();
-        // Until a renderer paces the loop, sleep until the next tick is due
-        // instead of spinning a CPU core.
+        // Drawing happens when the window system delivers the redraw. With
+        // vsync a frame takes as long as the display allows, and that paces
+        // the loop.
+        if self.can_draw()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+        // While nothing is drawn (a hidden or minimised window), sleep until
+        // the next tick is due instead of spinning a CPU core.
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + self.clock.until_next_tick(),
         ));
