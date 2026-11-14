@@ -27,6 +27,10 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 
 - Headless dedicated server binary with a fixed-tick simulation (#10)
 - Snapshot replication with client prediction and reconciliation (#11)
+- Netcode packets over UDP, with joining, leaving and timeouts (#161)
+- Players move through the netcode in `fossps run` and `fossps serve` (#162)
+- Other players move smoothly between snapshots (#163)
+- Each player's waiting commands held at the target by nudging their tick rate (#164)
 - Lag compensation for hit registration (#12)
 - Game-mode script API (teams, rounds, spawns, scoring) and a sample team deathmatch (#13)
 - Server browser or direct-connect flow that works in one step (#14)
