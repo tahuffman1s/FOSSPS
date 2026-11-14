@@ -288,20 +288,30 @@ pub(crate) fn closest<'a>(
         .map(|(_, candidate)| candidate)
 }
 
-/// How many single-character edits turn `a` into `b`.
+/// How many slips of the finger turn `a` into `b`: a letter added, missed
+/// or wrong, or two neighbouring letters swapped.
 fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, from) in a.chars().enumerate() {
-        let mut diagonal = row[0];
+    // Three rows are enough: a swap looks two rows back.
+    let mut before: Vec<usize> = vec![0; b.len() + 1];
+    let mut last: Vec<usize> = (0..=b.len()).collect();
+    let mut row: Vec<usize> = vec![0; b.len() + 1];
+    for i in 0..a.len() {
         row[0] = i + 1;
-        for (j, to) in b.iter().enumerate() {
-            let substitute = diagonal + usize::from(from != *to);
-            diagonal = row[j + 1];
-            row[j + 1] = substitute.min(row[j] + 1).min(diagonal + 1);
+        for j in 0..b.len() {
+            let mut best = (last[j] + usize::from(a[i] != b[j]))
+                .min(row[j] + 1)
+                .min(last[j + 1] + 1);
+            if i > 0 && j > 0 && a[i] == b[j - 1] && a[i - 1] == b[j] {
+                best = best.min(before[j - 1] + 1);
+            }
+            row[j + 1] = best;
         }
+        std::mem::swap(&mut before, &mut last);
+        std::mem::swap(&mut last, &mut row);
     }
-    row[b.len()]
+    last[b.len()]
 }
 
 #[cfg(test)]
@@ -325,13 +335,16 @@ mod tests {
         let names = ["onStart", "onTick", "onReload", "input"];
         assert_eq!(closest("onTik", names), Some("onTick"));
         assert_eq!(closest("ontick", names), Some("onTick"));
+        assert_eq!(closest("onTcik", names), Some("onTick"), "swapped letters");
         assert_eq!(closest("spawnBot", names), None);
     }
 
     #[test]
     fn edit_distance_counts_edits() {
         assert_eq!(edit_distance("fire", "fire"), 0);
-        assert_eq!(edit_distance("fier", "fire"), 2);
+        assert_eq!(edit_distance("fier", "fire"), 1, "two letters swapped");
+        assert_eq!(edit_distance("fxre", "fire"), 1);
+        assert_eq!(edit_distance("fr", "fire"), 2);
         assert_eq!(edit_distance("", "abc"), 3);
     }
 

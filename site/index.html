@@ -159,16 +159,18 @@
       <div>
 <pre class="mono"><span class="com">-- main.luau: a whole team deathmatch</span>
 game.mode {
-  name = <span class="str">"Team Deathmatch"</span>,
   teams = { <span class="str">"Red"</span>, <span class="str">"Blue"</span> },
   scoreToWin = <span class="num">50</span>,
+  respawnDelay = <span class="num">3</span>,
 }
 
+<span class="com">-- A rule of your own: team kills cost a point</span>
 game.onKill(<span class="kw">function</span>(killer, victim)
-  killer.team:addScore(<span class="num">1</span>)
-  victim:respawnAfter(<span class="num">3</span>)
+  <span class="kw">if</span> killer <span class="kw">and</span> killer.team == victim.team <span class="kw">then</span>
+    killer.team:addScore(<span class="num">-1</span>)
+  <span class="kw">end</span>
 <span class="kw">end</span>)</pre>
-        <p class="note">A design sketch of the target experience. The API does not exist yet and will change.</p>
+        <p class="note">This script runs today: the engine keeps the teams, the score, the respawns and the rounds, and tests play it to a win. Players cannot join a running game yet: playing it over a network, with a scoreboard on screen, is still being built.</p>
       </div>
     </div>
   </section>

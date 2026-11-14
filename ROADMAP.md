@@ -32,7 +32,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 - Other players move smoothly between snapshots (#163)
 - Each player's waiting commands held at the target by nudging their tick rate (#164)
 - Lag compensation for hit registration (#12)
-- Game-mode script API (teams, rounds, spawns, scoring) and a sample team deathmatch (#13)
+- Game-mode script API (teams, rounds, spawns, scoring) and a sample team deathmatch (#13), then played in a running match with the map's spawn points (#171), with a scoreboard and round clock on screen (#172) and spawn points chosen out of enemies' sight (#173)
 - Server browser or direct-connect flow that works in one step (#14)
 - Shots and jumps count from the moment they were pressed, not the next tick (#74)
 - Bad-connection simulator and a network graph (#109)

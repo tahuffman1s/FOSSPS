@@ -46,6 +46,12 @@ impl ScriptGame {
     pub fn host(&self) -> &ScriptHost {
         &self.host
     }
+
+    /// The script host, to tell it what players do: who joined, who left and
+    /// who killed whom.
+    pub fn host_mut(&mut self) -> &mut ScriptHost {
+        &mut self.host
+    }
 }
 
 impl Game for ScriptGame {

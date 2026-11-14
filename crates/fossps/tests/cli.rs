@@ -179,6 +179,50 @@ fn a_misspelled_command_suggests_the_right_one() {
 }
 
 #[test]
+fn check_plays_a_pretend_match_through_the_team_deathmatch_example() {
+    let folder = scratch("check-mode");
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/team-deathmatch");
+
+    let output = fossps(&folder, &["check", &example.display().to_string()]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("a pretend match was played"),
+        "{}",
+        stdout(&output)
+    );
+    // The mode's own functions really ran.
+    for line in [
+        "Check Bot 1 joined Red.",
+        "Check Bot 1 killed Check Bot 2.",
+        "Red wins the round!",
+        "Check Bot 2 left.",
+    ] {
+        assert!(stderr(&output).contains(line), "{}", stderr(&output));
+    }
+}
+
+#[test]
+fn check_reports_a_mistake_that_only_a_match_reaches() {
+    let folder = scratch("check-mode-mistake");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    std::fs::write(
+        folder.join("game").join("main.luau"),
+        "game.onKill(function(killer, victim) print(victim.nmae) end)",
+    )
+    .unwrap();
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("player.nmae does not exist. Did you mean player.name?"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn check_passes_a_new_game_without_a_window() {
     let folder = scratch("check-ok");
     assert!(fossps(&folder, &["new", "game"]).status.success());

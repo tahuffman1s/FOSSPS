@@ -7,13 +7,29 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use fossps_input::{ActionKind, ActionMap, ActionState, InputFrame};
+use fossps_mode::Rules;
 use mlua::{Function, Lua, MultiValue, Table, Value, Variadic};
 
 use crate::error::{TookTooLong, closest};
+use crate::mode_api::{self, Handles, ModeState};
 
 /// Every function directly on `game`. The type definitions shipped for editors
 /// are tested against this list.
-pub(crate) const GAME_FUNCTIONS: &[&str] = &["onStart", "onTick", "onReload"];
+pub(crate) const GAME_FUNCTIONS: &[&str] = &[
+    "onStart",
+    "onTick",
+    "onReload",
+    "mode",
+    "onPlayerJoin",
+    "onPlayerLeave",
+    "onKill",
+    "onSpawn",
+    "onRoundStart",
+    "onRoundEnd",
+    "players",
+    "teams",
+    "team",
+];
 
 /// Every function on `game.input`.
 pub(crate) const INPUT_FUNCTIONS: &[&str] = &[
@@ -35,6 +51,12 @@ pub(crate) struct Handlers {
     pub start: Vec<Function>,
     pub tick: Vec<Function>,
     pub reload: Vec<Function>,
+    pub join: Vec<Function>,
+    pub leave: Vec<Function>,
+    pub kill: Vec<Function>,
+    pub spawn: Vec<Function>,
+    pub round_start: Vec<Function>,
+    pub round_end: Vec<Function>,
 }
 
 /// State the engine and one script VM both reach.
@@ -51,25 +73,49 @@ pub(crate) struct Shared {
     pub stopped: Cell<Option<TookTooLong>>,
     /// How many times the time limit has been checked.
     pub checks: Cell<u32>,
+    /// The match being played. It outlives this version of the script.
+    pub mode: Rc<ModeState>,
+    /// The values this version of the script holds for players and teams.
+    pub handles: Handles,
+    /// True while the file itself is running, before any handler is called.
+    pub loading: Cell<bool>,
+    /// The rules this version asked for with `game.mode`, and the line it
+    /// did so on.
+    pub rules: RefCell<Option<(Rules, Option<usize>)>>,
 }
+
+/// How far up the stack to look for the script line that made a call.
+/// Reading something from a player goes through a few of the VM's own frames.
+const MAX_FRAMES: usize = 8;
 
 /// An error raised by the engine on the script's behalf, pointing at the
 /// script line that made the call.
-fn fail(lua: &Lua, message: impl Display) -> mlua::Error {
-    let line = lua
-        .inspect_stack(1, |caller| caller.current_line())
-        .flatten();
-    let file = lua
+pub(crate) fn fail(lua: &Lua, message: impl Display) -> mlua::Error {
+    let Some(file) = lua
         .app_data_ref::<Rc<Shared>>()
-        .map(|shared| shared.file.clone());
-    match (file, line) {
-        (Some(file), Some(line)) => mlua::Error::runtime(format!("{file}:{line}: {message}")),
-        _ => mlua::Error::runtime(message),
+        .map(|shared| shared.file.clone())
+    else {
+        return mlua::Error::runtime(message);
+    };
+    // The nearest frame that is in the script itself.
+    let line = (1..MAX_FRAMES).find_map(|level| {
+        lua.inspect_stack(level, |frame| {
+            let in_script = frame
+                .source()
+                .source
+                .is_some_and(|source| source.strip_prefix('@') == Some(file.as_str()));
+            in_script.then(|| frame.current_line()).flatten()
+        })
+        .flatten()
+    });
+    match line {
+        Some(line) => mlua::Error::runtime(format!("{file}:{line}: {message}")),
+        None => mlua::Error::runtime(message),
     }
 }
 
 /// How to name a value's kind in an error message.
-fn describe(value: &Value) -> &'static str {
+pub(crate) fn describe(value: &Value) -> &'static str {
     match value {
         Value::Nil => "nothing",
         Value::Boolean(_) => "true or false",
@@ -118,6 +164,42 @@ pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
         )?,
     )?;
 
+    type List = fn(&mut Handlers) -> &mut Vec<Function>;
+    let events: [(&'static str, &'static str, List); 6] = [
+        (
+            "onPlayerJoin",
+            "game.onPlayerJoin(function(player) ... end)",
+            |h| &mut h.join,
+        ),
+        (
+            "onPlayerLeave",
+            "game.onPlayerLeave(function(player) ... end)",
+            |h| &mut h.leave,
+        ),
+        (
+            "onKill",
+            "game.onKill(function(killer, victim) ... end)",
+            |h| &mut h.kill,
+        ),
+        ("onSpawn", "game.onSpawn(function(player) ... end)", |h| {
+            &mut h.spawn
+        }),
+        (
+            "onRoundStart",
+            "game.onRoundStart(function() ... end)",
+            |h| &mut h.round_start,
+        ),
+        (
+            "onRoundEnd",
+            "game.onRoundEnd(function(winner) ... end)",
+            |h| &mut h.round_end,
+        ),
+    ];
+    for (name, example, list) in events {
+        game.set(name, on_event(lua, shared, name, example, list)?)?;
+    }
+    mode_api::install(lua, shared, &game)?;
+
     let input = lua.create_table()?;
     let any = Reads::Any;
     input.set(
@@ -150,6 +232,7 @@ pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
 
     let mut members = GAME_FUNCTIONS.to_vec();
     members.push("input");
+    members.push("round");
     strict(lua, &game, "game", &members)?;
     globals.set("game", game)?;
 
@@ -282,7 +365,7 @@ fn reader<R: mlua::IntoLuaMulti + 'static>(
 
 /// Makes reading a missing member of `table` an error that names the closest
 /// real one, and stops scripts from changing the table.
-fn strict(
+pub(crate) fn strict(
     lua: &Lua,
     table: &Table,
     path: &'static str,
@@ -332,18 +415,63 @@ fn print(_: &Lua, values: Variadic<Value>) -> mlua::Result<()> {
 mod tests {
     use super::*;
 
+    /// Every name the type definitions declare, as a path such as
+    /// `game.round.phase`, `game.mode.teams` or `Player:addScore`.
+    fn declared() -> Vec<String> {
+        let mut inside: Vec<&str> = Vec::new();
+        let mut names = Vec::new();
+        for line in crate::TYPE_DEFINITIONS.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with("--") {
+                continue;
+            }
+            if line == "end" || line.starts_with('}') {
+                inside.pop();
+            } else if let Some(class) = line.strip_prefix("declare class ") {
+                inside.push(class);
+            } else if line == "declare game: {" {
+                inside.push("game");
+            } else if let Some(method) = line.strip_prefix("function ") {
+                let name = method.split('(').next().unwrap();
+                names.push(format!("{}:{name}", inside.join(".")));
+            } else {
+                let name = line.split(':').next().unwrap();
+                // A table of its own is listed by what is in it.
+                if line == format!("{name}: {{") {
+                    inside.push(name);
+                    continue;
+                }
+                names.push(format!("{}.{name}", inside.join(".")));
+                if line.ends_with('{') {
+                    inside.push(name);
+                }
+            }
+        }
+        assert!(inside.is_empty(), "unclosed: {inside:?}");
+        names.sort();
+        names
+    }
+
     #[test]
     fn type_definitions_describe_exactly_the_real_api() {
-        let declared: Vec<&str> = crate::TYPE_DEFINITIONS
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("--"))
-            .filter_map(|line| line.trim().split_once(": (").map(|(name, _)| name))
-            .collect();
-        let real: Vec<&str> = GAME_FUNCTIONS
+        use crate::mode_api::{
+            MODE_SETTINGS, PLAYER_FIELDS, PLAYER_METHODS, ROUND_FUNCTIONS, TEAM_FIELDS,
+            TEAM_METHODS,
+        };
+        let groups: [(&str, &[&str]); 8] = [
+            ("game.", GAME_FUNCTIONS),
+            ("game.input.", INPUT_FUNCTIONS),
+            ("game.round.", ROUND_FUNCTIONS),
+            ("game.mode.", MODE_SETTINGS),
+            ("Player.", PLAYER_FIELDS),
+            ("Player:", PLAYER_METHODS),
+            ("Team.", TEAM_FIELDS),
+            ("Team:", TEAM_METHODS),
+        ];
+        let mut real: Vec<String> = groups
             .iter()
-            .chain(INPUT_FUNCTIONS)
-            .copied()
+            .flat_map(|(path, names)| names.iter().map(move |name| format!("{path}{name}")))
             .collect();
-        assert_eq!(declared, real);
+        real.sort();
+        assert_eq!(declared(), real);
     }
 }

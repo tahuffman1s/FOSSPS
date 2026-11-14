@@ -25,8 +25,11 @@
 mod api;
 mod error;
 mod host;
+mod mode_api;
 
 pub use error::{OpenError, ScriptError};
+pub use fossps_mode as mode;
+pub use fossps_mode::PlayerId;
 pub use host::{ENTRY_SCRIPT, ScriptHost};
 
 /// Type definitions for the script API, in the format the Luau language

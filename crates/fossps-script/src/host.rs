@@ -4,7 +4,7 @@
 // a script fails to load, never on the tick path, so its size does not matter.
 #![allow(clippy::result_large_err)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,10 +12,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use fossps_input::{ActionMap, InputFrame};
-use mlua::{Function, IntoLuaMulti, Lua, VmState};
+use fossps_mode::{Event, Match, PlayerId};
+use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, VmState};
 
 use crate::api::{self, Handlers, Shared};
 use crate::error::{OpenError, ScriptError, TookTooLong, is_time_limit};
+use crate::mode_api::{Handles, ModeState};
 
 /// The file every game starts from, inside the game's folder.
 pub const ENTRY_SCRIPT: &str = "main.luau";
@@ -34,6 +36,15 @@ const POLL_EVERY: Duration = Duration::from_millis(100);
 /// so a script failing in new ways every tick cannot flood the log.
 const MAX_REPORTED: usize = 32;
 
+/// How many match events are handled in one go. A kill is one event and a
+/// round starting with 64 players is 65, so reaching this means handlers keep
+/// setting each other off.
+const MAX_EVENTS_AT_ONCE: usize = 10_000;
+
+/// How many spawns wait for the engine to place them before the oldest are
+/// dropped. An engine that takes them every tick never comes near it.
+const MAX_WAITING_SPAWNS: usize = 1024;
+
 /// The time limit reads the clock once in this many checks.
 const CLOCK_EVERY: u32 = 256;
 
@@ -48,7 +59,7 @@ const PAUSED: &str =
 /// One loaded version of the script, in its own VM.
 struct Version {
     /// Owns every function in `shared`; they stop working once it is dropped.
-    _vm: Lua,
+    vm: Lua,
     shared: Rc<Shared>,
     source: String,
 }
@@ -123,6 +134,11 @@ pub struct ScriptHost {
     reported: HashSet<String>,
     watch: Watch,
     next_poll: Instant,
+    /// The match. Kept here, outside the script's VM, so that saving the
+    /// script does not reset the score.
+    mode: Rc<ModeState>,
+    /// Players who have come into the world and not yet been given a place.
+    spawns: Vec<PlayerId>,
 }
 
 impl std::fmt::Debug for ScriptHost {
@@ -174,6 +190,8 @@ impl ScriptHost {
                 pending: None,
             },
             next_poll: Instant::now() + POLL_EVERY,
+            mode: Rc::new(ModeState::new()),
+            spawns: Vec::new(),
         };
         // A script error is already logged and kept in `last_error`.
         let _ = host.install(source);
@@ -189,19 +207,74 @@ impl ScriptHost {
     /// Runs one simulation tick of `step` seconds with this tick's `input`.
     ///
     /// The first tick calls the script's `game.onStart` functions before its
-    /// `game.onTick` ones. A function that fails is reported once and the
-    /// others still run.
+    /// `game.onTick` ones. Then the match moves on by one tick, and the
+    /// script is told what happened in it. A function that fails is reported
+    /// once and the others still run.
     pub fn tick(&mut self, input: &InputFrame, step: f32) {
-        let Some(version) = &self.running else { return };
-        if self.paused {
-            return;
+        if let Some(version) = &self.running {
+            version.shared.input.borrow_mut().clone_from(input);
         }
-        version.shared.input.borrow_mut().clone_from(input);
-        if !self.started {
-            self.started = true;
-            self.call_all(|handlers| &handlers.start, ());
-        }
+        self.start();
         self.call_all(|handlers| &handlers.tick, step);
+        self.mode.game.borrow_mut().tick(step);
+        self.tell_script();
+    }
+
+    /// The match being played: the rules the script set with `game.mode`,
+    /// who is in it, the score and where the round is.
+    ///
+    /// ```no_run
+    /// # use fossps_input::ActionMap;
+    /// # use fossps_script::ScriptHost;
+    /// # let host = ScriptHost::open("my-game", ActionMap::default_fps())?;
+    /// for team in host.mode().teams() {
+    ///     println!("{}: {}", team.name, team.score);
+    /// }
+    /// # Ok::<(), fossps_script::OpenError>(())
+    /// ```
+    #[must_use]
+    pub fn mode(&self) -> Ref<'_, Match> {
+        self.mode.game.borrow()
+    }
+
+    /// Adds a player to the match and tells the script. With teams, the
+    /// player is put on the smallest one.
+    pub fn player_joined(&mut self, name: &str) -> PlayerId {
+        let id = self.mode.game.borrow_mut().join(name);
+        self.tell_script();
+        id
+    }
+
+    /// Takes a player out of the match and tells the script. Does nothing if
+    /// they were not in it.
+    pub fn player_left(&mut self, player: PlayerId) {
+        self.mode.game.borrow_mut().leave(player);
+        self.tell_script();
+    }
+
+    /// Records that `victim` died, by `killer`'s hand if there was one, and
+    /// tells the script. Does nothing if the victim is not alive.
+    pub fn player_killed(&mut self, killer: Option<PlayerId>, victim: PlayerId) {
+        self.mode.game.borrow_mut().kill(killer, victim);
+        self.tell_script();
+    }
+
+    /// Ends the round now, as if time had run out: the highest score wins.
+    /// Does nothing unless a round is being played.
+    pub fn end_round(&mut self) {
+        {
+            let mut game = self.mode.game.borrow_mut();
+            let leader = game.leader();
+            game.finish(leader);
+        }
+        self.tell_script();
+    }
+
+    /// The players who have come into the world since this was last called,
+    /// oldest first: each needs putting at a spawn point (see
+    /// [`fossps_mode::choose_spawn`]). Call it every tick.
+    pub fn take_spawns(&mut self) -> std::vec::Drain<'_, PlayerId> {
+        self.spawns.drain(..)
     }
 
     /// Reloads the script if it was saved since it was last loaded.
@@ -255,6 +328,7 @@ impl ScriptHost {
         if self.started {
             self.call_all(|handlers| &handlers.reload, ());
         }
+        self.tell_script();
         Ok(())
     }
 
@@ -262,6 +336,13 @@ impl ScriptHost {
     fn install(&mut self, source: String) -> Result<(), ScriptError> {
         match self.build(source) {
             Ok(version) => {
+                // A script with no `game.mode` plays the default rules.
+                let rules = version.shared.rules.borrow_mut().take();
+                let rules = rules.map(|(rules, _)| rules).unwrap_or_default();
+                // `game.mode` only keeps rules that can be played.
+                if let Err(problem) = self.mode.game.borrow_mut().set_rules(rules) {
+                    log::error!("The rules from game.mode were not used: {problem}");
+                }
                 self.running = Some(version);
                 self.paused = false;
                 self.last_error = None;
@@ -294,6 +375,10 @@ impl ScriptHost {
             deadline: Cell::new(None),
             stopped: Cell::new(None),
             checks: Cell::new(0),
+            mode: Rc::clone(&self.mode),
+            handles: Handles::default(),
+            loading: Cell::new(true),
+            rules: RefCell::new(None),
         });
         let lua = Lua::new();
         let run = || -> mlua::Result<()> {
@@ -329,11 +414,13 @@ impl ScriptHost {
                 }
             });
             let chunk = lua.load(&source).set_name(format!("@{}", self.file));
-            within_time_limit(&shared, || chunk.exec())
+            let result = within_time_limit(&shared, || chunk.exec());
+            shared.loading.set(false);
+            result
         };
         match run() {
             Ok(()) => Ok(Version {
-                _vm: lua,
+                vm: lua,
                 shared,
                 source,
             }),
@@ -341,8 +428,99 @@ impl ScriptHost {
         }
     }
 
+    /// Calls the `game.onStart` functions if they have not been called yet.
+    fn start(&mut self) {
+        if !self.started && self.running.is_some() && !self.paused {
+            self.started = true;
+            self.call_all(|handlers| &handlers.start, ());
+        }
+    }
+
+    /// Tells the script everything that has happened in the match and has
+    /// not been told yet, in order, and notes who needs a spawn point.
+    ///
+    /// What a handler does to the match (a score that ends the round, say)
+    /// is only queued while the handler runs, and told here afterwards, so
+    /// handlers never run inside one another.
+    fn tell_script(&mut self) {
+        let mut told = 0;
+        loop {
+            let event = self.mode.game.borrow_mut().next_event();
+            let Some(event) = event else { break };
+            told += 1;
+            if told == MAX_EVENTS_AT_ONCE {
+                log::error!(
+                    "The script's game.on... functions keep setting each other off \
+                     ({MAX_EVENTS_AT_ONCE} events in one tick), so the rest of this tick's \
+                     events were skipped. Look for a function that causes the event it \
+                     listens to."
+                );
+            }
+            let quiet = told >= MAX_EVENTS_AT_ONCE;
+            if !quiet {
+                self.start();
+            }
+            match event {
+                Event::Joined(id) if !quiet => {
+                    if let Some(player) = self.player(id) {
+                        self.call_all(|handlers| &handlers.join, player);
+                    }
+                }
+                Event::Left(player) => {
+                    let id = player.id;
+                    self.mode.gone.borrow_mut().push(player);
+                    if !quiet && let Some(player) = self.player(id) {
+                        self.call_all(|handlers| &handlers.leave, player);
+                    }
+                }
+                Event::Killed { killer, victim } if !quiet => {
+                    let killer = killer.and_then(|killer| self.player(killer));
+                    if let Some(victim) = self.player(victim) {
+                        self.call_all(|handlers| &handlers.kill, (killer, victim));
+                    }
+                }
+                Event::Spawned(id) => {
+                    if !quiet && let Some(player) = self.player(id) {
+                        self.call_all(|handlers| &handlers.spawn, player);
+                    }
+                    if self.spawns.len() >= MAX_WAITING_SPAWNS {
+                        self.spawns.remove(0);
+                    }
+                    self.spawns.push(id);
+                }
+                Event::RoundStarted if !quiet => {
+                    self.call_all(|handlers| &handlers.round_start, ());
+                }
+                Event::RoundEnded { winner } if !quiet => {
+                    let winner = self.running.as_ref().and_then(|version| {
+                        version.shared.handles.winner(&version.vm, winner).ok()
+                    });
+                    if let Some(winner) = winner {
+                        self.call_all(|handlers| &handlers.round_end, winner);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Everyone has been told, so those who left can be forgotten.
+        for player in self.mode.gone.borrow_mut().drain(..) {
+            if let Some(version) = &self.running {
+                version.shared.handles.forget(player.id);
+            }
+        }
+    }
+
+    /// The running script's value for a player.
+    fn player(&self, id: PlayerId) -> Option<AnyUserData> {
+        let version = self.running.as_ref()?;
+        version.shared.handles.player(&version.vm, id).ok()
+    }
+
     /// Calls every function in one handler list, reporting the ones that fail.
-    fn call_all(&mut self, list: fn(&Handlers) -> &Vec<Function>, args: impl IntoLuaMulti + Copy) {
+    fn call_all(&mut self, list: fn(&Handlers) -> &Vec<Function>, args: impl IntoLuaMulti + Clone) {
+        if self.paused {
+            return;
+        }
         let Some(version) = &self.running else { return };
         // Handlers added while these run are first called on the next pass,
         // so a handler that keeps adding handlers cannot hold up the tick.
@@ -352,7 +530,9 @@ impl ScriptHost {
             // register more handlers while it runs.
             let handler = list(&version.shared.handlers.borrow()).get(index).cloned();
             let Some(handler) = handler else { break };
-            let Err(error) = within_time_limit(&version.shared, || handler.call::<()>(args)) else {
+            let Err(error) =
+                within_time_limit(&version.shared, || handler.call::<()>(args.clone()))
+            else {
                 continue;
             };
             let too_long = is_time_limit(&error);
