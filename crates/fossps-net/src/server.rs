@@ -12,6 +12,11 @@ use crate::wire::NetError;
 /// than the server ticks loses its oldest commands and gains nothing.
 const LONGEST_QUEUE: usize = 8;
 
+/// How many more commands than the buffer asks for may wait before the
+/// oldest are dropped. Without this a burst of late packets would leave
+/// the player that many ticks behind for good.
+const SLACK: usize = 2;
+
 /// How many ticks a late player's last command is repeated before the
 /// server lets go of their keys for them.
 const MOST_REPEATS: u8 = 5;
@@ -23,6 +28,10 @@ pub struct ServerSettings {
     /// commands, at the start and again after running out. More rides out
     /// a rougher connection; each one adds a tick of delay to that
     /// player's moves as others see them. From 1 to 8.
+    ///
+    /// When more than two over this many are waiting, after a burst of
+    /// late packets or from a client running fast, the oldest are dropped
+    /// to get back to it.
     pub buffer: usize,
 }
 
@@ -128,6 +137,7 @@ impl Server {
     /// [`NetError`]s if the packet cannot be read. A packet that fails
     /// changes nothing.
     pub fn receive(&mut self, id: PlayerId, packet: &[u8]) -> Result<(), NetError> {
+        let tick = self.tick;
         let slot = self.slot_mut(id)?;
         // Read into a copy, so a packet that fails halfway leaves no trace.
         let mut queue = slot.queue;
@@ -150,7 +160,8 @@ impl Server {
         slot.queue = queue;
         slot.waiting = waiting;
         slot.newest = newest;
-        slot.read = slot.read.max(header.snapshot);
+        // A client cannot have read a snapshot that is not written yet.
+        slot.read = slot.read.max(header.snapshot.min(tick));
         Ok(())
     }
 
@@ -170,6 +181,13 @@ impl Server {
             }
             if slot.waiting == 0 {
                 slot.filling = true;
+            }
+            if slot.waiting > self.buffer + SLACK {
+                // Too far behind: skip to one more than the buffer, so
+                // that the buffer is what is left after this tick.
+                let dropped = slot.waiting - self.buffer - 1;
+                slot.queue.copy_within(dropped.., 0);
+                slot.waiting -= dropped;
             }
             slot.ran = if slot.filling {
                 slot.repeats = slot.repeats.saturating_add(1);
@@ -203,6 +221,8 @@ impl Server {
     /// over [`MAX_PACKET_BYTES`](crate::MAX_PACKET_BYTES).
     ///
     /// Call it after [`tick`](Self::tick), every tick or every second tick.
+    /// A snapshot written before the first tick says nothing yet, and a
+    /// client skips it.
     ///
     /// # Errors
     ///

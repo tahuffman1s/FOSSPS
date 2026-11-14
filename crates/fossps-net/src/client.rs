@@ -71,6 +71,10 @@ struct Move {
 /// Once per tick: hand every snapshot that arrived to
 /// [`receive`](Self::receive), then call [`predict`](Self::predict) and
 /// send the packet it writes.
+///
+/// A client is good for one stay on one server. Make a new one to join
+/// again or when the server starts afresh: snapshots from a server that
+/// has gone back to tick 1 would all be skipped as old.
 #[derive(Debug, Clone)]
 pub struct Client {
     step: f32,

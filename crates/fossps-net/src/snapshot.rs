@@ -238,7 +238,8 @@ pub(crate) fn read_header<'a>(bytes: &'a [u8]) -> Result<(Header, Reader<'a>), N
     let baseline = reader.u32()?;
     let last_command = reader.u32()?;
     let id = reader.u8()?;
-    if tick == 0 || baseline >= tick || usize::from(id) >= MAX_PLAYERS {
+    // Tick 0 is a server that has not ticked yet; the client skips it.
+    if (baseline != 0 && baseline >= tick) || usize::from(id) >= MAX_PLAYERS {
         return Err(NetError::BadValue);
     }
     let position = reader.vector()?;

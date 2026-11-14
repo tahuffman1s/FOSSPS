@@ -466,6 +466,76 @@ fn sending_commands_faster_does_not_move_a_player_faster() {
 }
 
 #[test]
+fn a_burst_of_late_commands_does_not_leave_the_player_behind_for_good() {
+    let level = arena();
+    let rules = MoveSettings::default();
+    let mut server = Server::new(STEP, ServerSettings::default());
+    let start = spawn(0.0);
+    let id = server.join(start).unwrap();
+    let settings = ClientSettings {
+        commands_per_packet: 8,
+        ..ClientSettings::default()
+    };
+    let mut client = Client::new(start, STEP, settings);
+    let mut packet = Vec::new();
+    let firing = PlayerInput {
+        fire: true,
+        ..walking(1.0)
+    };
+    // Eight ticks' commands arrive in one go, then one a tick as usual.
+    for _ in 0..8 {
+        client.predict(&level, &rules, &firing, &mut packet);
+        server.tick(&level, &rules);
+    }
+    server.receive(id, &packet).unwrap();
+    for _ in 0..30 {
+        client.predict(&level, &rules, &firing, &mut packet);
+        server.receive(id, &packet).unwrap();
+        server.tick(&level, &rules);
+        assert!(server.input(id).unwrap().fire);
+    }
+    // Only the buffer's two commands are left waiting, not eight.
+    server.tick(&level, &rules);
+    server.tick(&level, &rules);
+    assert!(server.input(id).unwrap().fire);
+    server.tick(&level, &rules);
+    assert!(
+        !server.input(id).unwrap().fire,
+        "a command was still waiting"
+    );
+}
+
+#[test]
+fn a_snapshot_from_before_the_first_tick_is_skipped() {
+    let level = arena();
+    let rules = MoveSettings::default();
+    let mut server = Server::new(STEP, ServerSettings::default());
+    let start = spawn(0.0);
+    let id = server.join(start).unwrap();
+    let mut client = Client::new(start, STEP, ClientSettings::default());
+    let mut packet = Vec::new();
+    server.write_snapshot(id, &mut packet).unwrap();
+    assert_eq!(
+        client.receive(&level, &rules, &packet),
+        Ok(Received::Skipped)
+    );
+
+    // A client that claims to have read a snapshot from the future is
+    // still sent ones it can read.
+    client.predict(&level, &rules, &walking(1.0), &mut packet);
+    packet[2..6].copy_from_slice(&5_u32.to_le_bytes());
+    server.receive(id, &packet).unwrap();
+    for _ in 0..8 {
+        server.tick(&level, &rules);
+        server.write_snapshot(id, &mut packet).unwrap();
+        assert_ne!(
+            client.receive(&level, &rules, &packet),
+            Ok(Received::Skipped)
+        );
+    }
+}
+
+#[test]
 fn a_player_whose_commands_stop_coming_carries_on_briefly_then_stands_still() {
     let level = arena();
     let rules = MoveSettings::default();
