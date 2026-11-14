@@ -1,0 +1,16 @@
+[package]
+name = "fossps-weapons"
+description = "Weapons for FOSSPS: firing, recoil, reloading, bullets and thrown or launched projectiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fossps-physics = { path = "../fossps-physics" }
+
+# Sine and cosine that give the same digits on every machine.
+libm = "0.2"
+
+[lints]
+workspace = true

@@ -9,6 +9,21 @@ use parry3d::shape::{Capsule, TriMesh};
 /// out: it has no direction to push the player in.
 const THINNEST_TRIANGLE: f32 = 1.0e-10;
 
+/// The longest a ray is followed, in metres, however far was asked for.
+const FARTHEST_RAY: f32 = 100_000.0;
+
+/// What [`Level::raycast`] found in the way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    /// How far from the start, in metres.
+    pub distance: f32,
+    /// Where the surface was met.
+    pub point: [f32; 3],
+    /// Which way the surface faces there, one unit long and towards the
+    /// side the ray came from.
+    pub normal: [f32; 3],
+}
+
 /// The solid shapes of a level, ready for the player to collide with.
 ///
 /// Every triangle of every placed mesh is solid, from both sides. Build it
@@ -84,6 +99,36 @@ impl Level {
     #[must_use]
     pub fn triangle_count(&self) -> usize {
         self.triangles
+    }
+
+    /// Looks from `from` along `direction` and reports the first surface in
+    /// the way, no further off than `reach` metres: what a bullet hits.
+    ///
+    /// `direction` need not be one unit long. Nothing is found when it has
+    /// no length, when a number is not a number, or in an empty level.
+    #[must_use]
+    pub fn raycast(&self, from: [f32; 3], direction: [f32; 3], reach: f32) -> Option<RayHit> {
+        let mesh = self.mesh.as_ref()?;
+        let from = Vector::from_array(from);
+        let heading = Vector::from_array(direction).try_normalize()?;
+        if !(from.is_finite() && heading.is_finite() && reach > 0.0) {
+            return None;
+        }
+        let ray = Ray::new(from, heading);
+        let hit = mesh.cast_local_ray_and_get_normal(&ray, reach.min(FARTHEST_RAY), false)?;
+        let normal = hit.normal.try_normalize()?;
+        // A triangle seen from behind reports its back; face the looker.
+        let normal = if normal.dot(heading) > 0.0 {
+            -normal
+        } else {
+            normal
+        };
+        let distance = hit.time_of_impact;
+        distance.is_finite().then(|| RayHit {
+            distance,
+            point: (from + heading * distance).to_array(),
+            normal: normal.to_array(),
+        })
     }
 
     /// Moves `shape` from `centre` along `travel` and reports the first

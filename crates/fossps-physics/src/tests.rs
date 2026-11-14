@@ -884,3 +884,42 @@ fn a_long_erratic_run_never_ends_up_inside_or_outside_the_level() {
     // It really did get about: across the room and up the stairs or ramp.
     assert!(furthest > 8.0 && highest > 1.5, "{furthest} {highest}");
 }
+
+#[test]
+fn a_ray_finds_the_first_surface_and_faces_the_looker() {
+    let level = level(&[floor(), block([-1.0, 0.0, -6.0], [1.0, 2.0, -5.0])]);
+    // Forward at chest height: the near face of the block, 5 m off.
+    let hit = level
+        .raycast([0.0, 1.0, 0.0], [0.0, 0.0, -3.0], 100.0)
+        .unwrap();
+    assert!(close(hit.distance, 5.0, 1.0e-4), "{hit:?}");
+    assert!(close(hit.point[2], -5.0, 1.0e-4), "{hit:?}");
+    assert!(close(hit.normal[2], 1.0, 1.0e-4), "{hit:?}");
+    // From under the floor looking up, the floor still faces the looker.
+    let hit = level
+        .raycast([5.0, -2.0, 5.0], [0.0, 1.0, 0.0], 100.0)
+        .unwrap();
+    assert!(close(hit.distance, 2.0, 1.0e-4), "{hit:?}");
+    assert!(close(hit.normal[1], -1.0, 1.0e-4), "{hit:?}");
+}
+
+#[test]
+fn a_ray_stops_at_its_reach_and_ignores_nonsense() {
+    let level = level(&[floor(), block([-1.0, 0.0, -6.0], [1.0, 2.0, -5.0])]);
+    let from = [0.0, 1.0, 0.0];
+    assert!(level.raycast(from, [0.0, 0.0, -1.0], 4.9).is_none());
+    assert!(level.raycast(from, [0.0, 1.0, 0.0], 100.0).is_none(), "sky");
+    assert!(level.raycast(from, [0.0; 3], 100.0).is_none());
+    assert!(level.raycast(from, [f32::NAN, 0.0, -1.0], 100.0).is_none());
+    assert!(level.raycast(from, [0.0, 0.0, -1.0], f32::NAN).is_none());
+    assert!(
+        level
+            .raycast(from, [0.0, 0.0, -1.0], f32::INFINITY)
+            .is_some()
+    );
+    assert!(
+        Level::from_triangles(&[])
+            .raycast(from, [0.0, -1.0, 0.0], 9.0)
+            .is_none()
+    );
+}

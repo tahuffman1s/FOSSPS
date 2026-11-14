@@ -17,7 +17,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 - A game shows its level: `level.glb` in the game folder, and a camera scripts can move (#60)
 - Collision and an FPS character controller (walk, jump, crouch, sprint) (#6)
 - The player walks the level: movement actions drive the character controller, with the camera at their eyes (#64)
-- Weapons: hitscan and projectile, recoil, reload, exposed to scripts (#7)
+- Weapons: hitscan and projectile, recoil, reload (#7), then in the player's hands and exposed to scripts (#66)
 - HUD and menus, fully navigable with a controller (#8)
 - Audio: positional sound, footsteps, gunfire (#9)
 
