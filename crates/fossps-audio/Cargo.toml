@@ -1,0 +1,27 @@
+[package]
+name = "fossps-audio"
+description = "Sound for FOSSPS: positional mixing, footsteps and gunfire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["device"]
+# Plays through the computer's speakers. Without it the crate only mixes
+# into a buffer, and links no sound library: tests and tools build this way.
+device = ["dep:cpal", "dep:rtrb"]
+
+[dependencies]
+# Reads WAV files.
+hound = "3.5"
+log = "0.4"
+cpal = { version = "0.18", optional = true }
+# Hands commands to the sound thread without locking or asking for memory.
+rtrb = { version = "0.4", optional = true }
+
+[[example]]
+name = "firefight"
+
+[lints]
+workspace = true
