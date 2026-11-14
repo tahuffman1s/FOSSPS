@@ -20,6 +20,8 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 - Weapons: hitscan and projectile, recoil, reload (#7), then in the player's hands and exposed to scripts (#66)
 - HUD and menus, fully navigable with a controller (#8)
 - Audio: positional sound, footsteps, gunfire (#9)
+- Any frame rate: the game steps at a fixed tick, the picture is blended between ticks (#70) and aiming follows the mouse every drawn frame (#71)
+- Scripts behave the same at any frame rate without delta-time maths (#72), proven by a test at 30, 60, 144 and 1000 frames a second (#73)
 
 ## M2 — Multiplayer
 
@@ -28,16 +30,27 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 - Lag compensation for hit registration (#12)
 - Game-mode script API (teams, rounds, spawns, scoring) and a sample team deathmatch (#13)
 - Server browser or direct-connect flow that works in one step (#14)
+- Shots and jumps count from the moment they were pressed, not the next tick (#74)
+- Bad-connection simulator and a network graph (#109)
 
 ## M3 — Modern graphics and performance
 
 - Clustered lighting, shadows, HDR and tonemapping, temporal anti-aliasing (#15)
 - FSR 3.1 upscaling (first verify the SDK builds on Linux) (#16)
 - Benchmark scene and frame-time budget checked in CI (#17)
+- Frame pacing: an accurate frame cap, a display-sync choice, low caps in menus and background (#75)
+- Lower input delay: late input reading, and AMD Anti-Lag 2 where the driver has it (#76)
+- Hide what the player cannot see, with no hand-placed hints (#86)
 
 ## M4 — Ship
 
 - `fossps package`: Linux AppImage, Windows `.exe`, macOS `.app` (MoltenVK; verify feasibility first) (#18)
+- Game pack: one `.fpk` file holding a game's files, friendly to small updates (#77)
+- Packaging needs no Rust: ready-made engine builds are downloaded once, so any system can package for all three (#78)
+- Only what the game uses goes in, with a size report that says why (#79), after checks that say what to fix (#80)
+- Windows `.exe` with name, icon and version (#81), a macOS `.app` that opens (#82), and a dedicated server package (#83)
+- Assets compressed without changing them by default (#84); opt-in, labelled shrinking that does change them (#85)
+- Scripting in VS Code: problems as you type, plain-English snippets, run and reload (#100)
 - Release workflow that builds and uploads all three on a version tag (#19)
 - Docs site with a ten-minute "first match" tutorial (#20)
 
@@ -63,3 +76,31 @@ Making it easy without making it small:
 - Script values become sliders (#51)
 - No save button, and a history you can scrub (#52)
 - One search box for everything, and panels that stay out of the way (#53)
+
+Beyond boxes, still FPS only:
+
+- Pull and push faces, snapped to player sizes (#87); doors, windows, arches and stairs in one click (#88)
+- Grid materials that show scale, and one-click face painting (#89); a shelf of ready-made pieces (#90)
+- Swap blockout for finished models without losing the gameplay (#96); lighting that looks good in one choice (#97)
+- Name areas once for minimap, HUD and scripts (#92); the minimap draws itself (#93)
+- Bots walk the map and report what is unreachable (#91), then paint heatmaps with a one-line reading (#94)
+- Playtest with friends in one key, and watch the match back as ghosts (#95)
+- See what each view costs to draw (#98)
+- Sketch lanes from above and get a walkable blockout (#99)
+
+## M6 — Script and game tools
+
+Tools that make scripting and tuning a shooter easy. Not a general IDE: your own editor stays first-class, and the built-in panel does what only the engine can.
+
+- A local link to the running game: logs, live values, reload (#101), also offered to AI assistants (#102)
+- Script debugger: pause on a line and look at values (#103)
+- Script panel in the editor: errors on the line, live values beside the code (#104)
+- Drag a number, colour or position in a script and watch the game change (#105)
+- Click a thing in the map to see its script, and back (#106)
+- Rewind a match: replays you can scrub tick by tick, and kill cams (#107)
+- Weapon workbench: draw recoil, see time-to-kill (#108)
+- Game mode rules as a form with a plain-English summary (#110)
+- HUD layout editor that never loses controller reach (#111)
+- Bindings screen with gamepad pictures, and a check that every action has a gamepad binding (#112)
+- Weapon animation timeline for fire and reload moments (#113)
+- Footstep and impact sounds per surface (#114)
