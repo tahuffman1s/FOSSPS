@@ -41,7 +41,8 @@ pub struct PlayerInput {
     pub reload: bool,
 }
 
-/// One tick of a player's input, rounded to what fits in eight bytes.
+/// One tick of a player's input, rounded to what fits in eight bytes,
+/// and which snapshot the player had on screen when they gave it.
 ///
 /// The client moves its own player with the rounded input, not with what
 /// the stick or mouse said exactly, so the server, given the same
@@ -54,6 +55,24 @@ pub struct Command {
     yaw: u16,
     pitch: i16,
     buttons: u16,
+    view: View,
+}
+
+/// The moment of the server's past a client was showing the other players
+/// at: a tick, and how far on towards the next one in 256ths.
+///
+/// Tick 0 is "nothing yet". Views order by time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct View {
+    pub(crate) tick: u32,
+    pub(crate) part: u8,
+}
+
+impl View {
+    /// Exactly at `tick`.
+    pub(crate) fn at(tick: u32) -> Self {
+        Self { tick, part: 0 }
+    }
 }
 
 impl Command {
@@ -82,7 +101,21 @@ impl Command {
             yaw: yaw_steps(movement.yaw),
             pitch: pitch_steps(input.pitch),
             buttons,
+            view: View::default(),
         }
+    }
+
+    /// This command, given while the other players were shown as of
+    /// `view`.
+    pub(crate) fn seeing(mut self, view: View) -> Self {
+        self.view = view;
+        self
+    }
+
+    /// What the other players were shown as of when this command was
+    /// given.
+    pub(crate) fn view(&self) -> View {
+        self.view
     }
 
     /// The number the client gave this command.
@@ -149,6 +182,8 @@ impl Command {
         writer.u16(self.yaw);
         writer.i16(self.pitch);
         writer.u16(self.buttons);
+        writer.u32(self.view.tick);
+        writer.u8(self.view.part);
     }
 
     fn read(reader: &mut Reader<'_>, sequence: u32) -> Result<Self, NetError> {
@@ -159,6 +194,10 @@ impl Command {
             yaw: reader.u16()?,
             pitch: reader.i16()?,
             buttons: reader.u16()?,
+            view: View {
+                tick: reader.u32()?,
+                part: reader.u8()?,
+            },
         };
         // -128 and -32768 are never sent; they would be a push or a look
         // slightly past the limit.
@@ -261,6 +300,13 @@ pub(crate) fn read_commands(
             .filter(|&sequence| sequence > 0)
             .ok_or(NetError::BadValue)?;
         *slot = Command::read(&mut reader, sequence)?;
+        // Nobody can have been looking at a snapshot newer than the
+        // newest they had read when the packet left. A view part of the
+        // way past that snapshot is refused too: there is nothing after
+        // it to be shown part of the way towards.
+        if slot.view > View::at(snapshot) {
+            return Err(NetError::BadValue);
+        }
     }
     for command in commands.iter().take(count).rev() {
         each(*command);

@@ -15,7 +15,7 @@ pub(crate) const SNAPSHOT: u8 = 2;
 
 /// The version of the packet layout, the second byte of every packet.
 /// It goes up whenever the layout changes.
-pub(crate) const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 2;
 
 /// Why a packet could not be read, or a player could not be found or added.
 ///

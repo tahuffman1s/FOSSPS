@@ -3,9 +3,13 @@
 
 use fossps_physics::{Level, MoveInput, MoveSettings, Player};
 
+use fossps_weapons::{Target, WeaponSettings, hitscan};
+
+use crate::command::{View, write_commands, yaw_radians, yaw_steps};
+use crate::snapshot::{Seen, between};
 use crate::{
     Client, ClientSettings, Command, MAX_PACKET_BYTES, MAX_PLAYERS, NetError, PlayerId,
-    PlayerInput, Received, Server, ServerSettings,
+    PlayerInput, Received, RemotePlayer, Server, ServerSettings,
 };
 
 const STEP: f32 = 1.0 / 60.0;
@@ -858,7 +862,13 @@ fn damaged_packets_never_do_worse_than_an_error() {
 fn a_cut_short_packet_changes_nothing() {
     let level = arena();
     let rules = MoveSettings::default();
-    let mut server = Server::new(STEP, ServerSettings { buffer: 1 });
+    let mut server = Server::new(
+        STEP,
+        ServerSettings {
+            buffer: 1,
+            ..ServerSettings::default()
+        },
+    );
     let start = spawn(0.0);
     let id = server.join(start).unwrap();
     let mut client = Client::new(start, STEP, ClientSettings::default());
@@ -876,4 +886,378 @@ fn a_cut_short_packet_changes_nothing() {
     server.receive(id, &packet).unwrap();
     server.tick(&level, &rules);
     assert_eq!(server.input(id).unwrap().movement.forward, 1.0);
+}
+
+/// Input whose yaw says which tick it was given on, so a test can tell
+/// which command the server ran.
+fn marked(tick: u32, right: f32) -> PlayerInput {
+    PlayerInput {
+        movement: MoveInput {
+            right,
+            yaw: yaw_radians((tick % 65_536) as u16),
+            ..MoveInput::default()
+        },
+        fire: true,
+        ..PlayerInput::default()
+    }
+}
+
+/// The tick `marked` input was given on.
+fn mark(input: &PlayerInput) -> usize {
+    yaw_steps(input.movement.yaw).into()
+}
+
+/// Runs `game` for `ticks`, with seat 0 standing and firing and the
+/// others busy, and checks after each tick past `settled` that the server
+/// would judge seat 0's shot against exactly what seat 0 had on screen.
+/// Returns the longest the server went back, in seconds.
+fn shots_are_judged_as_seen(game: &mut Match, ticks: u32, settled: u32) -> f32 {
+    // What seat 0 saw when giving each tick's input.
+    let mut seen: Vec<Vec<RemotePlayer>> = vec![Vec::new()];
+    let mut furthest = 0.0_f32;
+    for _ in 0..ticks {
+        // `tick` shows the snapshots that arrive before it asks for input.
+        game.tick(|seat, tick| match seat {
+            0 => marked(tick, 0.0),
+            _ => busy(tick + seat as u32 * 50),
+        });
+        // Seat 0's screen does not change between giving the input and
+        // the end of the tick: snapshots are read before the next input.
+        seen.push(game.seats[0].client.others().collect());
+        if game.now <= settled {
+            continue;
+        }
+        let ran = mark(&game.server.input(0).unwrap());
+        let judged: Vec<_> = game.server.seen_by(0).collect();
+        assert_eq!(judged, seen[ran], "tick {}, command {ran}", game.now);
+        assert_eq!(judged.len(), game.seats.len() - 1);
+        furthest = furthest.max(game.server.rewind(0));
+    }
+    furthest
+}
+
+#[test]
+fn a_shot_is_judged_against_what_the_shooter_had_on_screen() {
+    let mut game = Match::new(4, CLEAR);
+    game.weather(Weather {
+        delay: (3, 3),
+        ..CLEAR
+    });
+    let furthest = shots_are_judged_as_seen(&mut game, 400, 30);
+    // Three ticks there, three back and two in the buffer.
+    assert!((0.1..=0.2).contains(&furthest), "{furthest} s");
+
+    // Lost, repeated and reordered packets do not change that.
+    let mut game = Match::new(4, CLEAR);
+    game.weather(Weather {
+        lost: 10,
+        repeated: 10,
+        delay: (1, 3),
+    });
+    shots_are_judged_as_seen(&mut game, 600, 30);
+}
+
+#[test]
+fn a_shot_is_not_judged_further_back_than_the_limit() {
+    let mut game = Match::new(3, CLEAR);
+    game.weather(Weather {
+        delay: (10, 10),
+        ..CLEAR
+    });
+    game.run(200, |seat, tick| match seat {
+        0 => marked(tick, 0.0),
+        _ => busy(tick + seat as u32 * 50),
+    });
+    // 0.2 s is 12 ticks.
+    assert!((game.server.rewind(0) - 0.2).abs() < 1e-6);
+    let tick = game.server.tick_number();
+    for other in game.server.seen_by(0) {
+        assert_eq!(game.server.player_at(other.id, tick - 12), Some(other));
+        assert_ne!(game.server.player_at(other.id, tick), Some(other));
+    }
+    assert_eq!(game.server.seen_by(0).count(), 2);
+    assert_eq!(game.server.seen_by(9).count(), 0, "nobody has that number");
+    assert_eq!(game.server.rewind(9), 0.0);
+}
+
+/// Fires seat 0's shot on the server, aimed at the middle of `aimed_at`:
+/// seat 1 as seat 0 saw them when pulling the trigger. Returns whether the shot hit when judged against what seat 0
+/// saw, and whether it would have hit seat 1 where they are now.
+fn shoot_at(game: &Match, aimed_at: RemotePlayer) -> (bool, bool) {
+    let body = |id: PlayerId, feet: [f32; 3]| Target {
+        id: id.into(),
+        feet,
+        height: game.rules.standing_height,
+        radius: game.rules.radius,
+    };
+    let eyes = game.server.player(0).unwrap().eye_position();
+    let chest = [
+        aimed_at.position[0],
+        aimed_at.position[1] + 1.0,
+        aimed_at.position[2],
+    ];
+    let direction = [0, 1, 2].map(|axis| chest[axis] - eyes[axis]);
+    let rifle = WeaponSettings::default();
+    let shoot = |targets: &[Target]| {
+        hitscan(&game.level, targets, eyes, direction, &rifle, Some(0)).and_then(|hit| hit.target())
+            == Some(1)
+    };
+    let seen: Vec<_> = game
+        .server
+        .seen_by(0)
+        .map(|other| body(other.id, other.position))
+        .collect();
+    let now: Vec<_> = game
+        .server
+        .players()
+        .map(|(id, player)| body(id, player.position))
+        .collect();
+    (shoot(&seen), shoot(&now))
+}
+
+#[test]
+fn a_shot_aimed_right_at_a_running_player_hits_them() {
+    let mut game = Match::new(2, CLEAR);
+    game.weather(Weather {
+        delay: (3, 3),
+        ..CLEAR
+    });
+    // Seat 1 walks away, then across seat 0's view. What seat 0 saw of
+    // them when giving each tick's input is kept.
+    let mut seen = vec![None];
+    for _ in 0..100 {
+        game.tick(|seat, tick| match seat {
+            0 => marked(tick, 0.0),
+            _ if tick < 60 => walking(1.0),
+            _ => PlayerInput {
+                movement: MoveInput {
+                    right: 1.0,
+                    ..MoveInput::default()
+                },
+                ..PlayerInput::default()
+            },
+        });
+        seen.push(game.seats[0].client.others().next());
+    }
+    // The server is now running a command given some ticks ago.
+    let ran = mark(&game.server.input(0).unwrap());
+    let (as_seen, as_now) = shoot_at(&game, seen[ran].unwrap());
+    assert!(as_seen, "the shot was on target on the shooter's screen");
+    assert!(
+        !as_now,
+        "the runner has moved on since; the test proves nothing"
+    );
+}
+
+/// A server with a shooter (0) who stands and a runner (1) who strafes,
+/// both on connections with no delay and a buffer of one command.
+struct Range {
+    level: Level,
+    rules: MoveSettings,
+    server: Server,
+    packet: Vec<u8>,
+}
+
+impl Range {
+    fn new() -> Self {
+        let mut server = Server::new(
+            STEP,
+            ServerSettings {
+                buffer: 1,
+                ..ServerSettings::default()
+            },
+        );
+        server.join(spawn(0.0)).unwrap();
+        server.join(spawn(-20.0)).unwrap();
+        Self {
+            level: arena(),
+            rules: MoveSettings::default(),
+            server,
+            packet: Vec::new(),
+        }
+    }
+
+    /// One tick in which the shooter says they were looking at `view`.
+    fn tick(&mut self, view: View) -> Result<(), NetError> {
+        let number = self.server.tick_number() + 1;
+        let command = Command::new(number, &PlayerInput::default()).seeing(view);
+        // Says it has read the snapshot after the one it is looking at.
+        write_commands(
+            &mut self.packet,
+            view.tick.saturating_add(1),
+            std::iter::once(command),
+        );
+        let result = self.server.receive(0, &self.packet);
+        let command = Command::new(number, &marked(number, 1.0));
+        write_commands(&mut self.packet, 0, std::iter::once(command));
+        self.server.receive(1, &self.packet).unwrap();
+        self.server.tick(&self.level, &self.rules);
+        result
+    }
+
+    /// Where the shooter's shot would be judged to find the runner.
+    fn judged(&self) -> RemotePlayer {
+        self.server.seen_by(0).next().unwrap()
+    }
+
+    fn runner_at(&self, tick: u32) -> RemotePlayer {
+        self.server.player_at(1, tick).unwrap()
+    }
+}
+
+#[test]
+fn a_view_between_two_ticks_is_judged_between_them() {
+    let mut range = Range::new();
+    for _ in 0..40 {
+        range.tick(View::default()).unwrap();
+    }
+    // Before any snapshot is read there is nothing to go back to.
+    assert_eq!(range.judged(), range.runner_at(40));
+    assert_eq!(range.server.rewind(0), 0.0);
+
+    range.tick(View { tick: 35, part: 0 }).unwrap();
+    assert_eq!(range.judged(), range.runner_at(35));
+
+    range.tick(View { tick: 35, part: 64 }).unwrap();
+    let (from, to, judged) = (range.runner_at(35), range.runner_at(36), range.judged());
+    assert!(
+        distance(from.position, to.position) > 0.05,
+        "the runner runs"
+    );
+    for axis in 0..3 {
+        let expected = from.position[axis] + (to.position[axis] - from.position[axis]) * 0.25;
+        assert!((judged.position[axis] - expected).abs() < 1e-4);
+    }
+    assert!((range.server.rewind(0) - (42.0 - 35.25) * STEP).abs() < 1e-6);
+}
+
+#[test]
+fn a_client_cannot_claim_an_impossible_view() {
+    let mut range = Range::new();
+    for _ in 0..40 {
+        range.tick(View::default()).unwrap();
+    }
+    range.tick(View::at(38)).unwrap();
+    assert_eq!(range.judged(), range.runner_at(38));
+
+    // A view that goes back in time is not believed.
+    range.tick(View::at(31)).unwrap();
+    assert_eq!(range.judged(), range.runner_at(38));
+
+    // Nor is one from a tick the server has not run: it counts as now.
+    range.tick(View::at(5000)).unwrap();
+    assert_eq!(range.judged(), range.runner_at(43));
+
+    // A view newer than the newest snapshot the packet says was read
+    // cannot be, and the whole packet is refused.
+    let number = range.server.tick_number() + 1;
+    let command = Command::new(number, &PlayerInput::default()).seeing(View::at(44));
+    write_commands(&mut range.packet, 43, std::iter::once(command));
+    assert_eq!(
+        range.server.receive(0, &range.packet),
+        Err(NetError::BadValue)
+    );
+    let command = command.seeing(View { tick: 43, part: 1 });
+    write_commands(&mut range.packet, 43, std::iter::once(command));
+    assert_eq!(
+        range.server.receive(0, &range.packet),
+        Err(NetError::BadValue)
+    );
+}
+
+#[test]
+fn nobody_is_shot_where_they_were_before_a_respawn() {
+    let mut range = Range::new();
+    for _ in 0..40 {
+        range.tick(View::default()).unwrap();
+    }
+    range.tick(View::at(35)).unwrap();
+    assert_eq!(range.judged(), range.runner_at(35));
+
+    // The runner respawns far away. Even before the next tick, the
+    // shooter's old view of them is not shot at.
+    let respawn = [-20.0, 0.5, -60.0];
+    range.server.player_mut(1).unwrap().position = respawn;
+    assert!(distance(range.judged().position, respawn) < 0.01);
+
+    // Nor afterwards, though the shooter's view is still from before.
+    for _ in 0..5 {
+        range.tick(View::at(36)).unwrap();
+        assert_eq!(range.judged(), range.runner_at(42));
+    }
+    // Once the shooter's view is from after the respawn, it is used.
+    range.tick(View::at(44)).unwrap();
+    assert_eq!(range.judged(), range.runner_at(44));
+
+    // The same goes for someone who has only just joined, in a place
+    // another player has just left.
+    range.server.leave(1);
+    let late = range.server.join(spawn(3.0)).unwrap();
+    assert_eq!(late, 1);
+    assert!(distance(range.judged().position, [3.0, 0.5, 0.0]) < 0.01);
+}
+
+#[test]
+fn a_rewind_limit_of_nothing_judges_every_shot_against_now() {
+    for limit in [0.0, -1.0, f32::NAN] {
+        let mut range = Range::new();
+        range.server = Server::new(
+            STEP,
+            ServerSettings {
+                buffer: 1,
+                rewind_limit: limit,
+            },
+        );
+        range.server.join(spawn(0.0)).unwrap();
+        range.server.join(spawn(-20.0)).unwrap();
+        for _ in 0..20 {
+            range.tick(View::default()).unwrap();
+        }
+        range.tick(View::at(15)).unwrap();
+        assert_eq!(range.judged(), range.runner_at(21));
+        assert_eq!(range.server.rewind(0), 0.0);
+    }
+    // And the longest limit is what the server remembers.
+    let server = Server::new(
+        STEP,
+        ServerSettings {
+            rewind_limit: 60.0,
+            ..ServerSettings::default()
+        },
+    );
+    let mut range = Range::new();
+    range.server = server;
+    range.server.join(spawn(0.0)).unwrap();
+    range.server.join(spawn(-20.0)).unwrap();
+    for _ in 0..50 {
+        range.tick(View::at(1)).unwrap();
+    }
+    assert_eq!(range.judged(), range.runner_at(20));
+}
+
+#[test]
+fn a_blend_turns_the_short_way_and_takes_the_nearer_stance() {
+    let standing = spawn(0.0);
+    let crouched = Player {
+        crouched: true,
+        ..spawn(1.0)
+    };
+    // Five steps short of a full turn, then five past it.
+    let from = Seen::of(&standing, (65_531, -100));
+    let to = Seen::of(&crouched, (5, 100));
+
+    let early = between(&from, &to, 64, 3);
+    assert_eq!(early.id, 3);
+    assert!((early.position[0] - 0.25).abs() < 1e-4);
+    assert!(!early.crouched, "nearer the first tick");
+    // A quarter of the ten steps on from 65 531: not back round by way
+    // of half a turn.
+    assert!((early.yaw - yaw_radians(1) * 65_533.5).abs() < 1e-4);
+    assert!((early.pitch - (from.remote(3).pitch * 0.5)).abs() < 1e-6);
+
+    let late = between(&from, &to, 192, 3);
+    assert!(late.crouched, "nearer the second tick");
+    assert!((late.position[0] - 0.75).abs() < 1e-4);
+
+    assert_eq!(between(&from, &to, 0, 3), from.remote(3));
 }

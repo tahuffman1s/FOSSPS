@@ -29,6 +29,10 @@ const POSITION_STEPS: f32 = 512.0;
 /// The furthest a sent position reaches on each axis, in steps (16 km).
 const FURTHEST: i32 = (1 << 23) - 1;
 
+/// A player who moves further than this in one tick, in metres, was put
+/// somewhere new rather than walked there.
+const JUMP: f32 = 2.0;
+
 const GROUNDED: u8 = 1 << 0;
 const CROUCHED: u8 = 1 << 1;
 const SPRINTING: u8 = 1 << 2;
@@ -98,6 +102,19 @@ impl Seen {
         }
     }
 
+    /// Whether `self` is further from `before` than anyone gets in one
+    /// tick on foot: a respawn or a teleport.
+    pub(crate) fn jumped_from(&self, before: &Self) -> bool {
+        let squared: i64 = (0..3)
+            .map(|axis| {
+                let gap = i64::from(self.position[axis]) - i64::from(before.position[axis]);
+                gap * gap
+            })
+            .sum();
+        let limit = (JUMP * POSITION_STEPS) as i64;
+        squared > limit * limit
+    }
+
     pub(crate) fn remote(&self, id: PlayerId) -> RemotePlayer {
         RemotePlayer {
             id,
@@ -109,6 +126,32 @@ impl Seen {
             crouched: self.flags & CROUCHED != 0,
             sprinting: self.flags & SPRINTING != 0,
         }
+    }
+}
+
+/// The player between `from` and `to`, a tick apart: `part` 256ths of the
+/// way on. Position, yaw and pitch are blended, yaw the short way round;
+/// standing, crouching and sprinting are those of the nearer tick.
+pub(crate) fn between(from: &Seen, to: &Seen, part: u8, id: PlayerId) -> RemotePlayer {
+    if part == 0 {
+        return from.remote(id);
+    }
+    let share = f32::from(part) / 256.0;
+    let nearer = if part < 128 { from } else { to };
+    // The gap between two yaws as a signed 16 bits is the short way round.
+    let turn = to.yaw.wrapping_sub(from.yaw) as i16;
+    RemotePlayer {
+        position: [0, 1, 2].map(|axis| {
+            // Both under 2^23, so the casts are exact.
+            let (from, to) = (from.position[axis] as f32, to.position[axis] as f32);
+            (from + (to - from) * share) / POSITION_STEPS
+        }),
+        yaw: yaw_radians(from.yaw) + f32::from(turn) * share * yaw_radians(1),
+        pitch: {
+            let (from, to) = (pitch_radians(from.pitch), pitch_radians(to.pitch));
+            from + (to - from) * share
+        },
+        ..nearer.remote(id)
     }
 }
 

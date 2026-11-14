@@ -12,5 +12,9 @@ fossps-physics = { path = "../fossps-physics" }
 # An exponential that gives the same digits on every machine.
 libm = "0.2"
 
+[dev-dependencies]
+# For shooting at what lag compensation gives back, in tests and examples.
+fossps-weapons = { path = "../fossps-weapons" }
+
 [lints]
 workspace = true

@@ -45,6 +45,10 @@
 //! # }
 //! ```
 //!
+//! A player sees the others a little in the past, so when one fires, shoot
+//! at what [`Server::seen_by`] gives: everyone else where the shooter had
+//! them on screen when pulling the trigger (lag compensation).
+//!
 //! This crate only makes and reads packets. It opens no socket: how the
 //! bytes travel is up to the caller, and packets may be lost, repeated or
 //! arrive out of order.
