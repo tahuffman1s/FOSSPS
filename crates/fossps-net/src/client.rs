@@ -3,7 +3,7 @@
 
 use fossps_physics::{Level, MoveSettings, Player};
 
-use crate::command::{Command, MOST_COMMANDS, PlayerInput, write_commands};
+use crate::command::{Command, MOST_COMMANDS, PlayerInput, View, write_commands};
 use crate::snapshot::{
     HISTORY, PlayerId, RemotePlayer, World, find, place, read_header, read_players,
 };
@@ -143,7 +143,9 @@ impl Client {
         packet: &mut Vec<u8>,
     ) -> Command {
         self.sequence = self.sequence.saturating_add(1);
-        let command = Command::new(self.sequence, input);
+        // The other players are shown as of the newest snapshot, so that
+        // is what the player was aiming at.
+        let command = Command::new(self.sequence, input).seeing(View::at(self.newest));
         self.player
             .step(level, settings, &command.movement(), self.step);
         if let Some(slot) = self.moves.get_mut(place_of(self.sequence)) {
