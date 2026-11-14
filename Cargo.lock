@@ -679,6 +679,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fossps-ui"
+version = "0.0.0"
+
+[[package]]
 name = "fossps-weapons"
 version = "0.0.0"
 dependencies = [

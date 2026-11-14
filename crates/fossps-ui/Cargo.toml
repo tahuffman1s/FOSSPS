@@ -1,0 +1,10 @@
+[package]
+name = "fossps-ui"
+description = "HUD and menus for FOSSPS: every menu works with a gamepad, keyboard or mouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

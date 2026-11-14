@@ -18,7 +18,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 - Collision and an FPS character controller (walk, jump, crouch, sprint) (#6)
 - The player walks the level: movement actions drive the character controller, with the camera at their eyes (#64)
 - Weapons: hitscan and projectile, recoil, reload (#7), then in the player's hands and exposed to scripts (#66)
-- HUD and menus, fully navigable with a controller (#8)
+- HUD and menus, fully navigable with a controller (#8), then drawn (#124), in a running game with a built-in pause menu (#125), built from scripts (#126), and scrolling with button hints (#127)
 - Audio: positional sound, footsteps, gunfire (#9)
 - Any frame rate: the game steps at a fixed tick, the picture is blended between ticks (#70) and aiming follows the mouse every drawn frame (#71)
 - Scripts behave the same at any frame rate without delta-time maths (#72), proven by a test at 30, 60, 144 and 1000 frames a second (#73)
