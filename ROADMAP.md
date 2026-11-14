@@ -44,7 +44,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 
 ## M4 — Ship
 
-- `fossps package`: Linux AppImage, Windows `.exe`, macOS `.app` (MoltenVK; verify feasibility first) (#18)
+- `fossps package`: Linux `.tar.gz`, Windows `.exe`, macOS `.app` (MoltenVK; verify feasibility first) (#18), with an AppImage as an option (#121)
 - Game pack: one `.fpk` file holding a game's files, friendly to small updates (#77)
 - Packaging needs no Rust: ready-made engine builds are downloaded once, so any system can package for all three (#78)
 - Only what the game uses goes in, with a size report that says why (#79), after checks that say what to fix (#80)

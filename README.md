@@ -15,7 +15,7 @@ A free, open-source engine for multiplayer first-person shooters.
 - **Focused** — built only for multiplayer FPS games.
 - **Modern** — Vulkan 1.3 renderer, FSR 3.1 upscaling, first-class controller support.
 
-Planned platforms: Linux (AppImage), Windows, and macOS as a stretch goal.
+Planned platforms: Linux, Windows, and macOS as a stretch goal.
 
 ## Building
 
