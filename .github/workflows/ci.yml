@@ -40,3 +40,5 @@ jobs:
       - run: cargo test -p fossps-assets --no-default-features
       # Sound mixes into a buffer without linking a sound library.
       - run: cargo test -p fossps-audio --no-default-features --lib --tests
+      # The dedicated server builds on its own, without the window feature.
+      - run: cargo build -p fossps-server

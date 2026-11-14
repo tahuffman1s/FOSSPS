@@ -25,6 +25,15 @@ pub struct TickClock {
     banked: Duration,
 }
 
+/// What [`TickClock::advance_counting`] decided for one pass of the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Due {
+    /// Ticks to run now.
+    pub(crate) ticks: u32,
+    /// Ticks that were due but will never be run.
+    pub(crate) skipped: u64,
+}
+
 impl TickClock {
     /// A clock ticking `rate` times per second. A rate of 0 is treated as 1.
     #[must_use]
@@ -43,9 +52,17 @@ impl TickClock {
 
     /// Banks `elapsed` real time and returns how many ticks to run now.
     pub fn advance(&mut self, elapsed: Duration) -> u32 {
+        self.advance_counting(elapsed).ticks
+    }
+
+    /// Like [`advance`](Self::advance), and also says how many ticks were
+    /// given up because the caller was too far behind to catch up.
+    pub(crate) fn advance_counting(&mut self, elapsed: Duration) -> Due {
+        let step = self.step.as_nanos().max(1);
+        // What would be due if nothing were ever given up.
+        let owed = self.banked.saturating_add(elapsed).as_nanos() / step;
         self.banked += elapsed.min(LONGEST_FRAME);
-        let due = self.banked.as_nanos() / self.step.as_nanos().max(1);
-        match u32::try_from(due) {
+        let ticks = match u32::try_from(self.banked.as_nanos() / step) {
             Ok(ticks) if ticks <= MOST_TICKS_PER_FRAME => {
                 self.banked -= self.step * ticks;
                 ticks
@@ -55,6 +72,12 @@ impl TickClock {
                 self.banked = Duration::ZERO;
                 MOST_TICKS_PER_FRAME
             }
+        };
+        Due {
+            ticks,
+            skipped: u64::try_from(owed)
+                .unwrap_or(u64::MAX)
+                .saturating_sub(u64::from(ticks)),
         }
     }
 
@@ -108,6 +131,41 @@ mod tests {
         assert_eq!(clock.advance(Duration::from_secs(30)), MOST_TICKS_PER_FRAME);
         assert_eq!(clock.advance(Duration::ZERO), 0);
         assert_eq!(clock.alpha(), 0.0);
+    }
+
+    #[test]
+    fn counts_the_ticks_it_gives_up() {
+        let mut clock = TickClock::new(100);
+        assert_eq!(
+            clock.advance_counting(30 * MS),
+            Due {
+                ticks: 3,
+                skipped: 0
+            }
+        );
+        // 80 ms is 8 ticks: 5 are run and 3 are given up.
+        assert_eq!(
+            clock.advance_counting(80 * MS),
+            Due {
+                ticks: 5,
+                skipped: 3
+            }
+        );
+        // A two-second stall is 200 ticks, and only 5 are run.
+        assert_eq!(
+            clock.advance_counting(Duration::from_secs(2)),
+            Due {
+                ticks: 5,
+                skipped: 195
+            }
+        );
+        assert_eq!(
+            clock.advance_counting(10 * MS),
+            Due {
+                ticks: 1,
+                skipped: 0
+            }
+        );
     }
 
     #[test]
