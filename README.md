@@ -20,11 +20,11 @@ Planned platforms: Linux, Windows, and macOS as a stretch goal.
 ## Building
 
 Requires stable [Rust](https://rustup.rs) and a C and C++ compiler (`gcc` and `g++`, `clang`, or the Visual Studio build tools); the Luau scripting language is built from source.
-On Linux, gamepad support also needs the libudev headers:
+On Linux, gamepad support also needs the libudev headers and sound needs the ALSA headers:
 
 ```sh
-sudo apt install g++ libudev-dev          # Debian, Ubuntu
-sudo dnf install gcc-c++ systemd-devel    # Fedora
+sudo apt install g++ libudev-dev libasound2-dev          # Debian, Ubuntu
+sudo dnf install gcc-c++ systemd-devel alsa-lib-devel    # Fedora
 ```
 
 ```sh
