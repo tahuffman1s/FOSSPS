@@ -38,6 +38,6 @@ mod slide;
 #[cfg(test)]
 mod tests;
 
-pub use level::Level;
+pub use level::{Level, RayHit};
 pub use player::Player;
 pub use settings::{MoveInput, MoveSettings};
