@@ -18,7 +18,7 @@ Rust core, Luau scripting, Vulkan 1.3. Licensed MIT OR Apache-2.0.
 - Scripting: Luau through `mlua` (`luau` feature). Sandboxed, hot-reloadable, typed API definitions shipped for editor autocomplete.
 - Netcode: server-authoritative, client prediction, lag compensation. Headless dedicated server is a first-class binary.
 - Controller parity: every action is bindable on a gamepad; nothing ships keyboard/mouse-only.
-- Targets: Linux (AppImage), Windows (`.exe`), macOS (`.app` through MoltenVK — stretch goal, feasibility unverified). Keep code portable; CI builds all three.
+- Targets: Linux (`.tar.gz`, AppImage optional), Windows (`.exe`), macOS (`.app` through MoltenVK — stretch goal, feasibility unverified). Keep code portable; CI builds all three.
 
 ## Autonomy
 
