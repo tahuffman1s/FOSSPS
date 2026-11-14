@@ -1,0 +1,16 @@
+[package]
+name = "fossps-net"
+description = "Netcode for FOSSPS: commands to the server, snapshots back, prediction and correction on the client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fossps-physics = { path = "../fossps-physics" }
+
+# An exponential that gives the same digits on every machine.
+libm = "0.2"
+
+[lints]
+workspace = true

@@ -765,6 +765,14 @@ name = "fossps-input"
 version = "0.0.0"
 
 [[package]]
+name = "fossps-net"
+version = "0.0.0"
+dependencies = [
+ "fossps-physics",
+ "libm",
+]
+
+[[package]]
 name = "fossps-physics"
 version = "0.0.0"
 dependencies = [
