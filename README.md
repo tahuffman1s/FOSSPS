@@ -70,7 +70,26 @@ Script error in main.luau, line 1:
   The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.
 ```
 
-So far scripts can react to the game starting, to each tick and to input, and a game is a single `main.luau` (`require` comes later, as does the game-mode API). A new game is also set up for [Claude Code](https://claude.com/claude-code): it has a `CLAUDE.md` that explains the script API and tells Claude to test each change with `fossps check`, which runs a second of the game with no window and fails if the script has a mistake.
+A game mode is one call. This is a whole team deathmatch: the engine shares players out over the teams, scores a point for killing an enemy, brings the dead back, and starts and ends the rounds.
+
+```lua
+game.mode {
+    teams = { "Red", "Blue" },
+    scoreToWin = 50,
+    timeLimit = 600,
+}
+
+-- Rules of your own go in functions like this one.
+game.onKill(function(killer, victim)
+    if killer and killer.team == victim.team then
+        killer.team:addScore(-1)
+    end
+end)
+```
+
+[`examples/team-deathmatch`](examples/team-deathmatch/main.luau) is a complete one with kill streaks, and [`fossps.d.luau`](crates/fossps-script/types/fossps.d.luau) lists everything a script can call. Saving the script changes the rules of the running match and keeps the score. The rules run today under tests and `fossps check`; players joining a running game over the network and the scoreboard on screen are still being built (#171, #172).
+
+So far scripts can set up a game mode and react to the game starting, to each tick, to input and to what happens in the match, and a game is a single `main.luau` (`require` comes later). A new game is also set up for [Claude Code](https://claude.com/claude-code): it has a `CLAUDE.md` that explains the script API and tells Claude to test each change with `fossps check`, which runs a second of the game and a pretend match with no window and fails if the script has a mistake.
 
 A new game comes with autocomplete set up for VS Code: install the [Luau Language Server](https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp) extension and open the game's folder. For another editor, point the Luau language server at the `fossps.d.luau` in the game's folder.
 

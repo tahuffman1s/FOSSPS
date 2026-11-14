@@ -9,6 +9,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use fossps::cli::{self, quoted};
 use fossps::scaffold::{self, NewGame};
 use fossps::script::ENTRY_SCRIPT;
+use fossps::script::mode::Phase;
 use fossps::{Config, Game, ScriptGame};
 
 use crate::demo::InputDemo;
@@ -131,21 +132,41 @@ fn open(folder: &Path, config: &Config, verb: &str) -> Result<ScriptGame, String
     cli::open_game(folder, &config.actions, &format!("fossps {verb}"))
 }
 
-/// `fossps check`: runs a second of the game with no window and nothing
-/// pressed, and fails if the script has a mistake.
+/// `fossps check`: runs a second of the game and a pretend match with no
+/// window and nothing pressed, and fails if the script has a mistake.
 fn check(folder: &Path) -> Result<(), String> {
     /// One second of game time.
     const TICKS: u32 = 60;
+    /// The longest warm-up the pretend match sits through: ten minutes.
+    const LONGEST_WARMUP: u32 = 600 * TICKS;
 
     let config = Config::default();
     let mut game = open(folder, &config, "check")?;
     let mut input = fossps::input::Input::new(config.actions.clone());
     let step = 1.0 / TICKS as f32;
+    let mut played = false;
     // A script that fails to load never runs, so there is nothing to tick.
     if game.host().last_error().is_none() {
         for _ in 0..TICKS {
             game.tick(input.tick(), step);
         }
+        // A pretend match, so the functions that wait for players run too.
+        let first = game.host_mut().player_joined("Check Bot 1");
+        let second = game.host_mut().player_joined("Check Bot 2");
+        let mut waited = 0;
+        while game.host().mode().phase() != Phase::Playing && waited < LONGEST_WARMUP {
+            game.tick(input.tick(), step);
+            waited += 1;
+        }
+        played = game.host().mode().phase() == Phase::Playing;
+        game.host_mut().player_killed(Some(first), second);
+        game.host_mut().player_killed(None, first);
+        game.tick(input.tick(), step);
+        game.host_mut().end_round();
+        game.tick(input.tick(), step);
+        game.host_mut().player_left(second);
+        game.host_mut().player_left(first);
+        game.tick(input.tick(), step);
     }
 
     // The error itself was printed when it happened.
@@ -159,6 +180,21 @@ fn check(folder: &Path) -> Result<(), String> {
         "{ENTRY_SCRIPT} is fine: it loaded and ran for {TICKS} ticks (1 second of game time) \
          with no errors."
     );
+    if played {
+        println!(
+            "Then a pretend match was played: two players joined, the round started, one \
+             killed the other, one died alone, the round ended and both left. Each \
+             game.on... function in the script was called at least once, with no errors. \
+             Code the pretend match does not reach, such as what happens on a team kill, \
+             was not run."
+        );
+    } else {
+        println!(
+            "A pretend match was started with two players, but its warm-up is longer than \
+             ten minutes, so the round itself was not played. To have it played, set a \
+             shorter warm-up in game.mode, such as warmup = 5."
+        );
+    }
     println!(
         "Nothing was pressed, so code that only runs on input was not run. \
          Read that code carefully, and try it by playing with `fossps run`."
