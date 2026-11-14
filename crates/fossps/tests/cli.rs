@@ -230,3 +230,15 @@ fn check_fails_on_a_script_that_does_not_load() {
         stderr(&output)
     );
 }
+
+#[test]
+fn serve_in_a_folder_with_no_game_says_what_to_do() {
+    let folder = scratch("serve-empty");
+
+    let output = fossps(&folder, &["serve"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains("There is no game here"), "{said}");
+    assert!(said.contains("`fossps serve my-game`"), "{said}");
+}

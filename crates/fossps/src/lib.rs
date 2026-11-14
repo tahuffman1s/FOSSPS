@@ -26,11 +26,15 @@
 
 #[cfg(feature = "window")]
 mod app;
+#[cfg(feature = "cli")]
+#[doc(hidden)]
+pub mod cli;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;
 pub mod scaffold;
 mod script_game;
+pub mod server;
 mod tick;
 #[cfg(feature = "window")]
 mod translate;

@@ -33,10 +33,13 @@ cargo test
 cargo run -- new my-game      # creates a game in the folder my-game
 cargo run -- run my-game      # plays it (the first "run" is cargo's)
 cargo run -- check my-game    # tests its script without opening a window
+cargo run -- serve my-game    # runs it as a server, with no window (Ctrl-C stops it)
 cargo run -- demo             # opens the input demo window
 ```
 
 `cargo run --` stands in for the `fossps` command until there are packaged builds; to get a real `fossps` command now, run `cargo install --path crates/fossps`.
+
+A machine that only hosts can use the separate `fossps-server` program, which does what `fossps serve` does and has no windowing, graphics, gamepad or sound code in it: `cargo build --release -p fossps-server`. It ticks the game 60 times a second, sleeps in between, logs a status line every minute and warns when it cannot keep up. Players cannot join a server yet; playing over a network is the next piece of work.
 
 Running it needs a graphics driver with Vulkan 1.3; building does not need the Vulkan SDK. If it says Vulkan is missing or too old, update your graphics driver (on Linux, also install your distribution's Vulkan loader package, for example `sudo dnf install vulkan-loader`). The input demo draws a triangle and shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
 

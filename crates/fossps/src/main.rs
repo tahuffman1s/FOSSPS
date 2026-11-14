@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use fossps::cli::{self, quoted};
 use fossps::scaffold::{self, NewGame};
-use fossps::script::{ENTRY_SCRIPT, OpenError};
+use fossps::script::ENTRY_SCRIPT;
 use fossps::{Config, Game, ScriptGame};
 
 use crate::demo::InputDemo;
@@ -63,39 +64,32 @@ enum Command {
         /// The game's folder. Leave it out to check the game in the folder you are in
         folder: Option<PathBuf>,
     },
+    /// Run a game as a server, with no window
+    #[command(
+        after_help = "Examples:\n  fossps serve            Serve the game in this folder\n  \
+                            fossps serve my-game    Serve the game in the folder my-game\n\n\
+                      Press Ctrl-C to stop the server. For a machine that only hosts, the \
+                      separate\nfossps-server program does the same and needs no graphics \
+                      card or desktop."
+    )]
+    Serve {
+        /// The game's folder. Leave it out to serve the game in the folder you are in
+        folder: Option<PathBuf>,
+    },
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
 }
 
-/// Prints log messages to standard error.
-struct StderrLog;
-
-impl log::Log for StderrLog {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::Level::Info
-    }
-
-    fn log(&self, record: &log::Record<'_>) {
-        if self.enabled(record.metadata()) {
-            eprintln!("[{}] {}", record.level(), record.args());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-static LOG: StderrLog = StderrLog;
-
 fn main() -> ExitCode {
-    // If another logger is already installed, messages go there instead.
-    if log::set_logger(&LOG).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
-    }
+    cli::log_to_stderr();
 
     let outcome = match Cli::parse().command {
         Some(Command::New { folder }) => new(&folder),
         Some(Command::Run { folder }) => run(folder.as_deref().unwrap_or(Path::new("."))),
         Some(Command::Check { folder }) => check(folder.as_deref().unwrap_or(Path::new("."))),
+        Some(Command::Serve { folder }) => {
+            cli::serve_game(folder.as_deref().unwrap_or(Path::new(".")), "fossps serve")
+        }
         Some(Command::Demo) => demo(),
         // Asking for nothing is not a mistake: show what there is to ask for.
         None => Cli::command()
@@ -132,37 +126,9 @@ fn new(folder: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the game in `folder`, or says how to get one.
-fn open(folder: &Path, config: &Config) -> Result<ScriptGame, String> {
-    if folder.is_file() {
-        return Err(format!(
-            "{} is a file. This command takes the game's folder, the one with \
-             {ENTRY_SCRIPT} in it; inside that folder, no folder name is needed.",
-            folder.display()
-        ));
-    }
-    if !folder.is_dir() {
-        return Err(format!(
-            "There is no folder called {}. Check the spelling, or create a game there \
-             with `fossps new {}`.",
-            folder.display(),
-            quoted(&folder.display().to_string())
-        ));
-    }
-    ScriptGame::open(folder, &config.actions).map_err(|error| match error {
-        OpenError::Missing { .. } => format!(
-            "There is no game here: {} has no {ENTRY_SCRIPT} in it.\n\
-             Run this from inside a game's folder, or name the folder: \
-             `fossps run my-game`.\n\
-             To make a new game: `fossps new my-game`.",
-            if folder == Path::new(".") {
-                "this folder".to_owned()
-            } else {
-                folder.display().to_string()
-            }
-        ),
-        other @ OpenError::Unreadable { .. } => other.to_string(),
-    })
+/// Opens the game in `folder` for `fossps {verb}`, or says how to get one.
+fn open(folder: &Path, config: &Config, verb: &str) -> Result<ScriptGame, String> {
+    cli::open_game(folder, &config.actions, &format!("fossps {verb}"))
 }
 
 /// `fossps check`: runs a second of the game with no window and nothing
@@ -172,7 +138,7 @@ fn check(folder: &Path) -> Result<(), String> {
     const TICKS: u32 = 60;
 
     let config = Config::default();
-    let mut game = open(folder, &config)?;
+    let mut game = open(folder, &config, "check")?;
     let mut input = fossps::input::Input::new(config.actions.clone());
     let step = 1.0 / TICKS as f32;
     // A script that fails to load never runs, so there is nothing to tick.
@@ -203,7 +169,7 @@ fn check(folder: &Path) -> Result<(), String> {
 /// `fossps run`: plays the game in `folder` until its window is closed.
 fn run(folder: &Path) -> Result<(), String> {
     let mut config = Config::default();
-    let game = open(folder, &config)?;
+    let game = open(folder, &config, "run")?;
 
     match scaffold::refresh_types(folder) {
         Ok(true) => log::info!(
@@ -247,13 +213,4 @@ fn demo() -> Result<(), String> {
 /// Runs `game` until its window is closed.
 fn play(config: Config, game: impl Game) -> Result<(), String> {
     fossps::run(config, game).map_err(|error| error.to_string())
-}
-
-/// `text` as one word for a command line: in quotes if it has a space.
-fn quoted(text: &str) -> String {
-    if text.contains(' ') {
-        format!("\"{text}\"")
-    } else {
-        text.to_owned()
-    }
 }
