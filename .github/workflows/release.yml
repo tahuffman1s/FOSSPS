@@ -37,6 +37,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: plan
         env:
+          EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -47,7 +48,9 @@ jobs:
             exit 1
           fi
           publish=false
-          if [ "$REF_TYPE" = tag ]; then
+          # Only a pushed tag publishes: a run started by hand never does, even
+          # when it is started on a tag.
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ]; then
             if [ "$REF_NAME" != "v$version" ]; then
               echo "::error::The tag is $REF_NAME but Cargo.toml says version $version, so the programs would report the wrong version. Set version under [workspace.package] in Cargo.toml to ${REF_NAME#v}, merge that, delete this tag and tag the merged commit (docs/releasing.md)."
               exit 1
