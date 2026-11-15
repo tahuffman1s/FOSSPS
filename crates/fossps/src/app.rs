@@ -174,6 +174,19 @@ impl std::error::Error for AppError {
 /// or no graphics card here can draw with Vulkan 1.3. The error's message says
 /// what to do about it.
 pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
+    start(config, game, false)
+}
+
+/// Runs `game` as [`run`] does, as the editor: a ground grid is drawn over
+/// the level, and holding the right mouse button captures the mouse to look
+/// around with, whatever the live action set does with it.
+#[cfg(feature = "editor")]
+pub(crate) fn run_editor(config: Config, game: impl Game) -> Result<(), AppError> {
+    start(config, game, true)
+}
+
+/// Opens the window and runs `game` in it, as the editor if `editing`.
+fn start(config: Config, game: impl Game, editing: bool) -> Result<(), AppError> {
     for gap in config.actions.parity_gaps() {
         log::warn!("{gap}");
     }
@@ -185,6 +198,7 @@ pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
         gamepads: Gamepads::new(),
         config,
         game,
+        editing,
         renderer: None,
         window: None,
         occluded: false,
@@ -205,6 +219,8 @@ pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
 struct App<G> {
     config: Config,
     game: G,
+    /// Whether this is the editor: see [`run_editor`].
+    editing: bool,
     input: Input,
     clock: TickClock,
     /// Holds frames back to the frame rate limit.
@@ -423,6 +439,7 @@ impl<G: Game> ApplicationHandler for App<G> {
                     .and_then(|mut renderer| {
                         // Until levels are loaded from files (#60).
                         renderer.set_scene(&crate::standin::scene())?;
+                        renderer.set_grid(self.editing);
                         renderer.set_camera(Camera {
                             position: [0.0, STANDING_EYE, 0.0],
                             ..Camera::default()
@@ -503,6 +520,16 @@ impl<G: Game> ApplicationHandler for App<G> {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                // In the editor the right button is held to look around, as
+                // in the viewports of other editors, and the cursor comes
+                // back when it is let go.
+                if self.editing && button == winit::event::MouseButton::Right {
+                    if pressed {
+                        self.capture_mouse();
+                    } else {
+                        self.release_mouse();
+                    }
+                }
                 if pressed && !self.captured && self.mouse_mode() == MouseMode::Look {
                     // This click only captures the mouse. Passing it on would
                     // fire a shot the player did not mean. A set that points

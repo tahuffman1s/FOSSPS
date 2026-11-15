@@ -15,7 +15,7 @@ use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::font::Font;
 use crate::gpu::{Gpu, validation_errors};
-use crate::mesh::{MeshPipeline, Meshes};
+use crate::mesh::{Contents, MeshPipeline, Meshes};
 use crate::overlay::Overlay;
 use crate::swapchain::COLOUR;
 use crate::tonemap::{Canvas, Then, TonemapPipeline, exposure_scale};
@@ -222,7 +222,17 @@ fn frames(
                 .begin_command_buffer(commands, &vk::CommandBufferBeginInfo::default())
                 .unwrap();
             scene_view
-                .record(commands, 0, &mesh, Some(&meshes), camera, 1.0 / 60.0)
+                .record(
+                    commands,
+                    0,
+                    &mesh,
+                    Contents {
+                        meshes: Some(&meshes),
+                        grid: false,
+                    },
+                    camera,
+                    1.0 / 60.0,
+                )
                 .unwrap();
             tonemap.record(
                 commands,
@@ -878,7 +888,14 @@ fn overlaid(gpu: &Arc<Gpu>, format: vk::Format, lists: &[DrawList<'_>]) -> Vec<V
                 .begin_command_buffer(commands, &vk::CommandBufferBeginInfo::default())
                 .unwrap();
             scene_view
-                .record(commands, 0, &mesh, None, &Camera::default(), 1.0 / 60.0)
+                .record(
+                    commands,
+                    0,
+                    &mesh,
+                    Contents::default(),
+                    &Camera::default(),
+                    1.0 / 60.0,
+                )
                 .unwrap();
             ui.prepare(commands, 0, &mut overlay).unwrap();
             tonemap.record(

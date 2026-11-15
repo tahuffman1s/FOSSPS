@@ -45,6 +45,8 @@ jobs:
       - run: cargo test -p fossps-audio --no-default-features --lib --tests
       # The dedicated server builds on its own, without the window feature.
       - run: cargo build -p fossps-server
+      # The `fossps` command still builds with the editor left out.
+      - run: cargo check -p fossps --no-default-features --features window,cli
 
   # Draws the benchmark scene and fails if its frames have become much slower.
   bench:

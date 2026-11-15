@@ -11,6 +11,7 @@ use crate::buffer::Buffer;
 use crate::camera::{Mat4, normal_matrix};
 use crate::error::RenderError;
 use crate::gpu::Gpu;
+use crate::grid::{self, grid_bytes};
 use crate::scene::{DEPTH, SceneTarget};
 use crate::swapchain::COLOUR;
 
@@ -58,6 +59,15 @@ impl View {
         }
         bytes
     }
+}
+
+/// What a frame shows of the world.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Contents<'a> {
+    /// The level's meshes, if a level has been set.
+    pub(crate) meshes: Option<&'a Meshes>,
+    /// Whether the editor's ground grid is drawn over them.
+    pub(crate) grid: bool,
 }
 
 /// One mesh part placed in the world.
@@ -208,6 +218,8 @@ pub(crate) struct MeshPipeline {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// Draws the editor's ground grid, with the same layout and view.
+    grid: vk::Pipeline,
     pool: vk::DescriptorPool,
     /// The [`View`] of each frame that can be in progress at once, with the
     /// set that points the shader at it.
@@ -224,6 +236,7 @@ impl MeshPipeline {
             set_layout: vk::DescriptorSetLayout::null(),
             layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
+            grid: vk::Pipeline::null(),
             pool: vk::DescriptorPool::null(),
             views: Vec::with_capacity(frames),
         };
@@ -404,6 +417,7 @@ impl MeshPipeline {
         match created {
             Ok(pipelines) if !pipelines.is_empty() => {
                 mesh.pipeline = pipelines[0];
+                mesh.grid = grid::pipeline(gpu, layout)?;
                 Ok(mesh)
             }
             failed => {
@@ -414,7 +428,8 @@ impl MeshPipeline {
     }
 
     /// Records clearing `target` and drawing `meshes` into it as seen
-    /// through `view`.
+    /// through `view`, and then the editor's ground grid if `grid` says
+    /// where the eye is.
     ///
     /// The target's previous contents are discarded, and its three images
     /// are left ready for shaders to read.
@@ -438,6 +453,7 @@ impl MeshPipeline {
         target: &SceneTarget,
         view: &View,
         meshes: Option<&Meshes>,
+        grid: Option<[f32; 3]>,
     ) -> Result<(), RenderError> {
         let device = self.gpu.device();
         let Some((view_buffer, view_set)) = self.views.get(frame % self.views.len().max(1)) else {
@@ -567,22 +583,22 @@ impl MeshPipeline {
                 &vk::DependencyInfo::default().image_memory_barriers(&to_draw),
             );
             device.cmd_begin_rendering(commands, &rendering);
+            device.cmd_set_viewport(commands, 0, &[viewport]);
+            device.cmd_set_scissor(commands, 0, &[area]);
+            device.cmd_bind_descriptor_sets(
+                commands,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.layout,
+                0,
+                &[*view_set],
+                &[],
+            );
             if let Some(Meshes {
                 buffers: Some((vertices, indices)),
                 draws,
             }) = meshes
             {
                 device.cmd_bind_pipeline(commands, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-                device.cmd_bind_descriptor_sets(
-                    commands,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &[*view_set],
-                    &[],
-                );
-                device.cmd_set_viewport(commands, 0, &[viewport]);
-                device.cmd_set_scissor(commands, 0, &[area]);
                 device.cmd_bind_vertex_buffers(commands, 0, &[vertices.handle], &[0]);
                 device.cmd_bind_index_buffer(commands, indices.handle, 0, vk::IndexType::UINT32);
                 for draw in draws {
@@ -621,6 +637,18 @@ impl MeshPipeline {
                     );
                 }
             }
+            // After the meshes, so that its see-through lines lie over them.
+            if let Some(eye) = grid {
+                device.cmd_bind_pipeline(commands, vk::PipelineBindPoint::GRAPHICS, self.grid);
+                device.cmd_push_constants(
+                    commands,
+                    self.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    &grid_bytes(eye),
+                );
+                device.cmd_draw(commands, 6, 1, 0, 0);
+            }
             device.cmd_end_rendering(commands);
             device.cmd_pipeline_barrier2(
                 commands,
@@ -654,6 +682,7 @@ impl Drop for MeshPipeline {
         unsafe {
             let device = self.gpu.device();
             device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline(self.grid, None);
             device.destroy_descriptor_pool(self.pool, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);

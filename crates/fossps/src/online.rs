@@ -51,10 +51,10 @@ use crate::script_game::ScriptGame;
 pub const DEFAULT_PORT: u16 = 24680;
 
 /// Radians turned per count of mouse movement.
-const MOUSE_TURN: f32 = 0.002;
+pub(crate) const MOUSE_TURN: f32 = 0.002;
 
 /// Radians turned per second with the look stick pushed all the way.
-const STICK_TURN: f32 = 3.5;
+pub(crate) const STICK_TURN: f32 = 3.5;
 
 /// Half the width of the floor players stand on until a game has a level.
 const FLOOR_REACH: f32 = 500.0;

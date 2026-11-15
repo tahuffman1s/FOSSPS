@@ -32,6 +32,8 @@ pub mod bench;
 #[doc(hidden)]
 pub mod cli;
 pub mod controls;
+#[cfg(feature = "editor")]
+pub mod editor;
 mod error_overlay;
 mod game;
 #[cfg(feature = "window")]

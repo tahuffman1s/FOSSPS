@@ -46,6 +46,30 @@ pub fn log_to_stderr() {
 ///
 /// Fails with a message for the person if `folder` is not a game's folder.
 pub fn open_game(folder: &Path, actions: &ActionMap, command: &str) -> Result<ScriptGame, String> {
+    is_folder(folder)?;
+    ScriptGame::open(folder, actions).map_err(|error| match error {
+        OpenError::Missing { .. } => no_game_in(folder, command),
+        other @ OpenError::Unreadable { .. } => other.to_string(),
+    })
+}
+
+/// Checks that the game in `folder` is there, without running its script,
+/// or says how to get one. `command` is as for [`open_game`].
+///
+/// # Errors
+///
+/// Fails with a message for the person if `folder` is not a game's folder.
+pub fn find_game(folder: &Path, command: &str) -> Result<(), String> {
+    is_folder(folder)?;
+    if folder.join(ENTRY_SCRIPT).is_file() {
+        Ok(())
+    } else {
+        Err(no_game_in(folder, command))
+    }
+}
+
+/// Checks that `folder` is a folder, or says what a command wants instead.
+fn is_folder(folder: &Path) -> Result<(), String> {
     if folder.is_file() {
         return Err(format!(
             "{} is a file. This command takes the game's folder, the one with \
@@ -61,20 +85,22 @@ pub fn open_game(folder: &Path, actions: &ActionMap, command: &str) -> Result<Sc
             quoted(&folder.display().to_string())
         ));
     }
-    ScriptGame::open(folder, actions).map_err(|error| match error {
-        OpenError::Missing { .. } => format!(
-            "There is no game here: {} has no {ENTRY_SCRIPT} in it.\n\
-             Run this from inside a game's folder, or name the folder: \
-             `{command} my-game`.\n\
-             To make a new game: `fossps new my-game`.",
-            if folder == Path::new(".") {
-                "this folder".to_owned()
-            } else {
-                folder.display().to_string()
-            }
-        ),
-        other @ OpenError::Unreadable { .. } => other.to_string(),
-    })
+    Ok(())
+}
+
+/// What to say when `folder` holds no game. `command` is as for [`open_game`].
+fn no_game_in(folder: &Path, command: &str) -> String {
+    format!(
+        "There is no game here: {} has no {ENTRY_SCRIPT} in it.\n\
+         Run this from inside a game's folder, or name the folder: \
+         `{command} my-game`.\n\
+         To make a new game: `fossps new my-game`.",
+        if folder == Path::new(".") {
+            "this folder".to_owned()
+        } else {
+            folder.display().to_string()
+        }
+    )
 }
 
 /// Runs the game in `folder` as a dedicated server until Ctrl-C, taking

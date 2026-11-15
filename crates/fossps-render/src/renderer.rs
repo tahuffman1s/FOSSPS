@@ -13,7 +13,7 @@ use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::font::Font;
 use crate::gpu::Gpu;
-use crate::mesh::{MeshPipeline, Meshes};
+use crate::mesh::{Contents, MeshPipeline, Meshes};
 use crate::overlay::Overlay;
 use crate::swapchain::Swapchain;
 use crate::tonemap::{Canvas, Then, TonemapPipeline, exposure_scale};
@@ -153,6 +153,8 @@ pub struct Renderer {
     mesh: Option<MeshPipeline>,
     /// The level's meshes on the graphics card; `None` until a scene is set.
     meshes: Option<Meshes>,
+    /// Whether the editor's ground grid is drawn.
+    grid: bool,
     /// Where the scene is seen from.
     camera: Camera,
     /// What the scene is drawn into and upscaled by; its finished picture
@@ -221,6 +223,7 @@ impl Renderer {
             tonemap: None,
             mesh: None,
             meshes: None,
+            grid: false,
             camera: Camera::default(),
             view: None,
             view_for: (vk::Extent2D::default(), config.upscaling),
@@ -308,6 +311,16 @@ impl Renderer {
         if let Some(view) = &mut self.view {
             view.cut();
         }
+    }
+
+    /// Draws the editor's ground grid over the level, or stops drawing it,
+    /// from the next frame on.
+    ///
+    /// The grid lies at height 0 and reaches as far as can be seen: a line
+    /// every metre, a stronger one every ten, the X axis in red and the Z
+    /// axis in blue. A game being played has no use for it.
+    pub fn set_grid(&mut self, shown: bool) {
+        self.grid = shown;
     }
 
     /// Changes how much smaller than the window the scene is drawn, from the
@@ -546,7 +559,10 @@ impl Renderer {
                 slot.commands,
                 self.next,
                 mesh,
-                self.meshes.as_ref(),
+                Contents {
+                    meshes: self.meshes.as_ref(),
+                    grid: self.grid,
+                },
                 &self.camera,
                 seconds,
             )?;
