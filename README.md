@@ -111,6 +111,8 @@ A new game comes with autocomplete set up for VS Code: install the [Luau Languag
 
 Work is tracked in [issues](https://github.com/tahuffman1s/FOSSPS/issues) grouped by milestone. Changes land through pull requests that pass CI on Linux, Windows and macOS. Each pull request also gets an automated code review from Claude; you can ask it questions by mentioning `@claude` in a comment (maintainers only).
 
+The drawing tests check every Vulkan call when the Vulkan validation layer is installed (`vulkan-validation-layers` on Fedora and Arch, `vulkan-validationlayers` on Debian and Ubuntu, the Vulkan SDK on Windows) and run without it otherwise. Run them with `FOSSPS_REQUIRE_VALIDATION=1` to make a layer that did not load a failure, as CI does on Linux. (With `cargo test --release`, also set `FOSSPS_VALIDATION=1`: release builds check nothing unless asked.)
+
 ## License
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

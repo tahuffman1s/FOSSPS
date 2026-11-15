@@ -2,7 +2,8 @@
 //!
 //! This runs wherever Vulkan 1.3 is installed, including on a software
 //! renderer, and is skipped elsewhere. Set `FOSSPS_REQUIRE_VULKAN=1` to make
-//! a missing Vulkan a failure instead, as CI does on Linux.
+//! a missing Vulkan a failure instead, and `FOSSPS_REQUIRE_VALIDATION=1` to
+//! make a missing validation layer one, as CI does on Linux.
 
 use std::sync::Arc;
 
@@ -25,7 +26,10 @@ const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 fn gpu() -> Option<Arc<Gpu>> {
     // SAFETY: there is no window, so nothing has to outlive the `Gpu`.
     match unsafe { Gpu::new(None) } {
-        Ok(gpu) => Some(Arc::new(gpu)),
+        Ok(gpu) => {
+            gpu.require_validation();
+            Some(Arc::new(gpu))
+        }
         Err(
             error @ (RenderError::NoVulkan(_)
             | RenderError::OldVulkan { .. }

@@ -411,6 +411,27 @@ impl Gpu {
         })
     }
 
+    /// Whether the validation layer is checking this connection's Vulkan
+    /// calls. Only then can [`validation_errors`] be anything but 0.
+    #[must_use]
+    pub fn validates(&self) -> bool {
+        self.instance.debug.is_some()
+    }
+
+    /// Fails a test that was told Vulkan calls must be checked when they are
+    /// not, so "no mistakes reported" cannot mean "nobody was looking".
+    #[cfg(test)]
+    pub(crate) fn require_validation(&self) {
+        let required = std::env::var("FOSSPS_REQUIRE_VALIDATION").is_ok_and(|value| value != "0");
+        assert!(
+            !required || self.validates(),
+            "FOSSPS_REQUIRE_VALIDATION is set, but the Vulkan validation layer is not checking \
+             this test. Install the `vulkan-validation-layers` package (Fedora, Arch) or \
+             `vulkan-validationlayers` (Debian, Ubuntu), or unset FOSSPS_REQUIRE_VALIDATION. \
+             A release build checks nothing unless {VALIDATION_VARIABLE}=1 is set as well."
+        );
+    }
+
     /// Whether this graphics card can run the upscaler.
     pub(crate) fn can_upscale(&self) -> bool {
         self.can_upscale

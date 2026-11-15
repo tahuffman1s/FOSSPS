@@ -382,6 +382,7 @@ mod tests {
             }
             Err(error) => panic!("{error}"),
         };
+        headless.gpu().require_validation();
         let (width, height) = headless.drawn_size();
         assert_eq!((width, height), (96, 64));
         // With nothing to draw, and then with a scene.

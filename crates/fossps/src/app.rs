@@ -15,6 +15,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::game::{Frame, Game};
 use crate::gamepad::Gamepads;
+use crate::pace::{FramePacer, WATCH};
 use crate::tick::TickClock;
 use crate::translate;
 
@@ -64,6 +65,24 @@ pub struct Config {
     /// };
     /// ```
     pub vsync: bool,
+    /// The most frames drawn each second. 0 is no limit.
+    ///
+    /// This matters with `vsync` off, where nothing else holds frames back:
+    /// a simple scene can be drawn thousands of times a second, which keeps a
+    /// processor core and the graphics card busy for frames nobody sees. With
+    /// `vsync` on the display already sets the pace, and this only has an
+    /// effect when it is lower than the display's rate.
+    ///
+    /// A limit from 1 to 29 is treated as 30, so the simulation keeps up.
+    ///
+    /// ```
+    /// let config = fossps::Config {
+    ///     vsync: false,
+    ///     max_fps: 240,
+    ///     ..fossps::Config::default()
+    /// };
+    /// ```
+    pub max_fps: u32,
     /// How much smaller than the window the game is drawn before AMD's
     /// FSR 3.1 makes it full size. Smaller is faster.
     ///
@@ -79,8 +98,8 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// A 1280x720 window, 60 ticks per second, vsync on, FSR upscaling at
-    /// Quality and the standard FPS controls.
+    /// A 1280x720 window, 60 ticks per second, vsync on, at most 400 frames
+    /// per second, FSR upscaling at Quality and the standard FPS controls.
     fn default() -> Self {
         Self {
             title: "FOSSPS".to_owned(),
@@ -88,6 +107,7 @@ impl Default for Config {
             height: 720,
             tick_rate: 60,
             vsync: true,
+            max_fps: 400,
             upscaling: Upscaling::default(),
             actions: ActionMap::default_fps(),
         }
@@ -160,6 +180,7 @@ pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
     let event_loop = EventLoop::new().map_err(AppError::EventLoop)?;
     let mut app = App {
         clock: TickClock::new(config.tick_rate),
+        pacer: FramePacer::new(config.max_fps, Instant::now()),
         input: Input::new(config.actions.clone()),
         gamepads: Gamepads::new(),
         config,
@@ -185,6 +206,8 @@ struct App<G> {
     game: G,
     input: Input,
     clock: TickClock,
+    /// Holds frames back to the frame rate limit.
+    pacer: FramePacer,
     gamepads: Gamepads,
     /// Draws into the window. Declared before it so it is dropped first.
     renderer: Option<Renderer>,
@@ -507,13 +530,29 @@ impl<G: Game> ApplicationHandler for App<G> {
         if self.window.is_none() {
             return;
         }
+        // The frame rate limit is waited out here, before input is read and
+        // the game is asked for a frame, so what is drawn is as fresh as it
+        // can be. A hidden window draws nothing and is paced by the ticks.
+        if self.can_draw() {
+            let now = Instant::now();
+            let wait = self.pacer.wait(now);
+            if wait > WATCH {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(now + wait - WATCH));
+                return;
+            }
+            let due = now + wait;
+            while Instant::now() < due {
+                std::hint::spin_loop();
+            }
+            self.pacer.start(Instant::now());
+        }
         if self.update() {
             event_loop.exit();
             return;
         }
         // Drawing happens when the window system delivers the redraw. With
         // vsync a frame takes as long as the display allows, and that paces
-        // the loop.
+        // the loop; without it, the frame rate limit above does.
         if self.can_draw()
             && let Some(window) = &self.window
         {
