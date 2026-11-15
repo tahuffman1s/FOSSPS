@@ -11,7 +11,13 @@ fossps run
 ```
 
 Click the window to capture the mouse; Escape frees it.
-The window shows a test floor with a few blocks to walk between, until games have levels of their own. What the game does is printed in the terminal.
+The window shows the game's level: a small arena with a red end and a blue end. What the game does is printed in the terminal.
+
+## The level
+
+The level is `level.glb` in this folder. To make your own, build it in Blender (or another 3D tool), then export it over that file: File > Export > glTF 2.0, with the format set to glTF Binary (.glb). One unit is one metre, and a player is 1.8 m tall. `fossps edit` flies around the level, and `fossps check` says what to change if it cannot be read. Start the game again to see a level you have saved.
+
+The level is drawn in its materials' colours, and it is not solid yet: players stand on a flat floor at height 0 and walk through walls.
 
 | Action | Keyboard and mouse | Gamepad |
 | ------ | ------------------ | ------- |

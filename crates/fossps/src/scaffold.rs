@@ -1,7 +1,7 @@
 //! Creates a new game folder from the built-in template.
 //!
 //! This is what `fossps new` runs. A new game is a `main.luau` that already
-//! plays, a short README, the files an editor needs for autocomplete, and a
+//! plays, a small level to play it in, a short README, the files an editor needs for autocomplete, and a
 //! `CLAUDE.md` so Claude Code knows how to work on the game.
 
 use std::fmt;
@@ -25,6 +25,14 @@ const README: &str = include_str!("../template/README.md");
 const EDITOR_SETTINGS: &str = include_str!("../template/vscode-settings.json");
 const CLAUDE_GUIDE: &str = include_str!("../template/CLAUDE.md");
 const CLAUDE_SETTINGS: &str = include_str!("../template/claude-settings.json");
+
+/// The file in a game folder, or a game pack, that holds the game's level.
+pub const LEVEL_FILE: &str = "level.glb";
+
+/// The level a new game starts with, as the bytes of its `level.glb`: a
+/// small arena with a wall around it, a red end and a blue end, cover and
+/// two platforms with ramps.
+pub const STARTER_LEVEL: &[u8] = include_bytes!("../template/level.glb");
 
 /// A game folder that [`new_game`] just created.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,28 +165,15 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
 
     let editor_folder = folder.join(".vscode");
     let claude_folder = folder.join(".claude");
+    let named = |text: &str| text.replace(NAME_PLACEHOLDER, &name).into_bytes();
     let files = [
-        (
-            folder.join(ENTRY_SCRIPT),
-            MAIN_SCRIPT.replace(NAME_PLACEHOLDER, &name),
-        ),
-        (
-            folder.join("README.md"),
-            README.replace(NAME_PLACEHOLDER, &name),
-        ),
-        (folder.join(TYPES_FILE), TYPE_DEFINITIONS.to_owned()),
-        (
-            editor_folder.join("settings.json"),
-            EDITOR_SETTINGS.to_owned(),
-        ),
-        (
-            folder.join("CLAUDE.md"),
-            CLAUDE_GUIDE.replace(NAME_PLACEHOLDER, &name),
-        ),
-        (
-            claude_folder.join("settings.json"),
-            CLAUDE_SETTINGS.to_owned(),
-        ),
+        (folder.join(ENTRY_SCRIPT), named(MAIN_SCRIPT)),
+        (folder.join(LEVEL_FILE), STARTER_LEVEL.to_vec()),
+        (folder.join("README.md"), named(README)),
+        (folder.join(TYPES_FILE), TYPE_DEFINITIONS.into()),
+        (editor_folder.join("settings.json"), EDITOR_SETTINGS.into()),
+        (folder.join("CLAUDE.md"), named(CLAUDE_GUIDE)),
+        (claude_folder.join("settings.json"), CLAUDE_SETTINGS.into()),
     ];
 
     // Only what this call made is removed again if a later step fails, so a
@@ -193,10 +188,10 @@ pub fn new_game(path: &Path) -> Result<NewGame, NewGameError> {
             })
         })
         .and_then(|()| {
-            files.iter().try_for_each(|(path, text)| {
+            files.iter().try_for_each(|(path, contents)| {
                 create_new(path)?;
                 made += 1;
-                fs::write(path, text).map_err(|source| NewGameError::Io {
+                fs::write(path, contents).map_err(|source| NewGameError::Io {
                     path: path.clone(),
                     source,
                 })
@@ -388,6 +383,16 @@ mod tests {
 
         let host = ScriptHost::open(&game.folder, ActionMap::default()).unwrap();
         assert_eq!(host.last_error(), None);
+    }
+
+    #[test]
+    fn the_examples_level_is_the_starter_level() {
+        let example = fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/hello/level.glb"
+        ))
+        .unwrap();
+        assert!(example == STARTER_LEVEL, "copy template/level.glb over it");
     }
 
     #[test]

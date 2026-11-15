@@ -128,6 +128,7 @@ fn new_creates_a_game_and_says_how_to_play_it() {
     assert!(said.contains("    fossps run\n"), "{said}");
     for file in [
         "main.luau",
+        "level.glb",
         "README.md",
         "fossps.d.luau",
         ".vscode/settings.json",
@@ -367,6 +368,87 @@ fn check_passes_a_new_game_without_a_window() {
         "{}",
         stderr(&output)
     );
+    // The level `fossps new` made was loaded too.
+    assert!(
+        stdout(&output).contains("level.glb is fine: it loaded with 22 shapes placed"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// A new game whose level was replaced by something that is not one.
+fn game_with_a_broken_level(test: &str) -> PathBuf {
+    let folder = scratch(test);
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    fs::write(folder.join("game/level.glb"), "not a level").unwrap();
+    folder
+}
+
+#[test]
+fn check_fails_on_a_level_that_does_not_load_and_says_how_to_export_one() {
+    let folder = game_with_a_broken_level("check-level");
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains("level.glb is not a glTF file"), "{said}");
+    assert!(said.contains("glTF Binary (.glb)"), "{said}");
+    assert!(said.contains("level.glb could not be loaded"), "{said}");
+    assert!(said.contains("run `fossps check` again"), "{said}");
+    // The script still had its turn.
+    assert!(said.contains("Welcome to game!"), "{said}");
+    assert!(!stdout(&output).contains("level.glb is fine"));
+}
+
+#[test]
+fn check_passes_a_game_with_no_level_and_says_what_it_is_shown() {
+    let folder = scratch("check-no-level");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    fs::remove_file(folder.join("game/level.glb")).unwrap();
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("This game has no level.glb"), "{said}");
+    assert!(
+        said.contains("To give it a level, export one from Blender"),
+        "{said}"
+    );
+    assert!(said.contains("and save it as level.glb"), "{said}");
+    assert!(!stdout(&output).contains("level.glb is fine"));
+}
+
+#[test]
+fn run_and_edit_open_nothing_when_the_level_does_not_load() {
+    let folder = game_with_a_broken_level("run-level");
+
+    for verb in ["run", "edit"] {
+        let output = fossps(&folder, &[verb, "game"]);
+
+        assert!(!output.status.success(), "{verb}");
+        let said = stderr(&output);
+        assert!(said.contains("level.glb is not a glTF file"), "{said}");
+        assert!(said.contains("Nothing was opened"), "{said}");
+        assert!(
+            said.contains(&format!("run `fossps {verb}` again")),
+            "{said}"
+        );
+    }
+}
+
+#[test]
+fn package_refuses_a_game_whose_level_does_not_load() {
+    let folder = game_with_a_broken_level("package-level");
+
+    let output = fossps(&folder, &["package", "game", "--target", "linux"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains("level.glb is not a glTF file"), "{said}");
+    assert!(said.contains("The game was not packaged"), "{said}");
+    assert!(!folder.join("game/dist").exists());
 }
 
 #[test]
@@ -843,4 +925,30 @@ fn check_names_the_required_script_a_mistake_is_in() {
         "{said}"
     );
     assert!(said.contains("weapons.luau has a mistake"), "{said}");
+}
+
+#[test]
+fn a_packed_game_whose_level_does_not_load_says_so_and_opens_no_window() {
+    let folder = scratch("pack-level");
+    fs::write(folder.join("main.luau"), "").unwrap();
+    fs::write(folder.join("level.glb"), "not a level").unwrap();
+    let sources = ["main.luau", "level.glb"].map(|name| fossps_pack::Source {
+        name: name.to_owned(),
+        path: folder.join(name),
+    });
+    fossps_pack::write(&folder.join("Game.fpk"), "Game", &sources).unwrap();
+
+    let output = fossps(&folder, &["run", "Game.fpk"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(
+        said.contains("cannot start: its level could not be loaded"),
+        "{said}"
+    );
+    assert!(
+        said.contains("level.glb in Game.fpk is not a glTF file"),
+        "{said}"
+    );
+    assert!(said.contains("tell the game's maker"), "{said}");
 }

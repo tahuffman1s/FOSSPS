@@ -1,5 +1,5 @@
-//! Something to look at until levels are loaded from files (#60): a
-//! chequered floor and a few coloured blocks to walk between.
+//! What a game with no level of its own is shown: a chequered floor and a
+//! few coloured blocks to walk between.
 //!
 //! The floor is where the physics has it, at height 0. The blocks are only
 //! drawn; players walk through them.
@@ -110,7 +110,7 @@ pub(crate) fn at([x, y, z]: [f32; 3], [wide, high, deep]: [f32; 3]) -> Transform
 
 /// Adds four points and the two triangles between them to `part`. The
 /// points must run anticlockwise seen from the side `normal` points to.
-fn face(part: &mut MeshPart, corners: [[f32; 3]; 4], normal: [f32; 3]) {
+pub(crate) fn face(part: &mut MeshPart, corners: [[f32; 3]; 4], normal: [f32; 3]) {
     // A part here holds a few thousand points at most.
     #[allow(clippy::cast_possible_truncation)]
     let first = part.positions.len() as u32;

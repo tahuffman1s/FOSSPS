@@ -17,6 +17,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use fossps::Upscaling;
 use fossps::bench::Bench;
 use fossps::cli::{self, quoted};
+use fossps::level::{self, LEVEL_FILE};
 use fossps::online::{DEFAULT_PORT, FoundServer, JoinedGame, LocalGame, SEARCH_TIME, find_servers};
 use fossps::package;
 use fossps::player;
@@ -90,11 +91,13 @@ enum Command {
         /// The game's folder. Leave it out to edit the game in the folder you are in
         folder: Option<PathBuf>,
     },
-    /// Test a game's script without opening a window
+    /// Test a game's script and level without opening a window
     #[command(
         after_help = "Loads main.luau, starts the game and runs one second of it with nothing \
                       pressed.\nAnything the script prints is shown first. Prints any script error and fails if there was one, so it can be \
-                      used by scripts,\nautomated checks and AI assistants."
+                      used by scripts,\nautomated checks and AI assistants. The game's level, \
+                      level.glb, is loaded too,\nand a level that cannot be loaded fails the \
+                      check with what to change."
     )]
     Check {
         /// The game's folder. Leave it out to check the game in the folder you are in
@@ -397,7 +400,8 @@ fn open(folder: &Path, config: &Config, verb: &str) -> Result<ScriptGame, String
 }
 
 /// `fossps check`: runs a second of the game and a pretend match with no
-/// window and nothing pressed, and fails if the script has a mistake.
+/// window and nothing pressed, and loads the game's level. Fails if the
+/// script has a mistake or the level cannot be loaded.
 fn check(folder: &Path) -> Result<(), String> {
     /// One second of game time.
     const TICKS: u32 = 60;
@@ -406,6 +410,9 @@ fn check(folder: &Path) -> Result<(), String> {
 
     let config = Config::default();
     let mut game = open(folder, &config, "check")?;
+    // Said before the script's own lines; a level with a mistake fails the
+    // check at the end, after the script has had its turn.
+    let level = cli::load_level(folder).inspect_err(|error| eprintln!("{error}"));
     let mut input = fossps::input::Input::new(config.actions.clone());
     let step = 1.0 / TICKS as f32;
     let mut played = false;
@@ -441,6 +448,12 @@ fn check(folder: &Path) -> Result<(), String> {
             error.file
         ));
     }
+    let Ok(level) = level else {
+        return Err(format!(
+            "{LEVEL_FILE} could not be loaded (the error is shown above), so the game \
+             would not start. Export the level again, then run `fossps check` again."
+        ));
+    };
     println!(
         "{ENTRY_SCRIPT} is fine: it loaded and ran for {TICKS} ticks (1 second of game time) \
          with no errors."
@@ -464,6 +477,13 @@ fn check(folder: &Path) -> Result<(), String> {
         "Nothing was pressed, so code that only runs on input was not run. \
          Read that code carefully, and try it by playing with `fossps run`."
     );
+    if let Some(level) = level {
+        println!(
+            "{LEVEL_FILE} is fine: it loaded with {}. Nothing was drawn, so look at it \
+             with `fossps edit`.",
+            level::summary(&level)
+        );
+    }
     Ok(())
 }
 
@@ -475,6 +495,7 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     }
     let mut config = player_config();
     let game = open(folder, &config, "run")?;
+    config.level = cli::load_level(folder).map_err(|error| not_started(&error, "run"))?;
 
     match scaffold::refresh_types(folder) {
         Ok(true) => log::info!(
@@ -513,18 +534,24 @@ fn edit(folder: &Path) -> Result<(), String> {
         ));
     }
     cli::find_game(folder, "fossps edit")?;
+    let level = cli::load_level(folder).map_err(|error| not_started(&error, "edit"))?;
     let name = cli::game_name(folder);
     log::info!(
         "Editing {}. Hold the right mouse button to look around; W, A, S and D fly. \
          `fossps edit --help` lists the rest, for a gamepad too.",
         if name.is_empty() { "the game" } else { &name }
     );
-    // Until levels are loaded from files (#60).
-    log::info!(
-        "Games do not have levels of their own yet, so this is the stand-in level \
-         every game is played in."
-    );
-    fossps::editor::run(&name).map_err(|error| error.to_string())
+    fossps::editor::run(&name, level).map_err(|error| error.to_string())
+}
+
+/// What to say when a game's level cannot be loaded, so `fossps {verb}`
+/// opened nothing.
+fn not_started(error: &str, verb: &str) -> String {
+    format!(
+        "{error}\nNothing was opened, because the level could not be loaded. Export it \
+         again, then run `fossps {verb}` again. To carry on on the engine's test floor \
+         meanwhile, move the level's file out of the game's folder."
+    )
 }
 
 /// Starts `game`, called `name`, and plays it until its window is closed.
@@ -557,7 +584,8 @@ fn start(
             )
         })?
     };
-    play(config.clone(), game.with_title(config.title))
+    let title = config.title.clone();
+    play(config, game.with_title(title))
 }
 
 /// A packaged game started by its player: plays the game in the pack at
@@ -574,6 +602,18 @@ fn play_packed(pack: &Path, others_may_join: bool) -> Result<(), String> {
     // The window carries the game's own name; one with none keeps the usual title.
     if !packed.name.is_empty() {
         config.title.clone_from(&packed.name);
+    }
+    if let Some(bytes) = &packed.level {
+        let name = format!("{LEVEL_FILE} in {}", pack.display());
+        let level = level::from_bytes(&name, bytes).map_err(|error| {
+            format!(
+                "The game in {} cannot start: its level could not be loaded.\n{error}\nIf \
+                 it is your game, export the level again, try it with `fossps check`, then \
+                 package it again. Otherwise, tell the game's maker.",
+                pack.display()
+            )
+        })?;
+        config.level = Some(level);
     }
     start(config, packed.game, &packed.name, others_may_join)
 }
@@ -602,6 +642,14 @@ fn package(folder: &Path, target: Target, runtime_dir: Option<&Path>) -> Result<
         ));
     }
     drop(game);
+    // The same goes for the level: the player's copy would not start.
+    level::load(folder).map_err(|error| {
+        format!(
+            "{error}\nThe game was not packaged, because its level could not be loaded. \
+             Export the level again, try it with `fossps check`, then run `fossps package` \
+             again."
+        )
+    })?;
 
     let packaged =
         package::package_linux(folder, runtime_dir).map_err(|error| error.to_string())?;

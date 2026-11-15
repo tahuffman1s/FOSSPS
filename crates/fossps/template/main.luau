@@ -4,8 +4,8 @@
 --     fossps run
 -- Change anything here and save: the running game picks it up.
 --
--- The window shows a test floor with a few blocks to walk between, until
--- games have levels of their own. What happens in the game shows up as text:
+-- The window shows the game's level: level.glb, which you can export your own
+-- over from Blender as glTF Binary. What happens in the game shows up as text:
 -- print() writes to the terminal you ran `fossps run` from.
 
 -- What is in this table is kept when the file is saved and loaded again,
