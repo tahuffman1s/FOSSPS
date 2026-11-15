@@ -84,7 +84,7 @@
       <pre data-cmd tabindex="0"><code>fossps --version</code></pre>
     </div>
     <div class="code">
-      <pre class="out" tabindex="0"><code>fossps 0.0.0</code></pre>
+      <pre class="out" data-says="version" tabindex="0"><code>fossps 0.0.0</code></pre>
     </div>
   </div>
   <details>
@@ -125,7 +125,7 @@ Then open main.luau in an editor, change something and save: the running game up
     <p>You should see</p>
     <p>A window opens on a chequered floor with a few blocks standing on it. The terminal says, among a few other lines:</p>
     <div class="code">
-      <pre class="out" tabindex="0"><code>[INFO] Playing ./main.luau. Edit the file and save it to see changes right away.
+      <pre class="out" data-says="run" tabindex="0"><code>[INFO] Playing ./main.luau. Edit the file and save it to see changes right away.
 [INFO] Welcome to first-match! Click the game window so it can see your mouse.
 [INFO] Jump: Space, or the bottom face button on a gamepad.
 [INFO] Fire: left mouse button, or the right trigger.</code></pre>
@@ -245,7 +245,7 @@ main.luau is fine: it loaded and ran for 60 ticks (1 second of game time) with n
       <pre class="out" tabindex="0"><code>[INFO] Serving ./main.luau at 60 ticks a second, with no window. Press Ctrl-C to stop.
 [INFO] Players on this network join with just `fossps join`, which finds this game by itself, or by address: …</code></pre>
     </div>
-    <p>Then it waits. No window opens: a server only keeps the match.</p>
+    <p>Then it waits. No window opens: a server only keeps the match. (On Windows the first line says <code>.\main.luau</code>.)</p>
   </div>
   <p>Leave it running in this terminal.</p>
   <details>
@@ -271,9 +271,10 @@ main.luau is fine: it loaded and ran for 60 ticks (1 second of game time) with n
 [INFO] Joining localhost...
 [INFO] Joined as Player 1. Close the window to leave.</code></pre>
     </div>
-    <p>Look back at the first terminal. The server saw you arrive and your own rules ran on it; the second line comes after a five-second warm-up:</p>
+    <p>Look back at the first terminal. The server saw you arrive and your own rules ran on it; the first line is the server's, the next two are yours, and the last comes after a five-second warm-up:</p>
     <div class="code">
-      <pre class="out" tabindex="0"><code>[INFO] Player 1 joined Red.
+      <pre class="out" tabindex="0"><code>[INFO] Player 1 joined from …
+[INFO] Player 1 joined Red.
 [INFO] The round is on! First team to 50 wins.</code></pre>
     </div>
   </div>

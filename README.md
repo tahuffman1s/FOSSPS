@@ -97,7 +97,7 @@ game.onKill(function(killer, victim)
 end)
 ```
 
-[`examples/team-deathmatch`](examples/team-deathmatch/main.luau) is a complete one with kill streaks, and [`fossps.d.luau`](crates/fossps-script/types/fossps.d.luau) lists everything a script can call. Saving the script changes the rules of the running match and keeps the score. The rules run today under tests and `fossps check`; players joining a running game over the network and the scoreboard on screen are still being built (#171, #172).
+[`examples/team-deathmatch`](examples/team-deathmatch/main.luau) is a complete one with kill streaks, and [`fossps.d.luau`](crates/fossps-script/types/fossps.d.luau) lists everything a script can call. Saving the script changes the rules of the running match and keeps the score. A player who joins a served game is put on a team and the round starts, so the join and round rules run in a real match; kills there, the map's spawn points and the scoreboard on screen are still being built (#171, #172), so the rest of the rules run under tests and `fossps check`.
 
 So far scripts can set up a game mode and react to the game starting, to each tick, to input and to what happens in the match, and a game is a single `main.luau` (`require` comes later). A new game is also set up for [Claude Code](https://claude.com/claude-code): it has a `CLAUDE.md` that explains the script API and tells Claude to test each change with `fossps check`, which runs a second of the game and a pretend match with no window and fails if the script has a mistake.
 

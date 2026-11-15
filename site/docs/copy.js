@@ -20,7 +20,8 @@
         function () {
           button.textContent = "Copied";
           status.textContent = "Copied " + what;
-          setTimeout(function () { button.textContent = "Copy"; }, 2000);
+          // Emptied afterwards, so copying the same thing again is announced again.
+          setTimeout(function () { button.textContent = "Copy"; status.textContent = ""; }, 2000);
         },
         function () {
           status.textContent = "Could not copy. Select the text and copy it by hand.";

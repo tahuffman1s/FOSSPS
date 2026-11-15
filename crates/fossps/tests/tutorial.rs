@@ -164,6 +164,30 @@ fn new_prints_what_the_tutorial_shows() {
 }
 
 #[test]
+fn the_version_the_tutorial_shows_is_this_one() {
+    let output = fossps(&scratch("version"), &["--version"]);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert_shows(&block("data-says", "version"), &printed(&output));
+}
+
+#[test]
+fn a_new_game_greets_the_player_as_the_tutorial_shows() {
+    let game = new_game("greeting");
+
+    // `fossps check` starts the game the way `fossps run` does, with no
+    // window. Only the first line shown is `fossps run`'s own.
+    let output = fossps(&game, &["check"]);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let shown = block("data-says", "run");
+    let (first, greeting) = shown.split_once('\n').unwrap();
+    assert!(first.starts_with("[INFO] Playing "), "{first}");
+    assert_eq!(greeting.lines().count(), 3, "{greeting}");
+    assert_shows(greeting, &printed(&output));
+}
+
+#[test]
 fn the_lines_the_tutorial_edits_are_in_a_new_game() {
     let game = new_game("edits");
     let script = fs::read_to_string(game.join("main.luau")).unwrap();
