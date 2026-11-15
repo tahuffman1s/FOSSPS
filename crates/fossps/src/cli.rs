@@ -6,6 +6,7 @@ use std::time::Duration;
 use fossps_input::ActionMap;
 use fossps_script::{ENTRY_SCRIPT, OpenError};
 
+use crate::online::{DEFAULT_PORT, HostedGame};
 use crate::script_game::ScriptGame;
 use crate::server::{ServerConfig, StopSignal, serve};
 
@@ -74,16 +75,25 @@ pub fn open_game(folder: &Path, actions: &ActionMap, command: &str) -> Result<Sc
     })
 }
 
-/// Runs the game in `folder` as a dedicated server until Ctrl-C. `command` is
-/// what the person typed before the folder, such as `fossps serve`.
+/// Runs the game in `folder` as a dedicated server until Ctrl-C, taking
+/// players on the UDP port `port`. `command` is what the person typed before
+/// the folder, such as `fossps serve`.
 ///
 /// # Errors
 ///
 /// Fails with a message for the person if `folder` is not a game's folder or
 /// the server could not start.
-pub fn serve_game(folder: &Path, command: &str) -> Result<(), String> {
+pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String> {
     let config = ServerConfig::default();
-    let mut game = open_game(folder, &config.actions, command)?;
+    let game = open_game(folder, &config.actions, command)?;
+    let mut game =
+        HostedGame::open(game, &format!("0.0.0.0:{port}"), config.tick_rate).map_err(|error| {
+            format!(
+                "The server could not start: {error}\nTo use another port: \
+                 `{command} --port {}`.",
+                port.checked_add(1).unwrap_or(DEFAULT_PORT)
+            )
+        })?;
     let stop = StopSignal::on_ctrl_c().map_err(|error| error.to_string())?;
 
     log::info!(
@@ -91,10 +101,7 @@ pub fn serve_game(folder: &Path, command: &str) -> Result<(), String> {
         folder.join(ENTRY_SCRIPT).display(),
         config.tick_rate
     );
-    log::info!(
-        "Players cannot join yet: playing over a network is still being built. \
-         For now this runs the game's script the way a server will."
-    );
+    log::info!("{}", how_to_join(port));
     let report = serve(&config, &mut game, &stop);
     log::info!(
         "Server stopped after {}. It ran {} ticks{}.",
@@ -107,6 +114,21 @@ pub fn serve_game(folder: &Path, command: &str) -> Result<(), String> {
         }
     );
     Ok(())
+}
+
+/// What to tell the person hosting about getting players in.
+fn how_to_join(port: u16) -> String {
+    let suffix = if port == DEFAULT_PORT {
+        String::new()
+    } else {
+        format!(":{port}")
+    };
+    format!(
+        "Players can join on UDP port {port}. On this computer: `fossps join localhost{suffix}`. \
+         From another computer: `fossps join` and this computer's address, such as \
+         `fossps join 192.168.1.20{suffix}`. Over the internet, the router has to pass \
+         UDP port {port} on to this computer."
+    )
 }
 
 /// `text` as one word for a command line: in quotes if it has a space.
@@ -143,6 +165,15 @@ mod tests {
         assert_eq!(long_time(Duration::from_secs(309)), "5 min 9 s");
         assert_eq!(long_time(Duration::from_secs(7_509)), "2 h 5 min 9 s");
         assert_eq!(long_time(Duration::from_secs(7_200)), "2 h 0 min 0 s");
+    }
+
+    #[test]
+    fn joining_advice_names_the_port_only_when_it_is_not_the_usual_one() {
+        let usual = how_to_join(DEFAULT_PORT);
+        assert!(usual.contains("`fossps join localhost`"), "{usual}");
+        let other = how_to_join(7000);
+        assert!(other.contains("`fossps join localhost:7000`"), "{other}");
+        assert!(other.contains("UDP port 7000"), "{other}");
     }
 
     #[test]

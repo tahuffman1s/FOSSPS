@@ -32,6 +32,7 @@ pub mod cli;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;
+pub mod online;
 pub mod scaffold;
 mod script_game;
 pub mod server;

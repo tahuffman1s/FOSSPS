@@ -18,18 +18,34 @@ pub trait Game {
     }
 }
 
+/// A borrowed game is a game, so one can be run and looked at afterwards.
+impl<G: Game + ?Sized> Game for &mut G {
+    fn tick(&mut self, input: &InputFrame, step: f32) {
+        (**self).tick(input, step);
+    }
+
+    fn frame(&mut self, frame: &mut Frame) {
+        (**self).frame(frame);
+    }
+}
+
 /// What a game can read and change while presenting one frame.
 #[derive(Debug, Default)]
 pub struct Frame {
     alpha: f32,
     title: Option<String>,
+    close: bool,
 }
 
 impl Frame {
     /// A frame that is `alpha` of the way from the last tick to the next.
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn new(alpha: f32) -> Self {
-        Self { alpha, title: None }
+        Self {
+            alpha,
+            title: None,
+            close: false,
+        }
     }
 
     /// How far the frame is between the last tick and the next, from 0 to 1.
@@ -44,6 +60,19 @@ impl Frame {
     /// Changes the window title.
     pub fn set_title(&mut self, title: impl Into<String>) {
         self.title = Some(title.into());
+    }
+
+    /// Closes the window and ends the game after this frame, as if the
+    /// player had closed it. A game on a server has no window, so nothing
+    /// happens there.
+    pub fn close(&mut self) {
+        self.close = true;
+    }
+
+    /// Whether the game asked to end this frame.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn closing(&self) -> bool {
+        self.close
     }
 
     /// The title requested this frame, if any.

@@ -258,7 +258,8 @@ impl<G: Game> App<G> {
     }
 
     /// Runs the ticks that are due and lets the game prepare the next frame.
-    fn update(&mut self) {
+    /// Returns whether the game asked to end.
+    fn update(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame);
         self.last_frame = now;
@@ -274,6 +275,7 @@ impl<G: Game> App<G> {
         if let (Some(title), Some(window)) = (frame.take_title(), &self.window) {
             window.set_title(&title);
         }
+        frame.closing()
     }
 }
 
@@ -397,7 +399,10 @@ impl<G: Game> ApplicationHandler for App<G> {
         if self.window.is_none() {
             return;
         }
-        self.update();
+        if self.update() {
+            event_loop.exit();
+            return;
+        }
         // Drawing happens when the window system delivers the redraw. With
         // vsync a frame takes as long as the display allows, and that paces
         // the loop.
