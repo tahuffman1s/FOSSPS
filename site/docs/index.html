@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs — FOSSPS</title>
+<meta name="description" content="FOSSPS documentation: a ten-minute first tutorial, every command, and what a game script can do today.">
+<meta property="og:title" content="Docs — FOSSPS">
+<meta property="og:description" content="A ten-minute first tutorial, every command, and what a game script can do today.">
+<meta name="color-scheme" content="dark light">
+<link rel="stylesheet" href="docs.css">
+</head>
+<body>
+
+<header>
+  <nav class="wrap" aria-label="Main">
+    <a class="brand mono" href="../index.html">FOSS<span>PS</span></a>
+    <ul>
+      <li><a href="index.html" aria-current="page">Docs</a></li>
+      <li><a href="first-match.html">Tutorial</a></li>
+      <li class="hide"><a href="../index.html#roadmap">Roadmap</a></li>
+      <li><a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main>
+<div class="wrap">
+<article class="page">
+  <h1>Docs</h1>
+  <p class="lead">FOSSPS is early, so these pages only describe what runs today. New here? Start with the tutorial.</p>
+
+  <div class="cards">
+    <a class="card big" href="first-match.html"><b>Your first match</b><span>Make a game, change it while it runs, turn it into a team deathmatch and join it over the network. About ten minutes.</span></a>
+  </div>
+
+  <h2 id="today">What works today</h2>
+  <table>
+    <thead><tr><th scope="col">You can</th><th scope="col">Not yet</th></tr></thead>
+    <tbody>
+      <tr><td>Make a game with one command and play it</td><td>Levels of your own: every game shows the same test floor</td></tr>
+      <tr><td>Change the script and see the running game update</td><td>Scripts in more than one file</td></tr>
+      <tr><td>Write a game mode: teams, scores, rounds, your own rules</td><td>Weapons and kills in a running match, and a scoreboard on screen</td></tr>
+      <tr><td>Serve a game and have others on your network join it and walk around</td><td>Seeing the other players</td></tr>
+      <tr><td>Play with keyboard and mouse or a gamepad</td><td>Changing which button does what</td></tr>
+      <tr><td>Make a Linux download of a game</td><td>Windows and macOS downloads of a game</td></tr>
+    </tbody>
+  </table>
+  <p>The work still to do is listed, in order, in the <a href="https://github.com/tahuffman1s/FOSSPS/milestones">milestones</a>.</p>
+
+  <h2 id="install">Install</h2>
+  <p>There are no downloads yet: FOSSPS is built from its source code, which takes one command once <a href="https://rustup.rs">Rust</a> is installed. <a href="first-match.html#install">Step 1 of the tutorial</a> walks through it.</p>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>cargo install --git https://github.com/tahuffman1s/FOSSPS fossps</code></pre>
+  </div>
+  <p>Run the same line again to update. It needs Linux or Windows and a graphics driver with Vulkan 1.3; macOS is not ready.</p>
+
+  <h2 id="commands">Commands</h2>
+  <p>Each one explains itself with <code>--help</code>, as in <code>fossps run --help</code>. A command that takes a game uses the folder you are in unless you name another.</p>
+  <table class="commands">
+    <thead><tr><th scope="col">Command</th><th scope="col">What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>fossps new my-game</code></td><td>Creates a game that is ready to play, in a new folder called <code>my-game</code>.</td></tr>
+      <tr><td><code>fossps run</code></td><td>Plays the game. It loads the script again every time you save it.</td></tr>
+      <tr><td><code>fossps run --open</code></td><td>Plays the game and lets others on your network join it, with no separate server.</td></tr>
+      <tr><td><code>fossps check</code></td><td>Tests the script without opening a window: runs a second of the game and a pretend match, and fails if the script has a mistake.</td></tr>
+      <tr><td><code>fossps serve</code></td><td>Runs the game as a server, with no window, until <kbd>Ctrl</kbd>+<kbd>C</kbd>. <code>--port</code> picks another port than UDP 24680.</td></tr>
+      <tr><td><code>fossps join</code></td><td>Finds a game on your network and joins it. Give an address to join one elsewhere: <code>fossps join 192.168.1.20</code>.</td></tr>
+      <tr><td><code>fossps servers</code></td><td>Lists the games being served on your network.</td></tr>
+      <tr><td><code>fossps package</code></td><td>On Linux, writes a download of the game to its <code>dist</code> folder, which players unpack and run without installing FOSSPS.</td></tr>
+      <tr><td><code>fossps demo</code></td><td>Opens a test window that shows what your keyboard, mouse or gamepad is doing.</td></tr>
+      <tr><td><code>fossps bench</code></td><td>Measures how fast this computer draws a built-in test scene.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="scripting">Scripting</h2>
+  <p>A game is a folder with a <code>main.luau</code> in it, written in <a href="https://luau.org">Luau</a>. Everything the engine offers a script is in one table called <code>game</code>.</p>
+  <table>
+    <thead><tr><th scope="col">In a script</th><th scope="col">What it is for</th></tr></thead>
+    <tbody>
+      <tr><td><code>game.mode { … }</code></td><td>Sets up the match: teams, the score to win, the time limit, how long the dead wait.</td></tr>
+      <tr><td><code>game.onStart</code>, <code>game.onTick</code>, <code>game.onReload</code></td><td>Run your code when the game starts, 60 times a second, and when the script is saved.</td></tr>
+      <tr><td><code>game.onPlayerJoin</code>, <code>game.onPlayerLeave</code>, <code>game.onSpawn</code>, <code>game.onKill</code></td><td>Run your code when something happens to a player.</td></tr>
+      <tr><td><code>game.onRoundStart</code>, <code>game.onRoundEnd</code></td><td>Run your code when a round starts and when it is won.</td></tr>
+      <tr><td><code>game.players()</code>, <code>game.teams()</code>, <code>game.team("Red")</code></td><td>Who is in the match. A team has a <code>name</code> and a <code>score</code>, and <code>team:addScore(1)</code> changes it.</td></tr>
+      <tr><td><code>game.input</code></td><td>What the player is pressing, by action name (<code>"jump"</code>, <code>"fire"</code>, <code>"move"</code>), the same for keyboard, mouse and gamepad.</td></tr>
+    </tbody>
+  </table>
+  <p>The full list, with every setting and what each function is given, is <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/crates/fossps-script/types/fossps.d.luau"><code>fossps.d.luau</code></a>. A copy is in every game's folder, which is what gives your editor autocomplete: in VS Code, install the <a href="https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp">Luau Language Server</a> extension and open the game's folder.</p>
+  <p>Two games to read: <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/hello/main.luau">hello</a>, the smallest one, and <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/team-deathmatch/main.luau">team-deathmatch</a>, with kill streaks.</p>
+
+  <h2 id="help">Stuck?</h2>
+  <p>Error messages are meant to say what to do next. If one did not, or a page here is wrong, <a href="https://github.com/tahuffman1s/FOSSPS/issues/new">open an issue</a> and paste what the terminal said.</p>
+</article>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    FOSSPS is free software under your choice of the <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/LICENSE-MIT">MIT</a> or <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/LICENSE-APACHE">Apache 2.0</a> license.
+    Follow or contribute on <a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a>.
+  </div>
+</footer>
+
+<script src="copy.js"></script>
+</body>
+</html>

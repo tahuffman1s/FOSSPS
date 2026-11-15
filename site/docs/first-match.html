@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your first match — FOSSPS</title>
+<meta name="description" content="A ten-minute tutorial: make a FOSSPS game, change it while it runs, turn it into a team deathmatch and join it from a second window.">
+<meta property="og:title" content="Your first match — FOSSPS">
+<meta property="og:description" content="Make a game, change it while it runs, turn it into a team deathmatch and join it over the network. Ten minutes.">
+<meta name="color-scheme" content="dark light">
+<link rel="stylesheet" href="docs.css">
+</head>
+<body>
+
+<header>
+  <nav class="wrap" aria-label="Main">
+    <a class="brand mono" href="../index.html">FOSS<span>PS</span></a>
+    <ul>
+      <li><a href="index.html">Docs</a></li>
+      <li><a href="first-match.html" aria-current="page">Tutorial</a></li>
+      <li class="hide"><a href="../index.html#roadmap">Roadmap</a></li>
+      <li><a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main>
+<div class="wrap">
+<article class="page">
+  <p class="crumb"><a href="index.html">Docs</a> / Tutorial</p>
+  <h1>Your first match</h1>
+  <p class="lead">You will make a game, change it while it runs, turn it into a team deathmatch, and join it from a second window the way a friend on your network would.</p>
+
+  <ul class="facts">
+    <li><b>About ten minutes</b>after a one-off install that takes about five more</li>
+    <li><b>Linux or Windows</b>with a graphics driver from the last few years</li>
+    <li><b>No experience needed</b>every command is here to copy</li>
+  </ul>
+
+  <div class="note">
+    <p>What you get today</p>
+    <p>FOSSPS is early. At the end of this page two players stand in the same world and walk around it, on teams, with a round running. The world is a test floor with a few blocks, other players are not drawn yet, and nobody can shoot anybody: weapons in a running match are still being built. The engine plays a pretend match against your rules instead, and you will watch it do that in step 5.</p>
+  </div>
+
+  <nav class="toc" aria-label="Steps">
+    <p>Steps</p>
+    <ol>
+      <li><a href="#install">Install FOSSPS</a></li>
+      <li><a href="#new">Make a game</a></li>
+      <li><a href="#play">Play it</a></li>
+      <li><a href="#change">Change it while it runs</a></li>
+      <li><a href="#mode">Turn it into a team deathmatch</a></li>
+      <li><a href="#serve">Start a server</a></li>
+      <li><a href="#join">Join the match</a></li>
+    </ol>
+  </nav>
+
+  <h2 id="install"><span class="n mono">1</span>Install FOSSPS</h2>
+  <p>There is no download yet, so your computer builds FOSSPS from its source code. That needs two things installed first, and you only do this once.</p>
+  <p>Everything on this page is typed into a terminal. On Linux, open the program called Terminal or Konsole. On Windows, press the Windows key, type <kbd>PowerShell</kbd> and press Enter.</p>
+
+  <h3>Rust, which builds the engine</h3>
+  <p>Follow the one step at <a href="https://rustup.rs">rustup.rs</a>, then close the terminal and open a new one. On Windows it also offers to install the Visual Studio build tools: say yes.</p>
+
+  <h3>On Linux only: a compiler and two libraries</h3>
+  <div class="code">
+    <span class="label">Ubuntu, Debian, Mint</span>
+    <pre data-cmd tabindex="0"><code>sudo apt install g++ libudev-dev libasound2-dev</code></pre>
+  </div>
+  <div class="code">
+    <span class="label">Fedora</span>
+    <pre data-cmd tabindex="0"><code>sudo dnf install gcc-c++ systemd-devel alsa-lib-devel</code></pre>
+  </div>
+
+  <h3>FOSSPS itself</h3>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>cargo install --git https://github.com/tahuffman1s/FOSSPS fossps</code></pre>
+  </div>
+  <p>This is the slow part: one to five minutes on most computers, longer on an old one. Lines starting with <code>Compiling</code> scroll past while it works. Nothing is wrong while they keep coming.</p>
+  <div class="see">
+    <p>You should see</p>
+    <p>The last line starts with <code>Installed package</code>. Check that the command is there:</p>
+    <div class="code">
+      <pre data-cmd tabindex="0"><code>fossps --version</code></pre>
+    </div>
+    <div class="code">
+      <pre class="out" tabindex="0"><code>fossps 0.0.0</code></pre>
+    </div>
+  </div>
+  <details>
+    <summary>It says <code>cargo</code> is not found, or <code>fossps</code> is not found</summary>
+    <p>The terminal was open before Rust was installed. Close it, open a new one and try again.</p>
+  </details>
+  <details>
+    <summary>It stops with <code>linker `cc` not found</code> or <code>failed to run custom build command</code></summary>
+    <p>A compiler or library is missing. On Linux, run the line for your system under “a compiler and two libraries” above. On Windows, run the Rust installer again and let it install the Visual Studio build tools. Then run the <code>cargo install</code> line again; it carries on from where it stopped.</p>
+  </details>
+
+  <h2 id="new"><span class="n mono">2</span>Make a game</h2>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>fossps new first-match</code></pre>
+  </div>
+  <div class="see">
+    <p>You should see</p>
+    <div class="code">
+      <pre class="out" data-says="new" tabindex="0"><code>Created the game "first-match" in …
+
+Play it:
+    cd first-match
+    fossps run
+
+Then open main.luau in an editor, change something and save: the running game updates by itself.</code></pre>
+    </div>
+  </div>
+  <p>A game is a folder. Yours is called <code>first-match</code>, and the file that matters in it is <code>main.luau</code>: the game's script. Go into the folder, and stay in it for the rest of this page:</p>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>cd first-match</code></pre>
+  </div>
+
+  <h2 id="play"><span class="n mono">3</span>Play it</h2>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>fossps run</code></pre>
+  </div>
+  <div class="see">
+    <p>You should see</p>
+    <p>A window opens on a chequered floor with a few blocks standing on it. The terminal says, among a few other lines:</p>
+    <div class="code">
+      <pre class="out" tabindex="0"><code>[INFO] Playing ./main.luau. Edit the file and save it to see changes right away.
+[INFO] Welcome to first-match! Click the game window so it can see your mouse.
+[INFO] Jump: Space, or the bottom face button on a gamepad.
+[INFO] Fire: left mouse button, or the right trigger.</code></pre>
+    </div>
+  </div>
+  <p>On Windows the first line says <code>.\main.luau</code>. Click the window, then look around with the mouse and walk with <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>. A gamepad works too: left stick to walk, right stick to look. Press <kbd>Space</kbd> a few times and watch the terminal:</p>
+  <div class="code">
+    <pre class="out" tabindex="0"><code>[INFO] Jump number 1
+[INFO] Jump number 2</code></pre>
+  </div>
+  <p>That text comes from your script. <kbd>Esc</kbd> gives the mouse back. Leave the game running for the next step.</p>
+  <details>
+    <summary>It says <code>Could not find Vulkan on this computer</code>, or that Vulkan is too old</summary>
+    <p>FOSSPS draws with Vulkan 1.3, which comes with the graphics driver. Update the driver for your graphics card and run <code>fossps run</code> again. On Linux, also install the Vulkan loader: <code>sudo apt install libvulkan1</code> or <code>sudo dnf install vulkan-loader</code>.</p>
+  </details>
+  <details>
+    <summary>It says <code>There is no game here</code></summary>
+    <p>The terminal is not in the game's folder. Run <code>cd first-match</code>, then <code>fossps run</code> again.</p>
+  </details>
+
+  <h2 id="change"><span class="n mono">4</span>Change it while it runs</h2>
+  <p>Open <code>first-match/main.luau</code> in any text editor: Notepad and Text Editor are fine. Find this line:</p>
+  <div class="code">
+    <pre data-finds="main.luau" tabindex="0"><code>        print("Jump number " .. jumps)</code></pre>
+  </div>
+  <p>Change the words inside the quotes, and save the file:</p>
+  <div class="code">
+    <pre tabindex="0"><code>        print("Boing! That is jump " .. jumps)</code></pre>
+  </div>
+  <div class="see">
+    <p>You should see</p>
+    <p>The terminal says the game took the new version, without restarting:</p>
+    <div class="code">
+      <pre class="out" tabindex="0"><code>[INFO] Reloaded main.luau.
+[INFO] main.luau was saved and loaded again, so the jump count starts from 0.</code></pre>
+    </div>
+    <p>Jump in the game, and the terminal now says <code>Boing! That is jump 1</code>.</p>
+  </div>
+  <p>Now break it on purpose. Change <code>game.onTick</code> to <code>game.onTik</code> and save:</p>
+  <div class="code">
+    <pre class="out" data-says="mistake" tabindex="0"><code>[ERROR] Script error in main.luau, line 20:
+
+    20 | game.onTik(function(step)
+
+  game.onTik does not exist. Did you mean game.onTick?
+  The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.</code></pre>
+  </div>
+  <p>The game did not crash, and the message says which line and what to try. Put the <code>c</code> back, save, and it reloads. Then close the game's window.</p>
+
+  <h2 id="mode"><span class="n mono">5</span>Turn it into a team deathmatch</h2>
+  <p>Replace everything in <code>main.luau</code> with this, and save:</p>
+  <div class="code">
+    <span class="label">main.luau</span>
+    <pre data-file="main.luau" tabindex="0"><code>-- first-match: a team deathmatch.
+
+-- This one call is the whole game mode. The engine shares players out over
+-- the teams, scores a point for killing an enemy, brings the dead back, and
+-- starts and ends the rounds. timeLimit is in seconds.
+game.mode {
+    teams = { "Red", "Blue" },
+    scoreToWin = 50,
+    timeLimit = 600,
+}
+
+-- Everything below is a rule of your own. print() writes to the terminal.
+
+game.onPlayerJoin(function(player)
+    print(player.name .. " joined " .. player.team.name .. ".")
+end)
+
+game.onRoundStart(function()
+    print("The round is on! First team to 50 wins.")
+end)
+
+game.onKill(function(killer, victim)
+    if killer and killer.team ~= victim.team then
+        print(killer.name .. " scored for " .. killer.team.name .. ".")
+    end
+end)
+
+game.onRoundEnd(function(winner)
+    if winner then
+        print(winner.name .. " wins the round!")
+    end
+end)</code></pre>
+  </div>
+  <p>Nobody can score in a running match yet, so let the engine try your rules out. This command opens no window: it plays a short pretend match with two bots and tells you if anything in the script went wrong.</p>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>fossps check</code></pre>
+  </div>
+  <div class="see">
+    <p>You should see</p>
+    <div class="code">
+      <pre class="out" data-says="check" tabindex="0"><code>[INFO] Check Bot 1 joined Red.
+[INFO] Check Bot 2 joined Blue.
+[INFO] The round is on! First team to 50 wins.
+[INFO] Check Bot 1 scored for Red.
+[INFO] Red wins the round!
+main.luau is fine: it loaded and ran for 60 ticks (1 second of game time) with no errors.</code></pre>
+    </div>
+    <p>A few more lines follow, saying what the pretend match did and did not try.</p>
+  </div>
+  <p>Each of those lines is one of your <code>print</code> calls, run by the engine at the moment its rule applied.</p>
+  <details>
+    <summary>It says <code>main.luau has a mistake</code></summary>
+    <p>Something went missing when the script was pasted. The lines above that message name the line and what to try. Select everything in <code>main.luau</code>, paste the script again, save, and run <code>fossps check</code> again.</p>
+  </details>
+
+  <h2 id="serve"><span class="n mono">6</span>Start a server</h2>
+  <p>In a multiplayer shooter one program, the server, decides what happens, and every player connects to it. Start one for your game:</p>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>fossps serve</code></pre>
+  </div>
+  <div class="see">
+    <p>You should see</p>
+    <div class="code">
+      <pre class="out" tabindex="0"><code>[INFO] Serving ./main.luau at 60 ticks a second, with no window. Press Ctrl-C to stop.
+[INFO] Players on this network join with just `fossps join`, which finds this game by itself, or by address: …</code></pre>
+    </div>
+    <p>Then it waits. No window opens: a server only keeps the match.</p>
+  </div>
+  <p>Leave it running in this terminal.</p>
+  <details>
+    <summary>It says <code>The server could not start</code></summary>
+    <p>Another server is already running on this computer, probably in another terminal. Stop that one with <kbd>Ctrl</kbd>+<kbd>C</kbd>, or do what the message says to use another port.</p>
+  </details>
+  <details>
+    <summary>A firewall asks whether to allow <code>fossps</code></summary>
+    <p>Allow it on private networks. Without that, players on other computers cannot reach your server; joining from the same computer works either way.</p>
+  </details>
+
+  <h2 id="join"><span class="n mono">7</span>Join the match</h2>
+  <p>Open a second terminal and run this. It does not need to be in the game's folder:</p>
+  <div class="code">
+    <pre data-cmd tabindex="0"><code>fossps join</code></pre>
+  </div>
+  <div class="see">
+    <p>You should see</p>
+    <p>A window opens on the same floor, and the second terminal says:</p>
+    <div class="code">
+      <pre class="out" tabindex="0"><code>[INFO] Looking for games on this network...
+[INFO] Found first-match (0 of 64 players).
+[INFO] Joining localhost...
+[INFO] Joined as Player 1. Close the window to leave.</code></pre>
+    </div>
+    <p>Look back at the first terminal. The server saw you arrive and your own rules ran on it; the second line comes after a five-second warm-up:</p>
+    <div class="code">
+      <pre class="out" tabindex="0"><code>[INFO] Player 1 joined Red.
+[INFO] The round is on! First team to 50 wins.</code></pre>
+    </div>
+  </div>
+  <p>That is a networked match: the server holds the teams, the score and the clock, and you are a player in it. Notice that <code>fossps join</code> was given no address. It found the game by itself, and it does the same from any other computer on your network that has FOSSPS installed. Try it with a friend: they will be Player 2, on Blue.</p>
+  <p>Close the window to leave, and press <kbd>Ctrl</kbd>+<kbd>C</kbd> in the first terminal to stop the server.</p>
+  <details>
+    <summary>It says <code>No games were found on this network</code></summary>
+    <p>Check that the first terminal still shows the server running. From another computer, a firewall or a guest Wi-Fi network can hide the server: use the address the server printed when it started, as in <code>fossps join 192.168.1.20</code>.</p>
+  </details>
+
+  <h2 id="next">What next</h2>
+  <p>You made a game, changed it while it ran, gave it rules and joined it over the network. From here:</p>
+  <div class="cards">
+    <a class="card" href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/team-deathmatch/main.luau"><b>Add kill streaks</b><span>A complete team deathmatch to read and borrow from.</span></a>
+    <a class="card" href="index.html#commands"><b>Every command</b><span>Host from your own game window, list servers, make a download.</span></a>
+    <a class="card" href="index.html#scripting"><b>Everything a script can do</b><span>The events, players, teams and input a script can use.</span></a>
+  </div>
+  <p>Did a step not do what this page said? That is a bug in the tutorial: <a href="https://github.com/tahuffman1s/FOSSPS/issues/new">tell us which step</a>.</p>
+</article>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    FOSSPS is free software under your choice of the <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/LICENSE-MIT">MIT</a> or <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/LICENSE-APACHE">Apache 2.0</a> license.
+    Follow or contribute on <a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a>.
+  </div>
+</footer>
+
+<script src="copy.js"></script>
+</body>
+</html>

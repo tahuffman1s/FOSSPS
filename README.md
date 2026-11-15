@@ -2,7 +2,7 @@
 
 A free, open-source engine for multiplayer first-person shooters.
 
-[Website](https://tahuffman1s.github.io/FOSSPS/) · [Roadmap](ROADMAP.md) · [Issues](https://github.com/tahuffman1s/FOSSPS/issues)
+[Website](https://tahuffman1s.github.io/FOSSPS/) · [Docs](https://tahuffman1s.github.io/FOSSPS/docs/) · [Tutorial](https://tahuffman1s.github.io/FOSSPS/docs/first-match.html) · [Roadmap](ROADMAP.md) · [Issues](https://github.com/tahuffman1s/FOSSPS/issues)
 
 [![CI](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml/badge.svg)](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml)
 
@@ -16,6 +16,8 @@ A free, open-source engine for multiplayer first-person shooters.
 - **Modern** — Vulkan 1.3 renderer, FSR 3.1 upscaling, first-class controller support.
 
 Planned platforms: Linux, Windows, and macOS as a stretch goal.
+
+New here? [Your first match](https://tahuffman1s.github.io/FOSSPS/docs/first-match.html) is a ten-minute tutorial: install with one command, make a game, change it while it runs, turn it into a team deathmatch and join it from a second window. The pages are plain HTML in [`site/docs`](site/docs), and a test follows the tutorial's steps with the built `fossps`, so a change that makes the page wrong fails CI.
 
 ## Building
 
