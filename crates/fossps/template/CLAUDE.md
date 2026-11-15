@@ -24,7 +24,7 @@ Do not start `fossps run` yourself unless asked: it opens a window and does not 
 - Add rules with `game.onKill(function(killer, victim) ... end)`, `game.onPlayerJoin`, `game.onPlayerLeave`, `game.onSpawn`, `game.onRoundStart` and `game.onRoundEnd(function(winner) ... end)`. `killer` is nil when a player died alone. `player.team` is nil when the mode has no teams.
 - Functions on a player or a team take a colon: `player:addScore(1)`, `team:players()`. Reading takes a dot: `player.name`, `team.score`. Scores only count while a round is being played.
 - To remember something about a player, use a table with the player as the key (`streak[player] = 3`) and clear it in `game.onPlayerLeave`.
-- The script runs on the server. Saving it changes the rules of the running match and keeps the score. Players cannot join a running game yet, so for now `fossps check` is how the rules are tried.
+- The script runs on the server. Saving it changes the rules of the running match and keeps the score. Players can join a running game (`fossps serve`, then `fossps join`) and are put on teams, but nobody can be killed in one yet, so for now `fossps check` is how rules about kills and winning are tried.
 - Read input by action name (`"jump"`, `"fire"`, `"move"`, `"look"`, ...), never by key, so keyboard, mouse and gamepad all work. The action names are listed in `fossps.d.luau`.
 - `print()` goes to the terminal, not the window.
 - Variables at the top of the file start over every time the file is saved and reloaded.

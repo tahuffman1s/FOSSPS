@@ -111,6 +111,7 @@
     <ul>
       <li class="hide"><a href="#why">Why</a></li>
       <li class="hide"><a href="#scripting">Scripting</a></li>
+      <li><a href="docs/index.html">Docs</a></li>
       <li><a href="#roadmap">Roadmap</a></li>
       <li><a href="https://github.com/tahuffman1s/FOSSPS">GitHub</a></li>
     </ul>
@@ -120,12 +121,13 @@
 <main id="top">
   <div class="hero">
     <div class="wrap">
-      <div class="status"><i></i>Early development — nothing playable yet</div>
+      <div class="status"><i></i>Early development — you can walk around together, not shoot yet</div>
       <h1>FOSS<em>PS</em></h1>
       <p class="expand mono">FOSS Person Shooter</p>
       <p class="lead">A free, open-source engine built for one thing: multiplayer first-person shooters that are fast to play and easy to make.</p>
       <div class="cta">
-        <a class="btn primary" href="https://github.com/tahuffman1s/FOSSPS">View on GitHub</a>
+        <a class="btn primary" href="docs/first-match.html">Make your first match</a>
+        <a class="btn" href="https://github.com/tahuffman1s/FOSSPS">View on GitHub</a>
         <a class="btn" href="#roadmap">See the roadmap</a>
       </div>
     </div>
@@ -170,7 +172,7 @@ game.onKill(<span class="kw">function</span>(killer, victim)
     killer.team:addScore(<span class="num">-1</span>)
   <span class="kw">end</span>
 <span class="kw">end</span>)</pre>
-        <p class="note">This script runs today: the engine keeps the teams, the score, the respawns and the rounds, and tests play it to a win. Players can join a server and walk around over the network (<span class="mono">fossps serve</span>, then <span class="mono">fossps join</span> on any computer on the same network finds it with no address), but the world is not drawn yet and kills do not reach this script from a running match: that, and a scoreboard on screen, are still being built.</p>
+        <p class="note">This script runs today: the engine keeps the teams, the score, the respawns and the rounds, and tests play it to a win. Players can join a server and walk around a test floor over the network (<span class="mono">fossps serve</span>, then <span class="mono">fossps join</span> on any computer on the same network finds it with no address), and joining puts them on a team. Kills do not reach this script from a running match yet: weapons there, levels and a scoreboard on screen are still being built. <a href="docs/first-match.html">The tutorial</a> takes ten minutes and shows all of it.</p>
       </div>
     </div>
   </section>
@@ -197,7 +199,7 @@ game.onKill(<span class="kw">function</span>(killer, victim)
         <li><b class="mono">M1</b><div><strong>Playable offline</strong><span>Levels, movement, weapons, HUD and audio.</span></div></li>
         <li><b class="mono">M2</b><div><strong>Multiplayer</strong><span>Dedicated servers, prediction, lag compensation and a sample team deathmatch.</span></div></li>
         <li><b class="mono">M3</b><div><strong>Modern graphics</strong><span>Lighting, shadows, anti-aliasing, FSR 3.1 and performance budgets.</span></div></li>
-        <li><b class="mono">M4</b><div><strong>Ship</strong><span>Packaged builds for each platform, releases and a ten-minute tutorial.</span></div></li>
+        <li><b class="mono">M4</b><div><strong>Ship</strong><span>Packaged builds for each platform, releases and <a href="docs/first-match.html">a ten-minute tutorial</a>.</span></div></li>
         <li><b class="mono">M5</b><div><strong>Editor</strong><span>A map editor for shooters only: fly around a level, place spawns and zones, block out geometry, press play.</span></div></li>
       </ol>
     </div>
