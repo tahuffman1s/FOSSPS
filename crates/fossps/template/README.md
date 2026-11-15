@@ -26,6 +26,18 @@ If there is a mistake, the terminal shows the line and what to try, and the game
 
 To test the script without opening a window, run `fossps check`.
 
+## Share it
+
+To make a download other people can play, run this in this folder on a Linux computer:
+
+```sh
+fossps package
+```
+
+It writes `dist/{name}-linux-x86_64.tar.gz` (a space in the name becomes a `-`). A player unpacks it and runs
+the program inside; they do not need FOSSPS. Put a square PNG picture called `icon.png` in this folder to
+give the game an icon. Packages for Windows and macOS are not built yet.
+
 ## Working with Claude
 
 This folder is set up for [Claude Code](https://claude.com/claude-code): `CLAUDE.md` tells it how the game

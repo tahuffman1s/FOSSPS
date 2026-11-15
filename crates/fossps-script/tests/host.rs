@@ -425,3 +425,26 @@ fn a_handler_that_keeps_adding_handlers_cannot_hold_up_a_tick() {
     assert_eq!(error.line, Some(2));
     assert!(error.message.contains("1024 functions already"), "{error}");
 }
+
+#[test]
+fn a_script_given_as_text_runs_and_is_never_loaded_again() {
+    let _ = log::set_logger(&Capture);
+    log::set_max_level(log::LevelFilter::Info);
+    let _ = printed();
+    let mut host = ScriptHost::from_source(
+        "game.onStart(function() print('packed') end)",
+        ActionMap::default_fps(),
+    );
+
+    host.tick(&InputFrame::default(), 1.0 / 60.0);
+    host.poll_reload();
+
+    assert!(host.last_error().is_none());
+    assert_eq!(printed(), ["packed"]);
+    // There is no file to read, and that is not a mistake in the script.
+    assert!(host.reload().is_ok());
+    assert!(host.last_error().is_none());
+
+    let broken = ScriptHost::from_source("game.onTik()", ActionMap::default_fps());
+    assert!(broken.last_error().is_some());
+}

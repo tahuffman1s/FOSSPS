@@ -121,7 +121,9 @@ fn stamp(path: &Path) -> Option<Stamp> {
 /// # }
 /// ```
 pub struct ScriptHost {
-    path: PathBuf,
+    /// The script's file, or `None` when the script was given as text and
+    /// there is nothing on disk to load again.
+    path: Option<PathBuf>,
     file: String,
     actions: Rc<ActionMap>,
     running: Option<Version>,
@@ -176,6 +178,27 @@ impl ScriptHost {
                 }
             }
         })?;
+        Ok(Self::with_script(Some(path), seen, source, actions))
+    }
+
+    /// Runs `source` as a game's `main.luau` without a file behind it, as a
+    /// packaged game does: the text came out of the game's pack.
+    ///
+    /// Nothing is watched, so [`poll_reload`](Self::poll_reload) and
+    /// [`reload`](Self::reload) do nothing. A mistake inside the script is
+    /// logged and kept in [`last_error`](Self::last_error).
+    #[must_use]
+    pub fn from_source(source: impl Into<String>, actions: ActionMap) -> Self {
+        Self::with_script(None, None, source.into(), actions)
+    }
+
+    /// A host running `source`, which was read from `path` if there is one.
+    fn with_script(
+        path: Option<PathBuf>,
+        seen: Option<Stamp>,
+        source: String,
+        actions: ActionMap,
+    ) -> Self {
         let mut host = Self {
             path,
             file: ENTRY_SCRIPT.to_owned(),
@@ -195,7 +218,7 @@ impl ScriptHost {
         };
         // A script error is already logged and kept in `last_error`.
         let _ = host.install(source);
-        Ok(host)
+        host
     }
 
     /// The most recent script error, until a reload succeeds.
@@ -287,7 +310,10 @@ impl ScriptHost {
             return;
         }
         self.next_poll = now + POLL_EVERY;
-        if self.watch.should_reload(stamp(&self.path)) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if self.watch.should_reload(stamp(path)) {
             // A script error is already logged and kept in `last_error`.
             let _ = self.reload();
         }
@@ -297,16 +323,21 @@ impl ScriptHost {
     ///
     /// The new version starts fresh: its variables are reset and its handlers
     /// replace the old ones, then its `game.onReload` functions are called.
-    /// `game.onStart` functions are not called again.
+    /// `game.onStart` functions are not called again. A script that was given
+    /// as text ([`from_source`](Self::from_source)) has no file, and nothing
+    /// happens.
     ///
     /// # Errors
     ///
     /// If the new version has a mistake, the error is returned (and logged) and
     /// the previous version keeps running.
     pub fn reload(&mut self) -> Result<(), ScriptError> {
-        self.watch.loaded = stamp(&self.path).or(self.watch.loaded);
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
+        self.watch.loaded = stamp(&path).or(self.watch.loaded);
         self.watch.pending = None;
-        let source = match std::fs::read_to_string(&self.path) {
+        let source = match std::fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) => {
                 let error = ScriptError::file_problem(
@@ -314,7 +345,7 @@ impl ScriptHost {
                     format!(
                         "Could not read {}: {error}. Check that the file still exists and \
                          is saved as plain text (UTF-8).",
-                        self.path.display()
+                        path.display()
                     ),
                 );
                 return Err(self.failed_to_load(error));

@@ -7,9 +7,10 @@ A multiplayer FPS game made with [FOSSPS](https://github.com/tahuffman1s/FOSSPS)
 ```sh
 fossps check    # run main.luau without a window; exits non-zero and prints the error if it has a mistake
 fossps run      # play the game in a window (a person has to look at it and close it)
+fossps package  # write a download for players to dist/ (Linux only so far); refuses a script with a mistake
 ```
 
-Run both from this folder (or name it: `fossps check path/to/this-folder`).
+Run them from this folder (or name it: `fossps check path/to/this-folder`).
 
 Run `fossps check` after every change to `main.luau` and fix what it reports before saying the change is done. It runs the start handler and one second of ticks with nothing pressed, then plays a pretend match (two players join, the round starts, one kills the other, one dies alone, the round ends, both leave) so every `game.on...` function in the script is called at least once. Code inside an `if game.input...` branch is loaded but not run, and neither is a branch the pretend match does not reach, such as a team kill. A mistake there, such as a misspelled action name, is not caught: read that code carefully, and ask the person to try it with `fossps run`.
 

@@ -1,0 +1,12 @@
+[package]
+name = "fossps-pack"
+description = "Game packs for FOSSPS: one .fpk file that holds a packaged game's files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
