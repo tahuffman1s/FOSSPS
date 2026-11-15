@@ -764,46 +764,32 @@ fn a_require_that_fails_is_not_tried_again_every_tick() {
         r#"local n = 0
         game.onTick(function()
             n += 1
-            local ok = pcall(require, "./late")
-            print(n, ok)
-            pcall(require, "./made-up-" .. n)
+            local found = pcall(require, "./late")
+            local _, problem = pcall(require, "./made-up-" .. n)
+            local full = string.find(tostring(problem), "the most it can", 1, true) ~= nil
+            print(n, found, full)
         end)"#,
     );
     let mut host = game.open();
     host.tick(&idle(), STEP);
-    assert_eq!(printed(), ["1 false"]);
+    assert_eq!(printed(), ["1 false false"]);
     // The file appears, but this version already knows the answer: only a
     // reload, which the new file sets off, asks again.
     game.write_file("late.luau", "return 1");
     host.tick(&idle(), STEP);
-    assert_eq!(printed(), ["2 false"]);
+    assert_eq!(printed(), ["2 false false"]);
     host.reload().unwrap();
     host.tick(&idle(), STEP);
-    assert_eq!(printed(), ["1 true"]);
+    assert_eq!(printed(), ["1 true false"]);
 
     // Names made up as the game runs come to an end.
     for _ in 0..1100 {
         host.tick(&idle(), STEP);
     }
     let said = printed();
-    assert_eq!(said.last().unwrap(), "1101 true");
-    // From text, so that the disk's speed is not what the time limit sees.
-    let main = r#"local last
-        for n = 1, 2000 do
-            local ok, problem = pcall(require, "./made-up-" .. n)
-            last = problem
-        end
-        print(last)"#;
-    let host = ScriptHost::from_sources(
-        [(ENTRY_SCRIPT.to_owned(), main.to_owned())],
-        ActionMap::default_fps(),
-    );
-    let said = printed().join("\n");
-    assert!(
-        said.contains("the most it can"),
-        "printed: {said}\nerror: {:?}",
-        host.last_error()
-    );
+    assert_eq!(said[1000], "1002 true false");
+    assert_eq!(said.last().unwrap(), "1101 true true");
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
 }
 
 /// Polls until the host has loaded a save, or gives up.
