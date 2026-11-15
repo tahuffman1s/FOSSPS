@@ -11,7 +11,7 @@ fossps run
 ```
 
 Click the window to capture the mouse; Escape frees it.
-The window only shows a triangle for now: what the game does is printed in the terminal.
+The window shows a test floor with a few blocks to walk between, until games have levels of their own. What the game does is printed in the terminal.
 
 | Action | Keyboard and mouse | Gamepad |
 | ------ | ------------------ | ------- |

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use fossps_input::{ActionMap, Input, MouseWheel};
-use fossps_render::{RenderConfig, RenderError, Renderer};
+use fossps_render::{Camera, RenderConfig, RenderError, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
@@ -17,6 +17,10 @@ use crate::game::{Frame, Game};
 use crate::gamepad::Gamepads;
 use crate::tick::TickClock;
 use crate::translate;
+
+/// Where the eye is before a game says where to look from: as high as a
+/// standing player's, in metres.
+const STANDING_EYE: f32 = 1.6;
 
 /// How many pixels of smooth scrolling count as one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 40.0;
@@ -272,6 +276,14 @@ impl<G: Game> App<G> {
 
         let mut frame = Frame::new(self.clock.alpha());
         self.game.frame(&mut frame);
+        if let (Some(view), Some(renderer)) = (frame.view(), &mut self.renderer) {
+            renderer.set_camera(Camera {
+                position: view.position,
+                yaw: view.yaw,
+                pitch: view.pitch,
+                ..Camera::default()
+            });
+        }
         if let (Some(title), Some(window)) = (frame.take_title(), &self.window) {
             window.set_title(&title);
         }
@@ -294,7 +306,17 @@ impl<G: Game> ApplicationHandler for App<G> {
                 let config = RenderConfig {
                     vsync: self.config.vsync,
                 };
-                match Renderer::new(Rc::clone(&window), size.width, size.height, config) {
+                let renderer = Renderer::new(Rc::clone(&window), size.width, size.height, config)
+                    .and_then(|mut renderer| {
+                        // Until levels are loaded from files (#60).
+                        renderer.set_scene(&crate::standin::scene())?;
+                        renderer.set_camera(Camera {
+                            position: [0.0, STANDING_EYE, 0.0],
+                            ..Camera::default()
+                        });
+                        Ok(renderer)
+                    });
+                match renderer {
                     Ok(renderer) => self.renderer = Some(renderer),
                     Err(error) => {
                         self.error = Some(AppError::Render(error));

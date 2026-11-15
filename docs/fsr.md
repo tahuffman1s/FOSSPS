@@ -5,8 +5,8 @@ a small Rust type, `Upscaler`, to run it. It works on Linux, Windows and
 macOS with plain `cargo build`: no CMake, Vulkan SDK or shader compiler to
 install.
 
-The renderer does not use it yet. That is #16, which needs a depth buffer and
-motion vectors first (#58, #184).
+The renderer does not use it yet. That is #16, which needs motion vectors
+first (#184). The depth buffer it reads is there (#58).
 
 ## Why it is not AMD's build
 

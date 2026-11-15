@@ -11,7 +11,7 @@ use naga::back::spv;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 /// Shader files to compile, by name without the `.wgsl` extension.
-const SHADERS: &[&str] = &["triangle", "tonemap"];
+const SHADERS: &[&str] = &["mesh", "tonemap"];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let out = PathBuf::from(env::var("OUT_DIR")?);

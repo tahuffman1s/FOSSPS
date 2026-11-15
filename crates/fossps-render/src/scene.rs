@@ -1,4 +1,4 @@
-//! The image the scene is drawn into before it is tone mapped for the display.
+//! The images the scene is drawn into before it is tone mapped for the display.
 
 use std::sync::Arc;
 
@@ -8,60 +8,61 @@ use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::swapchain::COLOUR;
 
-/// A high-dynamic-range colour image the size of the picture.
-///
-/// Light is stored as it is, with no upper limit, so the sun can be thousands
-/// of times brighter than a shadow; [`TonemapPipeline`](crate::tonemap::TonemapPipeline)
-/// turns it into colours a display can show.
-pub(crate) struct SceneTarget {
-    gpu: Arc<Gpu>,
+/// The whole of a depth image.
+pub(crate) const DEPTH: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
+    aspect_mask: vk::ImageAspectFlags::DEPTH,
+    ..COLOUR
+};
+
+/// One image on the graphics card, with its memory and a view of all of it.
+pub(crate) struct Picture {
     pub(crate) image: vk::Image,
     memory: vk::DeviceMemory,
     pub(crate) view: vk::ImageView,
-    pub(crate) extent: vk::Extent2D,
 }
 
-impl SceneTarget {
-    /// Sixteen-bit floats for red, green and blue.
-    ///
-    /// Every Vulkan 1.3 graphics card can draw into and read this format. The
-    /// smaller `B10G11R11` has too few steps for upscaling and anti-aliasing
-    /// to work on without banding.
-    pub(crate) const FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
-
-    /// Makes a target of `extent` pixels.
-    pub(crate) fn new(gpu: &Arc<Gpu>, extent: vk::Extent2D) -> Result<Self, RenderError> {
-        let doing = "making the image the scene is drawn into";
-        let device = gpu.device();
-        let mut target = Self {
-            gpu: Arc::clone(gpu),
+impl Picture {
+    /// A picture that holds nothing; destroying it does nothing.
+    const fn null() -> Self {
+        Self {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
-            extent,
-        };
-        // Dropping `target` cleans up whatever was created; destroying a null handle is allowed.
+        }
+    }
 
+    /// Fills in `self` with an image of `extent` pixels.
+    ///
+    /// On failure, what was created so far is left in `self` for
+    /// [`destroy`](Self::destroy) to clean up.
+    fn create(
+        &mut self,
+        gpu: &Gpu,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        range: vk::ImageSubresourceRange,
+    ) -> Result<(), RenderError> {
+        let doing = "making the images the scene is drawn into";
+        let device = gpu.device();
         // SAFETY: the device is alive, and each object is created from valid
-        // settings and stored in `target` straight away. The memory is as
+        // settings and stored in `self` straight away. The memory is as
         // large as the image asks for and of a kind it allows.
         unsafe {
-            target.image = device
+            self.image = device
                 .create_image(
                     &vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_2D)
-                        .format(Self::FORMAT)
+                        .format(format)
                         .extent(extent.into())
                         .mip_levels(1)
                         .array_layers(1)
                         .samples(vk::SampleCountFlags::TYPE_1)
-                        .usage(
-                            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-                        ),
+                        .usage(usage),
                     None,
                 )
                 .map_err(RenderError::driver(doing))?;
-            let needs = device.get_image_memory_requirements(target.image);
+            let needs = device.get_image_memory_requirements(self.image);
             let kind = gpu
                 .memory_type(
                     needs.memory_type_bits,
@@ -74,7 +75,7 @@ impl SceneTarget {
                     doing,
                     code: vk::Result::ERROR_FEATURE_NOT_PRESENT,
                 })?;
-            target.memory = device
+            self.memory = device
                 .allocate_memory(
                     &vk::MemoryAllocateInfo::default()
                         .allocation_size(needs.size)
@@ -83,32 +84,107 @@ impl SceneTarget {
                 )
                 .map_err(RenderError::driver(doing))?;
             device
-                .bind_image_memory(target.image, target.memory, 0)
+                .bind_image_memory(self.image, self.memory, 0)
                 .map_err(RenderError::driver(doing))?;
-            target.view = device
+            self.view = device
                 .create_image_view(
                     &vk::ImageViewCreateInfo::default()
-                        .image(target.image)
+                        .image(self.image)
                         .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(Self::FORMAT)
-                        .subresource_range(COLOUR),
+                        .format(format)
+                        .subresource_range(range),
                     None,
                 )
                 .map_err(RenderError::driver(doing))?;
         }
+        Ok(())
+    }
+
+    /// Frees the picture.
+    ///
+    /// # Safety
+    ///
+    /// The picture must have been made on `gpu` (or be null), and the
+    /// graphics card must have finished using it.
+    unsafe fn destroy(&self, gpu: &Gpu) {
+        let device = gpu.device();
+        // SAFETY: the caller guarantees the handles are this device's and
+        // idle; destroying a null handle is allowed.
+        unsafe {
+            device.destroy_image_view(self.view, None);
+            device.destroy_image(self.image, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// What the scene is drawn into: a high-dynamic-range colour image and a
+/// depth image, both the size of the picture.
+///
+/// Light is stored as it is, with no upper limit, so the sun can be thousands
+/// of times brighter than a shadow; [`TonemapPipeline`](crate::tonemap::TonemapPipeline)
+/// turns it into colours a display can show.
+pub(crate) struct SceneTarget {
+    gpu: Arc<Gpu>,
+    pub(crate) colour: Picture,
+    pub(crate) depth: Picture,
+    pub(crate) extent: vk::Extent2D,
+}
+
+impl SceneTarget {
+    /// Sixteen-bit floats for red, green and blue.
+    ///
+    /// Every Vulkan 1.3 graphics card can draw into and read this format. The
+    /// smaller `B10G11R11` has too few steps for upscaling and anti-aliasing
+    /// to work on without banding.
+    pub(crate) const FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
+    /// A 32-bit float for how far away each pixel is: 1 at the camera's near
+    /// distance, falling to 0 infinitely far away.
+    ///
+    /// Every desktop graphics card can draw depth into this format. Floats
+    /// are most precise near 0, which this ordering spends on the far
+    /// distance, where a shooter needs it.
+    pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+
+    /// The depth of a pixel nothing was drawn on: infinitely far away.
+    pub(crate) const FARTHEST: f32 = 0.0;
+
+    /// Makes a target of `extent` pixels.
+    pub(crate) fn new(gpu: &Arc<Gpu>, extent: vk::Extent2D) -> Result<Self, RenderError> {
+        let mut target = Self {
+            gpu: Arc::clone(gpu),
+            colour: Picture::null(),
+            depth: Picture::null(),
+            extent,
+        };
+        // Dropping `target` cleans up whatever was created.
+        target.colour.create(
+            gpu,
+            extent,
+            Self::FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            COLOUR,
+        )?;
+        // Sampled as well, because upscaling and later effects read the depth.
+        target.depth.create(
+            gpu,
+            extent,
+            Self::DEPTH_FORMAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            DEPTH,
+        )?;
         Ok(target)
     }
 }
 
 impl Drop for SceneTarget {
     fn drop(&mut self) {
-        // SAFETY: the owner waits for the graphics card to go idle before
-        // dropping the target, so nothing is using it.
+        // SAFETY: both pictures were made on `self.gpu`, and the owner waits
+        // for the graphics card to go idle before dropping the target.
         unsafe {
-            let device = self.gpu.device();
-            device.destroy_image_view(self.view, None);
-            device.destroy_image(self.image, None);
-            device.free_memory(self.memory, None);
+            self.colour.destroy(&self.gpu);
+            self.depth.destroy(&self.gpu);
         }
     }
 }

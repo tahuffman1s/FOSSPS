@@ -4,8 +4,9 @@
 --     fossps run
 -- Change anything here and save: the running game picks it up.
 --
--- The window only shows a triangle for now. What happens in the game shows up
--- as text: print() writes to the terminal you ran `fossps run` from.
+-- The window shows a test floor with a few blocks to walk between, until
+-- games have levels of their own. What happens in the game shows up as text:
+-- print() writes to the terminal you ran `fossps run` from.
 
 local jumps = 0
 
