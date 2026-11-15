@@ -1,14 +1,16 @@
 //! The `fossps` command: `fossps new` creates a game, `fossps run` plays it,
-//! `fossps serve` hosts it and `fossps join` joins a hosted one.
+//! `fossps serve` hosts it, `fossps join` joins a hosted one and
+//! `fossps servers` lists the ones on this network.
 
 mod demo;
 
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use fossps::cli::{self, quoted};
-use fossps::online::{DEFAULT_PORT, JoinedGame, LocalGame};
+use fossps::online::{DEFAULT_PORT, FoundServer, JoinedGame, LocalGame, SEARCH_TIME, find_servers};
 use fossps::scaffold::{self, NewGame};
 use fossps::script::ENTRY_SCRIPT;
 use fossps::script::mode::Phase;
@@ -51,11 +53,16 @@ enum Command {
     /// Play a game
     #[command(
         after_help = "Examples:\n  fossps run            Play the game in this folder\n  \
-                            fossps run my-game    Play the game in the folder my-game"
+                            fossps run my-game    Play the game in the folder my-game\n  \
+                            fossps run --open     Play it, and let others on your network join \
+                            with `fossps join`"
     )]
     Run {
         /// The game's folder. Leave it out to play the game in the folder you are in
         folder: Option<PathBuf>,
+        /// Let other players on your network join this game with `fossps join`
+        #[arg(long)]
+        open: bool,
     },
     /// Test a game's script without opening a window
     #[command(
@@ -72,7 +79,8 @@ enum Command {
         after_help = "Examples:\n  fossps serve                Serve the game in this folder\n  \
                             fossps serve my-game        Serve the game in the folder my-game\n  \
                             fossps serve --port 7000    Take players on UDP port 7000\n\n\
-                      Players join with `fossps join` and this computer's address.\n\
+                      Players on your network join with `fossps join`, which finds the \
+                      server by itself.\nFrom elsewhere they add this computer's address.\n\
                       Press Ctrl-C to stop the server. For a machine that only hosts, the \
                       separate\nfossps-server program does the same and needs no graphics \
                       card or desktop."
@@ -86,13 +94,28 @@ enum Command {
     },
     /// Join a game someone is serving
     #[command(
-        after_help = "Examples:\n  fossps join                     Join the server on this computer\n  \
+        after_help = "Examples:\n  fossps join                     Find a game on this network or this \
+                            computer and join it\n  \
                             fossps join 192.168.1.20        Join the server at that address\n  \
-                            fossps join example.com:7000    Join a server on another port than 24680"
+                            fossps join example.com:7000    Join a server on another port than 24680\n\n\
+                      With no address, `fossps join` joins the game it finds. If it finds \
+                      several, it lists\nthem and asks which one."
     )]
     Join {
-        /// The server's address. Leave it out to join a server on this computer
+        /// The server's address. Leave it out to find a game on this network
         address: Option<String>,
+    },
+    /// List the games being served on this network
+    #[command(
+        after_help = "Examples:\n  fossps servers                Games on this network and this computer\n  \
+                            fossps servers --port 7000    Games served with `--port 7000`\n\n\
+                      Only games on the same network are found. `fossps join` uses the same \
+                      search and\njoins what it finds."
+    )]
+    Servers {
+        /// The UDP port the games are served on
+        #[arg(long, default_value_t = DEFAULT_PORT, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
     },
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
@@ -103,14 +126,20 @@ fn main() -> ExitCode {
 
     let outcome = match Cli::parse().command {
         Some(Command::New { folder }) => new(&folder),
-        Some(Command::Run { folder }) => run(folder.as_deref().unwrap_or(Path::new("."))),
+        Some(Command::Run { folder, open }) => {
+            run(folder.as_deref().unwrap_or(Path::new(".")), open)
+        }
         Some(Command::Check { folder }) => check(folder.as_deref().unwrap_or(Path::new("."))),
         Some(Command::Serve { folder, port }) => cli::serve_game(
             folder.as_deref().unwrap_or(Path::new(".")),
             "fossps serve",
             port,
         ),
-        Some(Command::Join { address }) => join(address.as_deref().unwrap_or("localhost")),
+        Some(Command::Join { address }) => match address {
+            Some(address) => join(&address),
+            None => find_and_join(),
+        },
+        Some(Command::Servers { port }) => servers(port),
         Some(Command::Demo) => demo(),
         // Asking for nothing is not a mistake: show what there is to ask for.
         None => Cli::command()
@@ -223,7 +252,8 @@ fn check(folder: &Path) -> Result<(), String> {
 }
 
 /// `fossps run`: plays the game in `folder` until its window is closed.
-fn run(folder: &Path) -> Result<(), String> {
+/// With `others_may_join`, other players can join it meanwhile.
+fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     let mut config = Config::default();
     let game = open(folder, &config, "run")?;
 
@@ -245,22 +275,33 @@ fn run(folder: &Path) -> Result<(), String> {
         "Playing {}. Edit the file and save it to see changes right away.",
         folder.join(ENTRY_SCRIPT).display()
     );
-    if let Some(name) = std::path::absolute(folder)
-        .ok()
-        .as_deref()
-        .and_then(Path::file_name)
-    {
-        config.title = format!("{} | FOSSPS", name.to_string_lossy());
+    let name = cli::game_name(folder);
+    if !name.is_empty() {
+        config.title = format!("{name} | FOSSPS");
     }
-    let game = LocalGame::start(game, &config.actions, config.tick_rate)
-        .map_err(|error| {
+    let game = if others_may_join {
+        let game = LocalGame::open(game, &name, DEFAULT_PORT, &config.actions, config.tick_rate)
+            .map_err(|error| {
+                format!(
+                    "The game could not be opened for others to join: {error}\nIf another \
+                     game is already open or served on this computer, close it first. To \
+                     play alone, leave out `--open`."
+                )
+            })?;
+        log::info!(
+            "Open for others to join. {}",
+            cli::how_to_join(DEFAULT_PORT, fossps::online::lan_address())
+        );
+        game
+    } else {
+        LocalGame::start(game, &config.actions, config.tick_rate).map_err(|error| {
             format!(
                 "The game could not start: {error}\nIt is played over this computer's own \
                  network (127.0.0.1), which a firewall or security program may be blocking."
             )
         })?
-        .with_title(config.title.clone());
-    play(config, game)
+    };
+    play(config.clone(), game.with_title(config.title))
 }
 
 /// `fossps join`: plays on the server at `address` until the window is
@@ -282,6 +323,104 @@ fn join(address: &str) -> Result<(), String> {
     fossps::run(config, &mut game).map_err(|error| error.to_string())?;
     // The window closing by itself needs a reason; the player closing it does not.
     game.closed().map_or(Ok(()), |error| Err(error.to_string()))
+}
+
+/// Looks for games on this network for a second.
+fn search(port: u16) -> Result<Vec<FoundServer>, String> {
+    log::info!("Looking for games on this network...");
+    find_servers(port, SEARCH_TIME).map_err(|error| {
+        let mut said = error.to_string();
+        if let Some(first) = said.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        said
+    })
+}
+
+/// `fossps servers`: lists the games found on this network.
+fn servers(port: u16) -> Result<(), String> {
+    let found = search(port)?;
+    if found.is_empty() {
+        println!("{}", cli::no_servers_found(port));
+        return Ok(());
+    }
+    print!("{}", cli::server_list(&found));
+    if let Some(server) = found.iter().find(|server| server.same_version) {
+        println!(
+            "Join one with its address, like `fossps join {}`.",
+            cli::join_address(server.address)
+        );
+    }
+    Ok(())
+}
+
+/// `fossps join` with no address: joins the game found on this network,
+/// asking which when there are several.
+fn find_and_join() -> Result<(), String> {
+    let found = search(DEFAULT_PORT)?;
+    let server = match found.as_slice() {
+        [] => return Err(cli::no_servers_found(DEFAULT_PORT)),
+        [only] => only,
+        several => {
+            let list = cli::server_list(several);
+            if !std::io::stdin().is_terminal() {
+                return Err(format!(
+                    "Found {} games:\n{list}Say which one by its address, like \
+                     `fossps join {}`.",
+                    several.len(),
+                    cli::join_address(several.first().map_or_else(
+                        || std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)),
+                        |server| server.address
+                    ))
+                ));
+            }
+            println!("Found {} games:\n{list}", several.len());
+            match ask_which(several)? {
+                Some(server) => server,
+                None => return Ok(()),
+            }
+        }
+    };
+    if !server.same_version {
+        return Err(format!(
+            "Found {} at {}, but it runs another version of FOSSPS, so it cannot be joined. \
+             Update FOSSPS on both computers to the same version.",
+            cli::server_name(server),
+            cli::join_address(server.address)
+        ));
+    }
+    log::info!(
+        "Found {} ({} of {} players).",
+        cli::server_name(server),
+        server.players,
+        server.places
+    );
+    join(&cli::join_address(server.address))
+}
+
+/// Asks which of `found` to join until the answer is one of them, or
+/// nothing.
+fn ask_which(found: &[FoundServer]) -> Result<Option<&FoundServer>, String> {
+    let mut line = String::new();
+    loop {
+        print!("Which one? Type its number and press Enter: ");
+        std::io::stdout()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        line.clear();
+        let read = std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        // Nothing to read at all: the terminal was closed.
+        if read == 0 {
+            return Ok(None);
+        }
+        match cli::chosen(&line, found.len()) {
+            Ok(choice) => return Ok(choice.and_then(|place| found.get(place))),
+            Err(advice) => println!("{advice}"),
+        }
+    }
 }
 
 /// `fossps demo`: shows live input in a window.

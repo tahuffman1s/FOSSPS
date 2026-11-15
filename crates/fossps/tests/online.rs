@@ -162,3 +162,64 @@ fn a_game_played_alone_goes_through_the_same_netcode() {
     assert_eq!(game.hosted().game().host().mode().players().len(), 1);
     assert!(game.joined().closed().is_none());
 }
+
+#[test]
+fn a_served_game_is_found_by_name_without_knowing_its_address() {
+    use fossps::online::find_servers;
+
+    let (hosted, address) = host("found");
+    let mut hosted = hosted.named("zombie-night");
+    let port = hosted.address().unwrap().port();
+    let nothing = Input::new(ActionMap::default_fps());
+
+    // The server answers from its tick, so it ticks while the search waits.
+    let searching =
+        std::thread::spawn(move || find_servers(port, Duration::from_millis(600)).unwrap());
+    while !searching.is_finished() {
+        hosted.tick(nothing.frame(), STEP);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let found = searching.join().unwrap();
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].address.to_string(), address);
+    assert_eq!(found[0].name, "zombie-night");
+    assert_eq!((found[0].players, found[0].places), (0, 64));
+
+    // And what was found can be joined as it is.
+    let joined = join(&mut hosted, &found[0].address.to_string());
+    assert!(joined.id().is_some());
+}
+
+#[test]
+fn an_open_game_is_played_here_and_joined_by_someone_else() {
+    use fossps::online::find_servers;
+
+    let port = std::net::UdpSocket::bind("0.0.0.0:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let actions = ActionMap::default_fps();
+    let mut local =
+        LocalGame::open(new_game("open"), "open-game", port, &actions, TICK_RATE).unwrap();
+    assert_eq!(local.hosted().players().count(), 1);
+    let nothing = Input::new(actions.clone());
+
+    let searching =
+        std::thread::spawn(move || find_servers(port, Duration::from_millis(600)).unwrap());
+    while !searching.is_finished() {
+        local.tick(nothing.frame(), STEP);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let found = searching.join().unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].name.as_str(), found[0].players), ("open-game", 1));
+
+    let mut other =
+        JoinedGame::connect(&found[0].address.to_string(), &actions, TICK_RATE).unwrap();
+    other
+        .wait_until_joined(|| local.tick(nothing.frame(), STEP))
+        .unwrap();
+    assert_eq!(local.hosted().players().count(), 2);
+}

@@ -25,6 +25,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::find::{Notice, QUERY};
 use crate::snapshot::{MAX_PLAYERS, PlayerId};
 use crate::wire::{MAX_PACKET_BYTES, Reader, VERSION, Writer};
 
@@ -246,6 +247,8 @@ pub(crate) struct Host {
     /// The numbers of players who left, newest overwriting oldest.
     ended: [u64; REMEMBERED],
     next_ended: usize,
+    /// What is said to whoever is looking for servers.
+    notice: Notice,
 }
 
 impl Host {
@@ -256,7 +259,13 @@ impl Host {
             peers: [None; MAX_PLAYERS],
             ended: [0; REMEMBERED],
             next_ended: 0,
+            notice: Notice::new(),
         }
+    }
+
+    /// Sets the name given to whoever is looking for servers.
+    pub(crate) fn set_name(&mut self, name: &str) {
+        self.notice.set_name(name);
     }
 
     fn cookie(&self, from: SocketAddr, salt: u64, period: u64) -> u64 {
@@ -295,6 +304,10 @@ impl Host {
         let mut reader = Reader::raw(datagram);
         let kind = reader.u8().ok()?;
         let version = reader.u8().ok()?;
+        if kind == QUERY {
+            self.notice.answer(datagram, self.players().count(), reply);
+            return None;
+        }
         if kind == REQUEST {
             // Shorter than the answer could be used to flood someone else.
             if datagram.len() < REQUEST_BYTES
