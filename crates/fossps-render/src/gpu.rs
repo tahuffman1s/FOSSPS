@@ -432,6 +432,21 @@ impl Gpu {
         self.queue_family
     }
 
+    /// Finds a kind of memory that `allowed` permits and that has the `wanted` properties.
+    pub(crate) fn memory_type(&self, allowed: u32, wanted: vk::MemoryPropertyFlags) -> Option<u32> {
+        // SAFETY: the physical device belongs to the live instance.
+        let memory = unsafe {
+            self.instance()
+                .get_physical_device_memory_properties(self.physical_device())
+        };
+        (0..memory.memory_type_count).find(|&index| {
+            allowed & (1 << index) != 0
+                && memory.memory_types[index as usize]
+                    .property_flags
+                    .contains(wanted)
+        })
+    }
+
     /// The swapchain functions of the device.
     pub(crate) fn swapchains(&self) -> &swapchain::Device {
         &self.swapchains

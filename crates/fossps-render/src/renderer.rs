@@ -8,8 +8,10 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::error::RenderError;
 use crate::gpu::Gpu;
+use crate::scene::SceneTarget;
 use crate::swapchain::Swapchain;
-use crate::triangle::{Then, TrianglePipeline};
+use crate::tonemap::{Then, TonemapPipeline, exposure_scale};
+use crate::triangle::TrianglePipeline;
 
 /// How many frames can be in progress on the graphics card at once.
 ///
@@ -119,11 +121,17 @@ impl Drop for FrameSlot {
 /// window changes size and [`render`](Self::render) once per frame.
 pub struct Renderer {
     // Fields are dropped top to bottom: everything made from the graphics
-    // card first, then the card, then the window it draws into.
+    // card first, then the card, then the window it draws into. The tone
+    // mapping goes before the scene image it reads.
     frames: Vec<FrameSlot>,
     /// Which of `frames` the next frame uses.
     next: usize,
-    pipeline: Option<TrianglePipeline>,
+    tonemap: Option<TonemapPipeline>,
+    triangle: Option<TrianglePipeline>,
+    /// What the scene is drawn into; the size of the swapchain's images.
+    scene: Option<SceneTarget>,
+    /// What the scene's light is multiplied by before tone mapping.
+    exposure: f32,
     /// `None` while the window has no area to draw into.
     swapchain: Option<Swapchain>,
     /// The window size in pixels, as last reported.
@@ -176,7 +184,10 @@ impl Renderer {
         let mut renderer = Self {
             frames,
             next: 0,
-            pipeline: None,
+            tonemap: None,
+            triangle: None,
+            scene: None,
+            exposure: 1.0,
             swapchain: None,
             size: (width, height),
             stale: true,
@@ -194,6 +205,21 @@ impl Renderer {
     #[must_use]
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// Makes the whole picture brighter or darker, in camera stops.
+    ///
+    /// `0.0` shows the scene's light as it is. Each `+1.0` doubles it and each
+    /// `-1.0` halves it. Bright areas roll off towards white instead of
+    /// turning into flat patches. Values beyond 16 stops either way are
+    /// held at 16, and a value that is not a number is ignored.
+    pub fn set_exposure(&mut self, stops: f32) {
+        // A not-a-number here would turn the whole picture black.
+        if stops.is_finite() {
+            // Sixteen stops either way is 65 536 times: more than any scene
+            // needs, and far from where the multiplier stops being a number.
+            self.exposure = exposure_scale(stops.clamp(-16.0, 16.0));
+        }
     }
 
     /// Tells the renderer the window is now `width` by `height` pixels.
@@ -247,17 +273,37 @@ impl Renderer {
         let Some(swapchain) = rebuilt else {
             return Ok(());
         };
-        let format = swapchain.format;
+        let (format, extent) = (swapchain.format, swapchain.extent);
         // The graphics card is idle, so the old swapchain can go. It is
         // replaced before anything else can fail, because a swapchain that
         // has been replaced once must not be offered for replacement again.
         self.swapchain = Some(swapchain);
+        if self.triangle.is_none() {
+            self.triangle = Some(TrianglePipeline::new(&self.gpu, SceneTarget::FORMAT)?);
+        }
         if self
-            .pipeline
+            .tonemap
             .as_ref()
-            .is_none_or(|pipeline| pipeline.format != format)
+            .is_none_or(|tonemap| tonemap.format != format)
         {
-            self.pipeline = Some(TrianglePipeline::new(&self.gpu, format)?);
+            self.tonemap = Some(TonemapPipeline::new(&self.gpu, format)?);
+            // The new pipeline has not been told about the scene yet.
+            self.scene = None;
+        }
+        if self
+            .scene
+            .as_ref()
+            .is_none_or(|scene| scene.extent != extent)
+        {
+            // Dropped first, so the old and new images are never both held.
+            self.scene = None;
+            let scene = SceneTarget::new(&self.gpu, extent)?;
+            if let Some(tonemap) = &self.tonemap {
+                // SAFETY: the view is the new scene's, which is stored next to
+                // the pipeline and replaced only here; the card is idle.
+                unsafe { tonemap.read_from(scene.view) };
+            }
+            self.scene = Some(scene);
         }
         self.stale = false;
         Ok(())
@@ -269,7 +315,9 @@ impl Renderer {
             // `rebuild` found no area to draw into.
             return Ok(Drawn::No);
         }
-        let (Some(swapchain), Some(pipeline)) = (&self.swapchain, &self.pipeline) else {
+        let (Some(swapchain), Some(triangle), Some(tonemap), Some(scene)) =
+            (&self.swapchain, &self.triangle, &self.tonemap, &self.scene)
+        else {
             return Ok(Drawn::No);
         };
         let slot = &self.frames[self.next];
@@ -319,11 +367,13 @@ impl Renderer {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .map_err(RenderError::driver("recording a frame"))?;
-            pipeline.record(
+            triangle.record(slot.commands, scene.image, scene.view, scene.extent);
+            tonemap.record(
                 slot.commands,
                 target.image,
                 target.view,
                 swapchain.extent,
+                self.exposure,
                 Then::Show,
             );
             device
