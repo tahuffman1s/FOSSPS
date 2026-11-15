@@ -1,0 +1,234 @@
+name: Release
+
+# Pushing a version tag (v0.1.0) builds FOSSPS for Linux, Windows and macOS and
+# publishes the three downloads as a GitHub release. How to cut one is in
+# docs/releasing.md.
+#
+# A pull request that changes this file, or a run started by hand, does
+# everything except publish, so the workflow is tested before a tag relies on it.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+    paths: [".github/workflows/release.yml", ".github/release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # A newer push to a pull request replaces the old run; a tag's run is never cut short.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Decides the version and whether this run publishes, before an hour of
+  # building is spent on a tag that cannot be released.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "fossps") | .version')
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the version of the fossps crate from Cargo.toml."
+            exit 1
+          fi
+          publish=false
+          # Only a pushed tag publishes: a run started by hand never does, even
+          # when it is started on a tag.
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ]; then
+            if [ "$REF_NAME" != "v$version" ]; then
+              echo "::error::The tag is $REF_NAME but Cargo.toml says version $version, so the programs would report the wrong version. Set version under [workspace.package] in Cargo.toml to ${REF_NAME#v}, merge that, delete this tag and tag the merged commit (docs/releasing.md)."
+              exit 1
+            fi
+            publish=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "FOSSPS $version; publish: $publish" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu GitHub offers: a program runs on systems whose
+          # C library is as new as the one it was built with, or newer.
+          - os: ubuntu-22.04
+            system: linux-x86_64
+            archive: tar.gz
+            exe: ""
+          # The C runtime is built in, so players need no Visual C++ installer.
+          - os: windows-latest
+            system: windows-x86_64
+            archive: zip
+            exe: ".exe"
+            rustflags: "-C target-feature=+crt-static"
+          - os: macos-latest
+            system: macos-arm64
+            archive: tar.gz
+            exe: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      SYSTEM: ${{ matrix.system }}
+      ARCHIVE: ${{ matrix.archive }}
+      EXE: ${{ matrix.exe }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # Stops macOS tar from adding "._" files to the archive.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # No build cache: a release is built from nothing but the tagged source.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libasound2-dev
+      - name: Build
+        # Two builds, not one: built together, the server would be given the
+        # window, graphics and gamepad code that `fossps` asks for.
+        run: |
+          cargo build --release --locked -p fossps
+          cargo build --release --locked -p fossps-server
+      - name: Make the archive
+        run: |
+          folder="fossps-$VERSION-$SYSTEM"
+          mkdir -p "dist/$folder/licenses"
+          cp "target/release/fossps$EXE" "target/release/fossps-server$EXE" "dist/$folder/"
+          sed "s/@VERSION@/$VERSION/g" .github/release/README.txt > "dist/$folder/README.txt"
+          cp LICENSE-MIT LICENSE-APACHE "dist/$folder/"
+          cp crates/fossps-fsr/vendor/FidelityFX-SDK/LICENSE.txt "dist/$folder/licenses/FidelityFX-SDK.txt"
+          cd dist
+          if [ "$ARCHIVE" = zip ]; then
+            7z a -tzip "fossps-$SYSTEM.zip" "$folder"
+          else
+            tar -czf "fossps-$SYSTEM.tar.gz" "$folder"
+          fi
+      - name: Try the archive
+        # Unpacks what a person would download and uses it the way they would.
+        run: |
+          mkdir try
+          cd try
+          if [ "$ARCHIVE" = zip ]; then
+            7z x "../dist/fossps-$SYSTEM.zip"
+          else
+            tar -xzf "../dist/fossps-$SYSTEM.tar.gz"
+          fi
+          bin="$PWD/fossps-$VERSION-$SYSTEM"
+          ls -l "$bin" "$bin/licenses"
+          test -s "$bin/README.txt"
+          for program in fossps fossps-server; do
+            said=$("$bin/$program$EXE" --version)
+            if [ "$said" != "$program $VERSION" ]; then
+              echo "::error::$program --version said '$said', not '$program $VERSION'."
+              exit 1
+            fi
+          done
+          "$bin/fossps$EXE" new try-game
+          "$bin/fossps$EXE" check try-game
+          if [ "$RUNNER_OS" = Linux ]; then
+            (cd try-game && "$bin/fossps" package)
+            ls -l try-game/dist/try-game-linux-x86_64.tar.gz
+            # A dedicated server has no use for sound or gamepads.
+            if ldd "$bin/fossps-server" | grep -E 'libasound|libudev|libvulkan|libwayland|libX11'; then
+              echo "::error::fossps-server links a library only a game with a window needs (listed above)."
+              exit 1
+            fi
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fossps-${{ matrix.system }}
+          path: dist/fossps-${{ matrix.system }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  # Gathers the three archives and writes their checksums. Runs every time.
+  collect:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: fossps-*
+          merge-multiple: true
+      - name: Write checksums
+        run: |
+          cd dist
+          for file in fossps-linux-x86_64.tar.gz fossps-windows-x86_64.zip fossps-macos-arm64.tar.gz; do
+            if [ ! -s "$file" ]; then
+              echo "::error::$file was not built, so there is nothing to release."
+              exit 1
+            fi
+          done
+          sha256sum fossps-* > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          {
+            echo '```'
+            cat SHA256SUMS
+            ls -l
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist
+          if-no-files-found: error
+
+  # Only for a version tag. The release is made as a draft, filled, and then
+  # published, so nobody ever sees one with a download missing.
+  publish:
+    if: needs.plan.outputs.publish == 'true'
+    needs: [plan, collect]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+      - name: Publish the release
+        run: |
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::$TAG is already published, and a published release is not changed. Release the fix under a new version number (docs/releasing.md)."
+              exit 1
+            fi
+            # An earlier run stopped part-way: finish its draft.
+            gh release upload "$TAG" dist/* --clobber
+          else
+            # A version like 0.2.0-rc.1 is marked as a pre-release, which
+            # keeps it from being offered as the latest one.
+            prerelease=()
+            case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+            gh release create "$TAG" dist/* --draft --verify-tag \
+              --title "FOSSPS $VERSION" --generate-notes "${prerelease[@]}"
+          fi
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
