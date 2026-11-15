@@ -1,4 +1,5 @@
-//! Runs a game's `main.luau` and swaps in a new version when the file is saved.
+//! Runs a game's `main.luau` and the scripts it requires, and swaps in a new
+//! version when any of them is saved.
 
 // A script error carries the whole explanation by value. It is only built when
 // a script fails to load, never on the tick path, so its size does not matter.
@@ -9,7 +10,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use fossps_input::{ActionMap, InputFrame, Rumble};
 use fossps_mode::{Event, Match, PlayerId};
@@ -18,6 +19,7 @@ use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, VmState};
 use crate::api::{self, Handlers, Shared};
 use crate::error::{OpenError, ScriptError, TookTooLong, is_time_limit};
 use crate::mode_api::{Handles, ModeState};
+use crate::modules::{Files, Modules, Stamp, Touched, stamp};
 
 /// The file every game starts from, inside the game's folder.
 pub const ENTRY_SCRIPT: &str = "main.luau";
@@ -29,7 +31,7 @@ const TIME_LIMIT: Duration = Duration::from_secs(1);
 /// How much memory one script may use.
 const MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 
-/// How often the script file is checked for a new save.
+/// How often the script files are checked for a new save.
 const POLL_EVERY: Duration = Duration::from_millis(100);
 
 /// How many different runtime errors are printed before the rest are dropped,
@@ -61,11 +63,14 @@ struct Version {
     /// Owns every function in `shared`; they stop working once it is dropped.
     vm: Lua,
     shared: Rc<Shared>,
-    source: String,
 }
 
-/// What a script file looked like on disk: when it was written and how long it is.
-type Stamp = (SystemTime, u64);
+/// A script file the game looked for, found or not.
+#[derive(Debug)]
+struct Watched {
+    path: PathBuf,
+    watch: Watch,
+}
 
 /// Decides when a file has been saved and the save has finished.
 #[derive(Debug, Default)]
@@ -97,11 +102,6 @@ impl Watch {
     }
 }
 
-fn stamp(path: &Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
-}
-
 /// Runs one game's script.
 ///
 /// The script lives in its own sandboxed Luau VM: it can reach the `game`
@@ -121,9 +121,8 @@ fn stamp(path: &Path) -> Option<Stamp> {
 /// # }
 /// ```
 pub struct ScriptHost {
-    /// The script's file, or `None` when the script was given as text and
-    /// there is nothing on disk to load again.
-    path: Option<PathBuf>,
+    /// Where the game's scripts are read from.
+    files: Rc<Files>,
     file: String,
     actions: Rc<ActionMap>,
     running: Option<Version>,
@@ -134,7 +133,9 @@ pub struct ScriptHost {
     last_error: Option<ScriptError>,
     /// Runtime errors already printed for this version.
     reported: HashSet<String>,
-    watch: Watch,
+    /// Every file the running version looked for, and the ones the latest
+    /// version that failed to load did. A save of any of them is a reload.
+    watched: Vec<Watched>,
     next_poll: Instant,
     /// The match. Kept here, outside the script's VM, so that saving the
     /// script does not reset the score.
@@ -146,7 +147,7 @@ pub struct ScriptHost {
 impl std::fmt::Debug for ScriptHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScriptHost")
-            .field("path", &self.path)
+            .field("files", &self.files)
             .field("running", &self.running.is_some())
             .field("last_error", &self.last_error)
             .finish_non_exhaustive()
@@ -154,7 +155,8 @@ impl std::fmt::Debug for ScriptHost {
 }
 
 impl ScriptHost {
-    /// Opens the game in `folder` and runs its `main.luau`.
+    /// Opens the game in `folder` and runs its `main.luau`, which can
+    /// `require` the other scripts in the folder.
     ///
     /// `actions` are the input actions the script can read by name.
     ///
@@ -166,41 +168,67 @@ impl ScriptHost {
     ///
     /// Fails if `folder` has no `main.luau` or the file cannot be read.
     pub fn open(folder: impl AsRef<Path>, actions: ActionMap) -> Result<Self, OpenError> {
-        let path = folder.as_ref().join(ENTRY_SCRIPT);
-        let seen = stamp(&path);
-        let source = std::fs::read_to_string(&path).map_err(|source| {
-            if source.kind() == io::ErrorKind::NotFound {
-                OpenError::Missing { path: path.clone() }
+        let folder = folder.as_ref();
+        let path = folder.join(ENTRY_SCRIPT);
+        if let Err(source) = std::fs::File::open(&path) {
+            return Err(if source.kind() == io::ErrorKind::NotFound {
+                OpenError::Missing { path }
             } else {
-                OpenError::Unreadable {
-                    path: path.clone(),
-                    source,
-                }
-            }
-        })?;
-        Ok(Self::with_script(Some(path), seen, source, actions))
+                OpenError::Unreadable { path, source }
+            });
+        }
+        Ok(Self::with_files(Files::Folder(folder.to_owned()), actions))
     }
 
-    /// Runs `source` as a game's `main.luau` without a file behind it, as a
-    /// packaged game does: the text came out of the game's pack.
+    /// Runs `source` as a game's `main.luau` without a file behind it. The
+    /// game has no other scripts, so a `require` in it finds nothing.
     ///
     /// Nothing is watched, so [`poll_reload`](Self::poll_reload) and
     /// [`reload`](Self::reload) do nothing. A mistake inside the script is
     /// logged and kept in [`last_error`](Self::last_error).
     #[must_use]
     pub fn from_source(source: impl Into<String>, actions: ActionMap) -> Self {
-        Self::with_script(None, None, source.into(), actions)
+        Self::from_sources([(ENTRY_SCRIPT.to_owned(), source.into())], actions)
     }
 
-    /// A host running `source`, which was read from `path` if there is one.
-    fn with_script(
-        path: Option<PathBuf>,
-        seen: Option<Stamp>,
-        source: String,
+    /// Runs a game whose scripts are given as text, as a packaged game
+    /// does: they came out of the game's pack.
+    ///
+    /// `scripts` are pairs of a name and the script's text. A name is the
+    /// file's place in the game with `/` between folders, such as
+    /// `main.luau` or `weapons/rifle.luau`; `main.luau` is the one that is
+    /// run, and the others are what it can `require`.
+    ///
+    /// Nothing is watched, so [`poll_reload`](Self::poll_reload) and
+    /// [`reload`](Self::reload) do nothing. A mistake inside a script, or
+    /// leaving `main.luau` out, is logged and kept in
+    /// [`last_error`](Self::last_error).
+    ///
+    /// ```
+    /// use fossps_input::ActionMap;
+    /// use fossps_script::ScriptHost;
+    ///
+    /// let host = ScriptHost::from_sources(
+    ///     [
+    ///         ("main.luau".to_owned(), "print(require('./weapons').rifle)".to_owned()),
+    ///         ("weapons.luau".to_owned(), "return { rifle = 30 }".to_owned()),
+    ///     ],
+    ///     ActionMap::default_fps(),
+    /// );
+    /// assert!(host.last_error().is_none());
+    /// ```
+    #[must_use]
+    pub fn from_sources(
+        scripts: impl IntoIterator<Item = (String, String)>,
         actions: ActionMap,
     ) -> Self {
+        Self::with_files(Files::Memory(scripts.into_iter().collect()), actions)
+    }
+
+    /// A host running the `main.luau` in `files`.
+    fn with_files(files: Files, actions: ActionMap) -> Self {
         let mut host = Self {
-            path,
+            files: Rc::new(files),
             file: ENTRY_SCRIPT.to_owned(),
             actions: Rc::new(actions),
             running: None,
@@ -208,16 +236,13 @@ impl ScriptHost {
             paused: false,
             last_error: None,
             reported: HashSet::new(),
-            watch: Watch {
-                loaded: seen,
-                pending: None,
-            },
+            watched: Vec::new(),
             next_poll: Instant::now() + POLL_EVERY,
             mode: Rc::new(ModeState::new()),
             spawns: Vec::new(),
         };
         // A script error is already logged and kept in `last_error`.
-        let _ = host.install(source);
+        let _ = host.install();
         host
     }
 
@@ -307,29 +332,41 @@ impl ScriptHost {
         self.spawns.drain(..)
     }
 
-    /// Reloads the script if it was saved since it was last loaded.
+    /// Reloads the script if `main.luau` or a script it required was saved
+    /// since it was last loaded.
     ///
-    /// Call this every tick or frame; it looks at the file at most ten times a
-    /// second. See [`reload`](Self::reload) for what a reload does.
+    /// Call this every tick or frame; it looks at the files at most ten times
+    /// a second. See [`reload`](Self::reload) for what a reload does.
     pub fn poll_reload(&mut self) {
         let now = Instant::now();
         if now < self.next_poll {
             return;
         }
         self.next_poll = now + POLL_EVERY;
-        let Some(path) = &self.path else {
-            return;
-        };
-        if self.watch.should_reload(stamp(path)) {
+        // A script required for the first time while the game runs.
+        if let Some(version) = &self.running {
+            let touched = version.shared.modules.take_touched();
+            if !touched.is_empty() {
+                self.watch(touched, false);
+            }
+        }
+        let mut saved = false;
+        for file in &mut self.watched {
+            // Every file is asked, so each one's save settles on its own.
+            saved |= file.watch.should_reload(stamp(&file.path));
+        }
+        if saved {
             // A script error is already logged and kept in `last_error`.
             let _ = self.reload();
         }
     }
 
-    /// Loads the script from disk again, now.
+    /// Loads the script from disk again, now: `main.luau` and, as it
+    /// requires them, the other scripts.
     ///
-    /// The new version starts fresh: its variables are reset and its handlers
-    /// replace the old ones, then its `game.onReload` functions are called.
+    /// The new version starts fresh: every script's variables are reset and
+    /// its handlers replace the old ones, then its `game.onReload` functions
+    /// are called.
     /// `game.onStart` functions are not called again. A script that was given
     /// as text ([`from_source`](Self::from_source)) has no file, and nothing
     /// happens.
@@ -339,27 +376,11 @@ impl ScriptHost {
     /// If the new version has a mistake, the error is returned (and logged) and
     /// the previous version keeps running.
     pub fn reload(&mut self) -> Result<(), ScriptError> {
-        let Some(path) = self.path.clone() else {
+        if !self.files.on_disk() {
             return Ok(());
-        };
-        self.watch.loaded = stamp(&path).or(self.watch.loaded);
-        self.watch.pending = None;
-        let source = match std::fs::read_to_string(&path) {
-            Ok(source) => source,
-            Err(error) => {
-                let error = ScriptError::file_problem(
-                    &self.file,
-                    format!(
-                        "Could not read {}: {error}. Check that the file still exists and \
-                         is saved as plain text (UTF-8).",
-                        path.display()
-                    ),
-                );
-                return Err(self.failed_to_load(error));
-            }
-        };
+        }
         let had_version = self.running.is_some();
-        self.install(source)?;
+        self.install()?;
         if had_version {
             log::info!("Reloaded {}.", self.file);
         }
@@ -370,9 +391,13 @@ impl ScriptHost {
         Ok(())
     }
 
-    /// Builds a version from `source` and makes it the running one.
-    fn install(&mut self, source: String) -> Result<(), ScriptError> {
-        match self.build(source) {
+    /// Builds a version from the game's scripts and makes it the running one.
+    fn install(&mut self) -> Result<(), ScriptError> {
+        let (touched, built) = self.build();
+        // A version that failed is fixed by saving one of the files it read,
+        // or one the running version did.
+        self.watch(touched, built.is_ok());
+        match built {
             Ok(version) => {
                 // A script with no `game.mode` plays the default rules.
                 let rules = version.shared.rules.borrow_mut().take();
@@ -391,6 +416,24 @@ impl ScriptHost {
         }
     }
 
+    /// Notes what the files a version looked for were like when it did.
+    /// `only` forgets the files that are not among them.
+    fn watch(&mut self, touched: Touched, only: bool) {
+        if only {
+            self.watched.clear();
+        }
+        for (path, seen) in touched {
+            let watch = Watch {
+                loaded: seen,
+                pending: None,
+            };
+            match self.watched.iter_mut().find(|file| file.path == path) {
+                Some(file) => file.watch = watch,
+                None => self.watched.push(Watched { path, watch }),
+            }
+        }
+    }
+
     /// Records and logs an error that stopped a new version from loading.
     fn failed_to_load(&mut self, error: ScriptError) -> ScriptError {
         let error = error.with_note(if self.running.is_some() {
@@ -403,35 +446,46 @@ impl ScriptHost {
         error
     }
 
-    /// Starts a fresh VM and runs `source` in it.
-    fn build(&self, source: String) -> Result<Version, ScriptError> {
+    /// Starts a fresh VM and runs the game's `main.luau` in it. Also gives
+    /// the files that were looked for, whether or not it worked.
+    fn build(&self) -> (Touched, Result<Version, ScriptError>) {
         let shared = Rc::new(Shared {
-            file: self.file.clone(),
             actions: Rc::clone(&self.actions),
             handlers: RefCell::new(Handlers::default()),
             input: RefCell::new(InputFrame::default()),
             deadline: Cell::new(None),
-            stopped: Cell::new(None),
+            stopped: RefCell::new(None),
             checks: Cell::new(0),
             mode: Rc::clone(&self.mode),
             handles: Handles::default(),
             loading: Cell::new(true),
             rules: RefCell::new(None),
             rumble: Cell::new(None),
+            modules: Modules::new(Rc::clone(&self.files)),
         });
+        let built = self.run(&shared);
+        (shared.modules.take_touched(), built)
+    }
+
+    /// Runs the game's `main.luau` in a fresh VM that reaches `shared`.
+    fn run(&self, shared: &Rc<Shared>) -> Result<Version, ScriptError> {
+        let source = shared.modules.read(&self.file).map_err(|problem| {
+            let message = shared.modules.explain(&problem, &self.file, None);
+            ScriptError::file_problem(&self.file, message)
+        })?;
         let lua = Lua::new();
         let run = || -> mlua::Result<()> {
             lua.set_memory_limit(MEMORY_LIMIT)?;
-            api::install(&lua, &shared)?;
+            api::install(&lua, shared)?;
             lua.sandbox(true)?;
-            let limit = Rc::clone(&shared);
+            let limit = Rc::clone(shared);
             lua.set_interrupt(move |lua| {
                 let Some(deadline) = limit.deadline.get() else {
                     return Ok(VmState::Continue);
                 };
                 // Once time is up every check fails, so a script that catches
                 // the error with pcall still cannot carry on.
-                let mut stopped = limit.stopped.get();
+                let mut stopped = limit.stopped.borrow().clone();
                 if stopped.is_none() {
                     // This runs at every function call and loop turn, so the
                     // clock is only read now and then.
@@ -440,12 +494,15 @@ impl ScriptHost {
                     if !checks.is_multiple_of(CLOCK_EVERY) || Instant::now() < deadline {
                         return Ok(VmState::Continue);
                     }
-                    let line = lua
-                        .inspect_stack(0, |running| running.current_line())
-                        .flatten()
-                        .and_then(|line| u32::try_from(line).ok());
-                    stopped = Some(TookTooLong { line });
-                    limit.stopped.set(stopped);
+                    let place = lua.inspect_stack(0, |running| {
+                        let file = running.source().source;
+                        let file = file.and_then(|file| Some(file.strip_prefix('@')?.to_owned()));
+                        (file, running.current_line())
+                    });
+                    let (file, line) = place.unwrap_or_default();
+                    let line = line.and_then(|line| u32::try_from(line).ok());
+                    stopped = Some(TookTooLong { file, line });
+                    limit.stopped.borrow_mut().clone_from(&stopped);
                 }
                 match stopped {
                     Some(stopped) => Err(mlua::Error::external(stopped)),
@@ -453,17 +510,20 @@ impl ScriptHost {
                 }
             });
             let chunk = lua.load(&source).set_name(format!("@{}", self.file));
-            let result = within_time_limit(&shared, || chunk.exec());
+            let result = within_time_limit(shared, || chunk.exec());
             shared.loading.set(false);
             result
         };
         match run() {
             Ok(()) => Ok(Version {
                 vm: lua,
-                shared,
-                source,
+                shared: Rc::clone(shared),
             }),
-            Err(error) => Err(ScriptError::from_lua(&error, &self.file, &source)),
+            Err(error) => Err(ScriptError::from_lua(
+                &error,
+                &self.file,
+                &shared.modules.sources.borrow(),
+            )),
         }
     }
 
@@ -575,7 +635,8 @@ impl ScriptHost {
                 continue;
             };
             let too_long = is_time_limit(&error);
-            let error = ScriptError::from_lua(&error, &self.file, &version.source)
+            let sources = version.shared.modules.sources.borrow();
+            let error = ScriptError::from_lua(&error, &self.file, &sources)
                 .with_note(if too_long { PAUSED } else { KEEPS_RUNNING });
             let text = error.to_string();
             if self.reported.len() < MAX_REPORTED && self.reported.insert(text.clone()) {
@@ -600,7 +661,7 @@ fn within_time_limit<R>(
     shared: &Shared,
     call: impl FnOnce() -> mlua::Result<R>,
 ) -> mlua::Result<R> {
-    shared.stopped.set(None);
+    shared.stopped.replace(None);
     shared.deadline.set(Some(Instant::now() + TIME_LIMIT));
     let result = call();
     shared.deadline.set(None);
@@ -612,6 +673,8 @@ fn within_time_limit<R>(
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
 
     fn at(seconds: u64, len: u64) -> Option<Stamp> {

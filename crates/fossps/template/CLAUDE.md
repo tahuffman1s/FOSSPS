@@ -28,8 +28,9 @@ Do not start `fossps run` yourself unless asked: it opens a window and does not 
 - Read input by action name (`"jump"`, `"fire"`, `"move"`, `"look"`, ...), never by key, so keyboard, mouse and gamepad all work. The action names are listed in `fossps.d.luau`.
 - `print()` goes to the terminal, not the window.
 - Variables at the top of the file start over every time the file is saved and reloaded.
-- The script is sandboxed: no file access or network. `require` does not work yet, so keep everything in `main.luau`.
-- A script error message names the line and says what to try. Follow it before guessing.
+- The script is sandboxed: no file access or network.
+- The game starts from `main.luau`. Split a growing game into files: `local weapons = require("./weapons")` runs `weapons.luau`, the file beside the one that asks, once, and gives back what that file returns (end it with `return weapons`; a file that returns nothing gives nil, which suits one that only adds `game.on...` functions). Paths start with `./` (beside the file that asks) or `../` (the folder above), use `/` for folders (`"./weapons/rifle"`), leave `.luau` off, and cannot leave the game's folder. Files cannot require each other in a circle. Saving any file reloads the whole game.
+- A script error message names the file and the line and says what to try. Follow it before guessing.
 
 ## What the engine cannot do yet
 

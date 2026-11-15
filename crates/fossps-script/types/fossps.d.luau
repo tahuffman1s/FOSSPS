@@ -4,6 +4,16 @@
 -- checking for `game` in your editor.
 --
 -- `print(...)` writes a line to the terminal the game was started from.
+--
+-- `require("./weapons")` runs weapons.luau, the file beside the script that
+-- asks, once, and gives back what that file returns. Use it to split a game
+-- over files. Start the path with `./` (beside this script) or `../` (the
+-- folder above), write `/` between folders and leave `.luau` off:
+--     local rifle = require("./weapons/rifle")
+-- End the required file with `return` and the table to hand over. A file
+-- that returns nothing gives nil, which is fine for one that only adds
+-- `game.on...` functions. Only scripts inside the game's folder can be
+-- required, and scripts cannot require each other in a circle.
 
 --- A team in the match. Get one from `player.team`, `game.team("Red")` or
 --- `game.teams()`.

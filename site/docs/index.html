@@ -75,7 +75,7 @@
   </table>
 
   <h2 id="scripting">Scripting</h2>
-  <p>A game is a folder with a <code>main.luau</code> in it, written in <a href="https://luau.org">Luau</a>. Everything the engine offers a script is in one table called <code>game</code>.</p>
+  <p>A game is a folder with a <code>main.luau</code> in it, where the game starts, written in <a href="https://luau.org">Luau</a>. Everything the engine offers a script is in one table called <code>game</code>.</p>
   <table>
     <thead><tr><th scope="col">In a script</th><th scope="col">What it is for</th></tr></thead>
     <tbody>
@@ -85,11 +85,12 @@
       <tr><td><code>game.onRoundStart</code>, <code>game.onRoundEnd</code></td><td>Run your code when a round starts and when it is won.</td></tr>
       <tr><td><code>game.players()</code>, <code>game.teams()</code>, <code>game.team("Red")</code></td><td>Who is in the match. A team has a <code>name</code> and a <code>score</code>, and <code>team:addScore(1)</code> changes it.</td></tr>
       <tr><td><code>game.input</code></td><td>What the player is pressing, by action name (<code>"jump"</code>, <code>"fire"</code>, <code>"move"</code>), the same for keyboard, mouse and gamepad.</td></tr>
+      <tr><td><code>require("./weapons")</code></td><td>Splits a game over files: runs <code>weapons.luau</code>, the file beside the one that asks, once, and gives back what that file ends with, such as <code>return weapons</code>. Paths start with <code>./</code> or <code>../</code> and stay inside the game's folder. Saving any of the files reloads the game.</td></tr>
       <tr><td><code>game.input.rumble</code></td><td>Shakes the gamepad of the player at this computer: <code>game.input.rumble(0.2, 0.6, 0.1)</code> is the heavy motor, the light motor, then seconds. On Linux and Windows, in <code>fossps run</code>; not on macOS yet.</td></tr>
     </tbody>
   </table>
   <p>The full list, with every setting and what each function is given, is <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/crates/fossps-script/types/fossps.d.luau"><code>fossps.d.luau</code></a>. A copy is in every game's folder, which is what gives your editor autocomplete: in VS Code, install the <a href="https://marketplace.visualstudio.com/items?itemName=JohnnyMorganz.luau-lsp">Luau Language Server</a> extension and open the game's folder.</p>
-  <p>Two games to read: <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/hello/main.luau">hello</a>, the smallest one, and <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/team-deathmatch/main.luau">team-deathmatch</a>, with kill streaks.</p>
+  <p>Two games to read: <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/hello/main.luau">hello</a>, the smallest one, and <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/team-deathmatch/main.luau">team-deathmatch</a>, with kill streaks kept in <a href="https://github.com/tahuffman1s/FOSSPS/blob/main/examples/team-deathmatch/streaks.luau">a second file</a>.</p>
 
   <h2 id="help">Stuck?</h2>
   <p>Error messages are meant to say what to do next. If one did not, or a page here is wrong, <a href="https://github.com/tahuffman1s/FOSSPS/issues/new">open an issue</a> and paste what the terminal said.</p>

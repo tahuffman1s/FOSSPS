@@ -8,10 +8,11 @@ use std::time::Instant;
 
 use fossps_input::{ActionKind, ActionMap, ActionState, InputFrame, Rumble};
 use fossps_mode::Rules;
-use mlua::{Function, Lua, MultiValue, Table, Value, Variadic};
+use mlua::{Function, Lua, Table, Value, Variadic};
 
 use crate::error::{TookTooLong, closest};
 use crate::mode_api::{self, Handles, ModeState};
+use crate::modules::{self, Modules};
 
 /// Every function directly on `game`. The type definitions shipped for editors
 /// are tested against this list.
@@ -62,8 +63,6 @@ pub(crate) struct Handlers {
 
 /// State the engine and one script VM both reach.
 pub(crate) struct Shared {
-    /// The script's file name, used to say where an error happened.
-    pub file: String,
     pub actions: Rc<ActionMap>,
     pub handlers: RefCell<Handlers>,
     /// The input for the tick being run.
@@ -71,7 +70,7 @@ pub(crate) struct Shared {
     /// When the script call in progress must have finished.
     pub deadline: Cell<Option<Instant>>,
     /// Set once the call in progress has run out of time.
-    pub stopped: Cell<Option<TookTooLong>>,
+    pub stopped: RefCell<Option<TookTooLong>>,
     /// How many times the time limit has been checked.
     pub checks: Cell<u32>,
     /// The match being played. It outlives this version of the script.
@@ -85,35 +84,33 @@ pub(crate) struct Shared {
     pub rules: RefCell<Option<(Rules, Option<usize>)>>,
     /// The rumble the script asked for and the engine has not yet taken.
     pub rumble: Cell<Option<Rumble>>,
+    /// The script files this version has read, and what `require` gave for each.
+    pub modules: Modules,
 }
 
 /// How far up the stack to look for the script line that made a call.
 /// Reading something from a player goes through a few of the VM's own frames.
 const MAX_FRAMES: usize = 8;
 
+/// The script file and line that called into the engine: the nearest frame
+/// that is in one of the game's scripts.
+pub(crate) fn calling_script(lua: &Lua) -> Option<(String, Option<usize>)> {
+    (1..MAX_FRAMES).find_map(|level| {
+        lua.inspect_stack(level, |frame| {
+            let source = frame.source().source?;
+            let file = source.strip_prefix('@')?;
+            Some((file.to_owned(), frame.current_line()))
+        })
+        .flatten()
+    })
+}
+
 /// An error raised by the engine on the script's behalf, pointing at the
 /// script line that made the call.
 pub(crate) fn fail(lua: &Lua, message: impl Display) -> mlua::Error {
-    let Some(file) = lua
-        .app_data_ref::<Rc<Shared>>()
-        .map(|shared| shared.file.clone())
-    else {
-        return mlua::Error::runtime(message);
-    };
-    // The nearest frame that is in the script itself.
-    let line = (1..MAX_FRAMES).find_map(|level| {
-        lua.inspect_stack(level, |frame| {
-            let in_script = frame
-                .source()
-                .source
-                .is_some_and(|source| source.strip_prefix('@') == Some(file.as_str()));
-            in_script.then(|| frame.current_line()).flatten()
-        })
-        .flatten()
-    });
-    match line {
-        Some(line) => mlua::Error::runtime(format!("{file}:{line}: {message}")),
-        None => mlua::Error::runtime(message),
+    match calling_script(lua) {
+        Some((file, Some(line))) => mlua::Error::runtime(format!("{file}:{line}: {message}")),
+        _ => mlua::Error::runtime(message),
     }
 }
 
@@ -130,7 +127,7 @@ pub(crate) fn describe(value: &Value) -> &'static str {
     }
 }
 
-/// Puts `game`, `print` and a placeholder `require` into the VM's globals.
+/// Puts `game`, `print` and `require` into the VM's globals.
 pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
     lua.set_app_data(Rc::clone(shared));
     let globals = lua.globals();
@@ -241,16 +238,7 @@ pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
     globals.set("game", game)?;
 
     globals.set("print", lua.create_function(print)?)?;
-    globals.set(
-        "require",
-        lua.create_function(|lua, _: MultiValue| -> mlua::Result<()> {
-            Err(fail(
-                lua,
-                "require() is not available yet. Put all of your code in main.luau for now; \
-                 `game` is ready to use without require.",
-            ))
-        })?,
-    )?;
+    modules::install(lua, shared)?;
     Ok(())
 }
 
