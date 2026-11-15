@@ -36,6 +36,8 @@ mod game;
 #[cfg(feature = "window")]
 mod gamepad;
 pub mod online;
+#[cfg(feature = "window")]
+mod pace;
 #[cfg(feature = "cli")]
 pub mod package;
 pub mod player;

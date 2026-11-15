@@ -2,7 +2,8 @@
 //!
 //! This runs wherever Vulkan 1.3 is installed, including on a software
 //! renderer, and is skipped elsewhere. Set `FOSSPS_REQUIRE_VULKAN=1` to make
-//! a missing Vulkan a failure instead, as CI does on Linux.
+//! a missing Vulkan a failure instead, and `FOSSPS_REQUIRE_VALIDATION=1` to
+//! make a missing validation layer one, as CI does on Linux.
 
 use std::ffi::{CStr, c_void};
 use std::sync::Mutex;
@@ -73,6 +74,12 @@ impl Gpu {
             let validate = layers
                 .iter()
                 .any(|layer| layer.layer_name_as_c_str() == Ok(VALIDATION_LAYER));
+            let required =
+                std::env::var("FOSSPS_REQUIRE_VALIDATION").is_ok_and(|value| value != "0");
+            assert!(
+                validate || !required,
+                "FOSSPS_REQUIRE_VALIDATION is set, but the Vulkan validation layer is not installed"
+            );
             let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
             let layer_names = [VALIDATION_LAYER.as_ptr()];
             let extension_names = [debug_utils::NAME.as_ptr()];
