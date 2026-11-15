@@ -100,6 +100,16 @@ impl<'a> Reader<'a> {
         Ok(reader)
     }
 
+    /// A reader for bytes with no kind or version checked yet.
+    pub(crate) fn raw(bytes: &'a [u8]) -> Self {
+        Self { rest: bytes }
+    }
+
+    /// The bytes not read yet.
+    pub(crate) fn rest(&self) -> &'a [u8] {
+        self.rest
+    }
+
     fn take<const N: usize>(&mut self) -> Result<[u8; N], NetError> {
         let (head, rest) = self
             .rest
@@ -127,6 +137,10 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u32(&mut self) -> Result<u32, NetError> {
         Ok(u32::from_le_bytes(self.take()?))
+    }
+
+    pub(crate) fn u64(&mut self) -> Result<u64, NetError> {
+        Ok(u64::from_le_bytes(self.take()?))
     }
 
     /// A whole number of 24 bits, from about -8 million to 8 million.
@@ -185,6 +199,21 @@ impl<'a> Writer<'a> {
 
     pub(crate) fn u32(&mut self, value: u32) {
         self.out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    pub(crate) fn u64(&mut self, value: u64) {
+        self.out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    pub(crate) fn bytes(&mut self, value: &[u8]) {
+        self.out.extend_from_slice(value);
+    }
+
+    /// Adds zeros until the packet is `len` bytes long.
+    pub(crate) fn pad_to(&mut self, len: usize) {
+        if self.out.len() < len {
+            self.out.resize(len, 0);
+        }
     }
 
     /// The low 24 bits of `value`.

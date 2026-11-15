@@ -49,26 +49,35 @@
 //! at what [`Server::seen_by`] gives: everyone else where the shooter had
 //! them on screen when pulling the trigger (lag compensation).
 //!
-//! This crate only makes and reads packets. It opens no socket: how the
-//! bytes travel is up to the caller, and packets may be lost, repeated or
-//! arrive out of order.
+//! Packets travel over UDP: a server opens a [`UdpHost`] and each player a
+//! [`UdpLink`], which also take care of joining, leaving and dropping
+//! whoever goes silent. Packets may be lost, repeated or arrive out of
+//! order, and the rest of the crate is built for that.
 //!
-//! Nothing here reads a clock or a random number. The same packets in the
-//! same order always give the same result, and a client and a server given
-//! the same commands work out the same moves to the last digit.
+//! [`Client`] and [`Server`] read no clock and no random number. The same
+//! packets in the same order always give the same result, and a client
+//! and a server given the same commands work out the same moves to the
+//! last digit. Only the two UDP types read the time, to tell who has gone
+//! silent.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod client;
 mod command;
+mod connect;
+#[cfg(test)]
+mod connect_tests;
 mod server;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+mod udp;
 mod wire;
 
 pub use client::{Client, ClientSettings, Received};
 pub use command::{Command, PlayerInput};
+pub use connect::{Closed, Gone, HostSettings, JoinRequest, LinkSettings, Refusal};
 pub use server::{Server, ServerSettings};
 pub use snapshot::{MAX_PLAYERS, PlayerId, RemotePlayer};
+pub use udp::{HostEvent, LinkEvent, SocketError, UdpHost, UdpLink};
 pub use wire::{MAX_PACKET_BYTES, NetError};
