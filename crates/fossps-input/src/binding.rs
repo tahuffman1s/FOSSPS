@@ -225,6 +225,24 @@ impl Binding {
         }
     }
 
+    /// Every key and button the bindings in `bindings` read.
+    pub(crate) fn buttons_of(bindings: &[Self]) -> impl Iterator<Item = Button> + '_ {
+        bindings.iter().flat_map(|binding| {
+            let buttons = match *binding {
+                Self::Button(button) => [Some(button), None, None, None],
+                Self::Axis { negative, positive } => [Some(negative), Some(positive), None, None],
+                Self::Directions {
+                    up,
+                    down,
+                    left,
+                    right,
+                } => [Some(up), Some(down), Some(left), Some(right)],
+                Self::StickAxis(..) | Self::Stick(_) | Self::MouseMotion => [None; 4],
+            };
+            buttons.into_iter().flatten()
+        })
+    }
+
     /// The kind of action this binding can drive.
     #[must_use]
     pub const fn kind(self) -> ActionKind {

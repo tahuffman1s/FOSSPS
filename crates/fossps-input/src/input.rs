@@ -1,9 +1,11 @@
 //! Collects device events and turns them into one [`InputFrame`] per tick.
 
+use std::fmt;
+
 use crate::binding::{ActionKind, Binding, Button};
-use crate::devices::{GamepadButton, Stick, StickAxis};
+use crate::devices::{GamepadButton, Key, Stick, StickAxis};
 use crate::frame::{ActionState, InputFrame};
-use crate::map::ActionMap;
+use crate::map::{ActionId, ActionMap, Conflict};
 use crate::shaping::{PRESS_AT, RELEASE_AT, clamp_length, length, sanitize};
 
 /// The live state of every device, resolved through an [`ActionMap`].
@@ -34,7 +36,62 @@ pub struct Input {
     /// Mouse movement accumulated since the last tick.
     mouse: [f32; 2],
     frame: InputFrame,
+    /// The action waiting for a new key or button, and the one it replaces.
+    listening: Option<(ActionId, Button)>,
+    /// The last finished rebind, until it is taken.
+    rebound: Option<Rebound>,
+    /// Buttons pressed while listening; each is ignored until it comes back up.
+    swallowed: [bool; Button::COUNT],
 }
+
+/// A finished rebind: what [`Input::start_rebind`] heard and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rebound {
+    /// The action that was rebound.
+    pub action: ActionId,
+    /// The key or button it no longer uses.
+    pub from: Button,
+    /// The key or button the player pressed, which it uses now.
+    pub to: Button,
+    /// The clashes this made: other actions that already used the new key or
+    /// button. The rebind was made anyway; each prints as a sentence to show
+    /// the player.
+    pub conflicts: Vec<Conflict>,
+}
+
+/// Why [`Input::start_rebind`] did not start listening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebindError {
+    /// The action's name, or `""` for an id from a different map.
+    pub action: String,
+    /// The key or button that was to be replaced.
+    pub replacing: Button,
+    /// What the action is bound to, as written in a bindings file.
+    pub bound_to: Vec<String>,
+}
+
+impl fmt::Display for RebindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.action.is_empty() {
+            return f.write_str(
+                "That action is not in this action map. \
+                 Look it up again with `map.action(\"name\")` after changing the map.",
+            );
+        }
+        write!(
+            f,
+            "Action \"{}\" does not use \"{}\", so there is nothing to replace. ",
+            self.action, self.replacing
+        )?;
+        if self.bound_to.is_empty() {
+            f.write_str("It has nothing bound; give it bindings with `set_bindings`.")
+        } else {
+            write!(f, "It is bound to: {}.", self.bound_to.join(", "))
+        }
+    }
+}
+
+impl std::error::Error for RebindError {}
 
 impl Input {
     /// Starts with every device at rest.
@@ -51,6 +108,9 @@ impl Input {
             sticks: [[0.0; 2]; Stick::COUNT],
             mouse: [0.0; 2],
             frame,
+            listening: None,
+            rebound: None,
+            swallowed: [false; Button::COUNT],
         }
     }
 
@@ -66,6 +126,124 @@ impl Input {
         self.frame = InputFrame::idle(map.len());
         self.frame.tick = tick;
         self.map = map;
+        self.listening = None;
+        self.rebound = None;
+    }
+
+    /// Starts listening: the next key or button the player presses replaces
+    /// `replacing` in the action's bindings.
+    ///
+    /// Keep feeding events as usual. While listening, presses reach no action.
+    /// The first new press of the same kind of device as `replacing` is taken:
+    /// a key, mouse button or wheel notch for a keyboard or mouse binding, a
+    /// gamepad button or trigger for a gamepad one, so an action never loses
+    /// its binding on either device. Presses on the other device are dropped.
+    /// Nothing pressed while listening, the chosen key included, reaches an
+    /// action until it is let go. Choosing a key the action already uses
+    /// elsewhere swaps the two.
+    ///
+    /// `Escape` (for keyboard and mouse) or `GamepadStart` (for a gamepad)
+    /// cancels instead, so neither can be chosen this way; bind them in the
+    /// bindings file. [`cancel_rebind`](Self::cancel_rebind) cancels too, for
+    /// a time limit or a button on screen.
+    ///
+    /// Check [`is_rebinding`](Self::is_rebinding) each frame; once it is
+    /// false, [`take_rebound`](Self::take_rebound) says what happened.
+    ///
+    /// ```
+    /// use fossps_input::{ActionMap, Input, Key};
+    ///
+    /// let mut input = Input::new(ActionMap::default_fps());
+    /// let jump = input.map().action("jump")?;
+    ///
+    /// input.start_rebind(jump, Key::Space.into())?;
+    /// input.press(Key::F); // the player presses the key they want
+    ///
+    /// let rebound = input.take_rebound().ok_or("still listening")?;
+    /// assert_eq!(rebound.to, Key::F.into());
+    /// assert!(rebound.conflicts.is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails if the action does not use `replacing`; the error lists what it
+    /// is bound to.
+    pub fn start_rebind(&mut self, action: ActionId, replacing: Button) -> Result<(), RebindError> {
+        // Swapping a button for itself changes nothing, so this only asks
+        // whether the action uses it.
+        let uses = Binding::buttons_of(self.map.bindings(action)).any(|button| button == replacing);
+        if !uses {
+            return Err(RebindError {
+                action: self.map.name(action).to_owned(),
+                replacing,
+                bound_to: (self.map.bindings(action).iter())
+                    .map(ToString::to_string)
+                    .collect(),
+            });
+        }
+        self.listening = Some((action, replacing));
+        self.rebound = None;
+        Ok(())
+    }
+
+    /// Stops listening without changing any binding.
+    pub fn cancel_rebind(&mut self) {
+        self.listening = None;
+    }
+
+    /// Whether a rebind is waiting for the player to press something.
+    #[must_use]
+    pub fn is_rebinding(&self) -> bool {
+        self.listening.is_some()
+    }
+
+    /// The rebind that just finished, once. `None` while still listening,
+    /// and `None` after listening ended if it was cancelled.
+    pub fn take_rebound(&mut self) -> Option<Rebound> {
+        self.rebound.take()
+    }
+
+    /// Decides whether a fresh press of `button` belongs to a rebind instead
+    /// of to the game. Returns `true` when the press must reach no action.
+    fn intercept(&mut self, button: Button) -> bool {
+        let index = button.index();
+        if self.swallowed[index] {
+            return true;
+        }
+        let Some((action, from)) = self.listening else {
+            return false;
+        };
+        let wheel = matches!(button, Button::Wheel(_));
+        if !wheel && self.held[index] {
+            // Key repeat of something held since before listening began.
+            return true;
+        }
+        // Whatever goes down while listening belongs to the rebind, not the
+        // game, until it comes back up. A wheel notch never comes back up.
+        self.swallowed[index] = !wheel;
+        if button.is_gamepad() != from.is_gamepad() {
+            return true;
+        }
+        self.listening = None;
+        let cancel = if from.is_gamepad() {
+            Button::Gamepad(GamepadButton::GamepadStart)
+        } else {
+            Button::Key(Key::Escape)
+        };
+        if button != cancel {
+            let before = self.map.conflicts();
+            self.map.replace_button(action, from, button);
+            let mut conflicts = self.map.conflicts();
+            conflicts.retain(|conflict| !before.contains(conflict));
+            self.rebound = Some(Rebound {
+                action,
+                from,
+                to: button,
+                conflicts,
+            });
+        }
+        true
     }
 
     /// The frame produced by the most recent [`tick`](Self::tick).
@@ -78,6 +256,9 @@ impl Input {
     pub fn press(&mut self, button: impl Into<Button>) {
         let button = button.into();
         let index = button.index();
+        if self.intercept(button) {
+            return;
+        }
         match button {
             // A wheel notch has no "held" state: it is a press that is already over.
             Button::Wheel(_) => self.latched[index] = true,
@@ -96,6 +277,7 @@ impl Input {
     /// Reports that a key or button came up.
     pub fn release(&mut self, button: impl Into<Button>) {
         let button = button.into();
+        self.swallowed[button.index()] = false;
         self.held[button.index()] = false;
         if let Button::Gamepad(pad) = button {
             self.amount[pad.index()] = 0.0;
@@ -109,6 +291,15 @@ impl Input {
     pub fn set_button_amount(&mut self, button: GamepadButton, amount: f32) {
         let amount = sanitize(amount).max(0.0);
         let index = Button::Gamepad(button).index();
+        if self.swallowed[index] {
+            if amount < RELEASE_AT {
+                self.swallowed[index] = false;
+            }
+            return;
+        }
+        if !self.held[index] && amount >= PRESS_AT && self.intercept(Button::Gamepad(button)) {
+            return;
+        }
         self.amount[button.index()] = amount;
         if self.held[index] {
             if amount < RELEASE_AT {
@@ -141,7 +332,11 @@ impl Input {
     ///
     /// Held actions report `just_released` on the next tick. Presses and mouse
     /// movement that no tick has seen yet are discarded.
+    ///
+    /// A rebind that is listening is cancelled: the player has looked away.
     pub fn release_all(&mut self) {
+        self.listening = None;
+        self.swallowed = [false; Button::COUNT];
         self.held = [false; Button::COUNT];
         self.latched = [false; Button::COUNT];
         self.mouse = [0.0; 2];
@@ -154,6 +349,7 @@ impl Input {
             let index = Button::Gamepad(*button).index();
             self.held[index] = false;
             self.latched[index] = false;
+            self.swallowed[index] = false;
         }
         self.amount = [0.0; GamepadButton::COUNT];
         self.sticks = [[0.0; 2]; Stick::COUNT];
@@ -254,8 +450,7 @@ fn button_amount(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::devices::{Key, MouseButton, MouseWheel};
-    use crate::map::ActionId;
+    use crate::devices::{MouseButton, MouseWheel};
 
     struct Rig {
         input: Input,
@@ -567,5 +762,214 @@ mod tests {
         let frame = r.input.tick();
         assert_eq!(frame.tick, 2);
         assert!(frame.pressed(hop));
+    }
+
+    #[test]
+    fn the_next_key_pressed_replaces_the_old_one_and_does_nothing_else() {
+        let mut r = rig();
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+        assert!(r.input.is_rebinding());
+        assert_eq!(r.input.take_rebound(), None);
+
+        r.input.press(Key::F);
+        assert!(!r.input.is_rebinding());
+        let rebound = r.input.take_rebound().unwrap();
+        assert_eq!(
+            (rebound.action, rebound.from, rebound.to),
+            (r.jump, Key::Space.into(), Key::F.into())
+        );
+        assert_eq!(rebound.conflicts, Vec::new());
+        assert_eq!(r.input.take_rebound(), None, "handed over once");
+
+        // The press that chose the key does not jump, however long it repeats.
+        r.input.press(Key::F);
+        assert!(!r.input.tick().pressed(r.jump));
+        r.input.release(Key::F);
+        r.input.tick();
+
+        r.input.press(Key::F);
+        assert!(r.input.tick().just_pressed(r.jump));
+        r.input.release(Key::F);
+        r.input.press(Key::Space);
+        assert!(!r.input.tick().pressed(r.jump), "the old key is gone");
+        // The gamepad binding is untouched.
+        r.input.press(GamepadButton::GamepadSouth);
+        assert!(r.input.tick().pressed(r.jump));
+    }
+
+    #[test]
+    fn listening_hears_only_new_presses_on_the_same_kind_of_device() {
+        let mut r = rig();
+        r.input.press(MouseButton::MouseLeft);
+        r.input.tick();
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+
+        // The click that opened the listener is still down, and repeats.
+        r.input.press(MouseButton::MouseLeft);
+        // A gamepad cannot fill a keyboard slot.
+        r.input.press(GamepadButton::GamepadEast);
+        r.input.set_button_amount(GamepadButton::LeftTrigger, 1.0);
+        assert!(r.input.is_rebinding());
+        assert!(!r.input.tick().pressed(r.jump), "dropped, not played");
+
+        r.input.press(MouseWheel::MouseWheelUp);
+        let rebound = r.input.take_rebound().unwrap();
+        assert_eq!(rebound.to, MouseWheel::MouseWheelUp.into());
+        r.input.tick();
+        r.input.press(MouseWheel::MouseWheelUp);
+        assert!(r.input.tick().just_pressed(r.jump));
+    }
+
+    #[test]
+    fn a_trigger_can_be_chosen_for_a_gamepad_binding() {
+        let mut r = rig();
+        r.input
+            .start_rebind(r.jump, GamepadButton::GamepadSouth.into())
+            .unwrap();
+        r.input.press(Key::F);
+        r.input.set_button_amount(GamepadButton::LeftTrigger, 0.2);
+        assert!(r.input.is_rebinding(), "a resting trigger is not a press");
+
+        r.input.set_button_amount(GamepadButton::LeftTrigger, 0.9);
+        let rebound = r.input.take_rebound().unwrap();
+        assert_eq!(rebound.to, GamepadButton::LeftTrigger.into());
+        r.input.set_button_amount(GamepadButton::LeftTrigger, 1.0);
+        assert!(!r.input.tick().pressed(r.jump), "still the choosing press");
+
+        r.input.set_button_amount(GamepadButton::LeftTrigger, 0.0);
+        r.input.set_button_amount(GamepadButton::LeftTrigger, 0.8);
+        let frame = r.input.tick();
+        assert!(frame.just_pressed(r.jump));
+        assert!(close(frame.value(r.jump), 0.8));
+    }
+
+    #[test]
+    fn a_rebind_onto_a_used_key_goes_through_and_names_the_clash() {
+        let mut r = rig();
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+        r.input.press(Key::W);
+        let rebound = r.input.take_rebound().unwrap();
+        let said: Vec<String> = rebound.conflicts.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            said,
+            [
+                "\"W\" is bound to both \"jump\" and \"move\", so it does both at once. \
+              Bind one of them to something else, unless that is what you want."
+            ]
+        );
+        assert_eq!(
+            r.input.map().bindings(r.jump)[0],
+            Binding::Button(Key::W.into())
+        );
+    }
+
+    #[test]
+    fn one_key_of_a_group_can_be_rebound() {
+        let mut r = rig();
+        r.input.start_rebind(r.movement, Key::W.into()).unwrap();
+        r.input.press(Key::ArrowUp);
+        r.input.release(Key::ArrowUp);
+        r.input.tick();
+        r.input.press(Key::ArrowUp);
+        assert_eq!(r.input.tick().axis2d(r.movement), [0.0, 1.0]);
+    }
+
+    #[test]
+    fn escape_start_and_a_call_all_cancel() {
+        let mut r = rig();
+        let before = r.input.map().clone();
+
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+        r.input.press(Key::Escape);
+        assert!(!r.input.is_rebinding());
+        assert_eq!(r.input.take_rebound(), None);
+
+        r.input
+            .start_rebind(r.jump, GamepadButton::GamepadSouth.into())
+            .unwrap();
+        r.input.press(GamepadButton::GamepadStart);
+        assert!(!r.input.is_rebinding());
+        assert_eq!(r.input.take_rebound(), None);
+
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+        r.input.cancel_rebind();
+        r.input.press(Key::F);
+        assert_eq!(r.input.take_rebound(), None);
+
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+        r.input.release_all();
+        assert!(!r.input.is_rebinding(), "the window lost focus");
+
+        assert_eq!(r.input.map(), &before);
+    }
+
+    #[test]
+    fn a_rebind_that_cannot_start_says_what_the_action_uses() {
+        let mut r = rig();
+        let error = r.input.start_rebind(r.jump, Key::F.into()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Action \"jump\" does not use \"F\", so there is nothing to replace. \
+             It is bound to: Space, GamepadSouth."
+        );
+        assert!(!r.input.is_rebinding());
+
+        let foreign = Input::new(ActionMap::default_fps())
+            .map()
+            .action("pause")
+            .unwrap();
+        let error = r.input.start_rebind(foreign, Key::F.into()).unwrap_err();
+        assert!(error.to_string().starts_with("That action is not in"));
+    }
+
+    #[test]
+    fn choosing_a_key_the_group_already_uses_swaps_the_two() {
+        let mut r = rig();
+        r.input.start_rebind(r.movement, Key::W.into()).unwrap();
+        r.input.press(Key::A);
+        let rebound = r.input.take_rebound().unwrap();
+        assert_eq!(rebound.conflicts, Vec::new());
+        assert_eq!(
+            r.input.map().bindings(r.movement)[0],
+            Binding::directions(Key::A, Key::S, Key::W, Key::D)
+        );
+
+        r.input.start_rebind(r.lean, Key::Q.into()).unwrap();
+        r.input.press(Key::E);
+        assert_eq!(
+            r.input.map().bindings(r.lean)[0],
+            Binding::Axis {
+                negative: Key::E.into(),
+                positive: Key::Q.into()
+            }
+        );
+    }
+
+    #[test]
+    fn nothing_pressed_while_listening_plays_once_listening_ends() {
+        let mut r = rig();
+        r.input.start_rebind(r.jump, Key::Space.into()).unwrap();
+        // The wrong device: both stay down past the end of listening.
+        r.input.set_button_amount(GamepadButton::RightTrigger, 1.0);
+        r.input.press(Key::F);
+        assert!(r.input.take_rebound().is_some());
+
+        // A second rebind ends while F, chosen by the first, is still down.
+        r.input
+            .start_rebind(r.fire, MouseButton::MouseLeft.into())
+            .unwrap();
+        r.input.press(Key::G);
+        assert!(r.input.take_rebound().is_some());
+
+        // Key repeat and further trigger samples of the same presses.
+        r.input.press(Key::F);
+        r.input.press(Key::G);
+        r.input.set_button_amount(GamepadButton::RightTrigger, 0.9);
+        let frame = r.input.tick();
+        assert!(!frame.pressed(r.jump) && !frame.pressed(r.fire));
+
+        r.input.set_button_amount(GamepadButton::RightTrigger, 0.0);
+        r.input.set_button_amount(GamepadButton::RightTrigger, 1.0);
+        assert!(r.input.tick().just_pressed(r.fire), "let go, then pulled");
     }
 }

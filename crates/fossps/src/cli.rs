@@ -119,6 +119,85 @@ pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String>
     Ok(())
 }
 
+/// Gives `actions` the player's own controls from their bindings file, and
+/// warns about anything in the file that could not be used. A game starts
+/// whatever the file holds.
+pub fn use_player_controls(actions: &mut ActionMap) {
+    if let Some(path) = crate::controls::file() {
+        for problem in crate::controls::load(&path, actions) {
+            log::warn!("{problem}");
+        }
+    }
+}
+
+/// `fossps controls`: what the player's controls are and where they are
+/// kept, as text to print. Writes the bindings file if there is none, so
+/// there is something to open and edit.
+///
+/// The second text is what is wrong with the file, to print as a warning.
+pub fn controls() -> Result<(String, Vec<String>), String> {
+    let path = crate::controls::file().ok_or_else(|| {
+        format!(
+            "This computer does not say where settings are kept (no home folder is set), \
+             so there is no place for your controls. Set {} to the path of a file to keep \
+             them in.",
+            crate::controls::FILE_VARIABLE
+        )
+    })?;
+    let defaults = ActionMap::default_fps();
+    let mut actions = defaults.clone();
+    let mut problems = crate::controls::load(&path, &mut actions);
+    // A game says this itself when it starts; here nothing else would. An
+    // action with nothing bound at all was turned off on purpose.
+    for gap in actions.parity_gaps() {
+        let off = (actions.action(&gap.action)).is_ok_and(|id| actions.bindings(id).is_empty());
+        if !off {
+            problems.push(gap.to_string());
+        }
+    }
+
+    let created = !path.exists();
+    if created {
+        crate::controls::save(&path, &actions, &defaults).map_err(|error| {
+            format!(
+                "Could not write your controls to {}: {error}. Check that you may write \
+                 there, or set {} to the path of another file.",
+                path.display(),
+                crate::controls::FILE_VARIABLE
+            )
+        })?;
+    }
+
+    let width = (actions.actions())
+        .map(|action| actions.name(action).len())
+        .max()
+        .unwrap_or(0);
+    let mut said = String::from("Your controls:\n");
+    for action in actions.actions() {
+        let name = actions.name(action);
+        let bindings: Vec<String> = (actions.bindings(action).iter())
+            .map(ToString::to_string)
+            .collect();
+        let bound = if bindings.is_empty() {
+            "nothing".to_owned()
+        } else {
+            bindings.join(", ")
+        };
+        let changed = defaults
+            .action(name)
+            .is_ok_and(|default| defaults.bindings(default) != actions.bindings(action));
+        let note = if changed { "  (changed by you)" } else { "" };
+        said.push_str(&format!("  {name:<width$}  {bound}{note}\n"));
+    }
+    said.push_str(&format!(
+        "\nThey are kept in {}{}.\nOpen that file in a text editor, change a line and save. \
+         Games read it when they start.\n",
+        path.display(),
+        if created { ", made just now" } else { "" }
+    ));
+    Ok((said, problems))
+}
+
 /// The name players looking for a game are shown for the game in `folder`:
 /// the folder's own name.
 #[must_use]

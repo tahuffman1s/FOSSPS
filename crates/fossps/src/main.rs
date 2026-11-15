@@ -1,8 +1,8 @@
 //! The `fossps` command: `fossps new` creates a game, `fossps run` plays it,
 //! `fossps serve` hosts it, `fossps join` joins a hosted one,
 //! `fossps servers` lists the ones on this network, `fossps package` makes a
-//! download for players and `fossps bench` measures how fast this computer
-//! draws.
+//! download for players, `fossps controls` shows and keeps the player's own
+//! controls and `fossps bench` measures how fast this computer draws.
 //!
 //! The same program is the player inside a packaged game: started with a
 //! game pack of its own name beside it, it plays that game.
@@ -151,6 +151,18 @@ enum Command {
         #[arg(long, value_name = "FOLDER")]
         runtime_dir: Option<PathBuf>,
     },
+    /// Show your controls and the file to change them in
+    #[command(
+        after_help = "Your controls are kept in one text file on this computer, which every game \
+                      played with FOSSPS\nreads when it starts. This command prints where it \
+                      is, and makes it if it is not there yet.\nOpen it in a text editor, \
+                      change a line such as jump = [\"F\", \"GamepadSouth\"] and save.\n\n\
+                      Names are a key (Space, F, LeftShift), a mouse button (MouseLeft, \
+                      MouseWheelUp) or a gamepad\nbutton (GamepadSouth, RightTrigger). To \
+                      go back to a game's own controls, delete the file.\nTo keep the file \
+                      somewhere else, set FOSSPS_BINDINGS to its path."
+    )]
+    Controls,
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
     /// Measure how fast this computer draws a built-in test scene
@@ -224,12 +236,23 @@ struct Player {
     /// Play this game pack (.fpk) instead of the one beside the program
     #[arg(long, value_name = "FILE")]
     pack: Option<PathBuf>,
+    /// Show your controls and the file to change them in, instead of playing
+    #[arg(long)]
+    controls: bool,
+}
+
+/// What a packaged game was started to do.
+enum Asked {
+    /// Play the game in this pack.
+    Play(PathBuf),
+    /// Show the player's controls.
+    Controls,
 }
 
 /// The game pack this program was started to play, if it was started as a
 /// packaged game: with `--pack` first, or with a pack of its own name beside
 /// it. `Err` is clap's own message, for `--help` or a mistyped option.
-fn pack_to_play() -> Option<Result<PathBuf, clap::Error>> {
+fn pack_to_play() -> Option<Result<Asked, clap::Error>> {
     let program = std::env::current_exe().ok();
     let beside = program.as_deref().and_then(player::pack_beside);
     let asked = std::env::args_os().nth(1).is_some_and(|first| {
@@ -243,13 +266,15 @@ fn pack_to_play() -> Option<Result<PathBuf, clap::Error>> {
         || "game".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let pack = Player::command()
+    let matches = Player::command()
         .name(name.clone())
         .bin_name(name)
-        .try_get_matches()
-        .map(|matches| matches.get_one::<PathBuf>("pack").cloned());
-    match pack {
-        Ok(pack) => pack.or(beside).map(Ok),
+        .try_get_matches();
+    match matches {
+        Ok(matches) if matches.get_flag("controls") => Some(Ok(Asked::Controls)),
+        Ok(matches) => (matches.get_one::<PathBuf>("pack").cloned())
+            .or(beside)
+            .map(|pack| Ok(Asked::Play(pack))),
         Err(error) => Some(Err(error)),
     }
 }
@@ -258,7 +283,8 @@ fn main() -> ExitCode {
     cli::log_to_stderr();
 
     let outcome = match pack_to_play() {
-        Some(Ok(pack)) => play_pack(&pack),
+        Some(Ok(Asked::Play(pack))) => play_pack(&pack),
+        Some(Ok(Asked::Controls)) => controls(),
         // Prints help to standard output and mistakes to standard error,
         // with the exit code each should have.
         Some(Err(error)) => error.exit(),
@@ -300,6 +326,7 @@ fn command() -> Result<(), String> {
             target.unwrap_or_else(Target::here),
             runtime_dir.as_deref(),
         ),
+        Some(Command::Controls) => controls(),
         Some(Command::Demo) => demo(),
         Some(Command::Bench {
             frames,
@@ -428,7 +455,7 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     if folder.is_file() && player::is_pack(folder) {
         return play_packed(folder, others_may_join);
     }
-    let mut config = Config::default();
+    let mut config = player_config();
     let game = open(folder, &config, "run")?;
 
     match scaffold::refresh_types(folder) {
@@ -498,7 +525,7 @@ fn play_pack(pack: &Path) -> Result<(), String> {
 /// Plays the game in the pack at `pack` until its window is closed. With
 /// `others_may_join`, other players can join it meanwhile.
 fn play_packed(pack: &Path, others_may_join: bool) -> Result<(), String> {
-    let mut config = Config::default();
+    let mut config = player_config();
     let packed = player::open(pack, &config.actions).map_err(|error| error.to_string())?;
     // The window carries the game's own name; one with none keeps the usual title.
     if !packed.name.is_empty() {
@@ -546,7 +573,7 @@ fn package(folder: &Path, target: Target, runtime_dir: Option<&Path>) -> Result<
 /// `fossps join`: plays on the server at `address` until the window is
 /// closed or the server lets go.
 fn join(address: &str) -> Result<(), String> {
-    let mut config = Config::default();
+    let mut config = player_config();
     let mut game = JoinedGame::connect(address, &config.actions, config.tick_rate)
         .map_err(|error| error.to_string())?;
     log::info!("Joining {address}...");
@@ -662,13 +689,31 @@ fn ask_which(found: &[FoundServer]) -> Result<Option<&FoundServer>, String> {
     }
 }
 
+/// `fossps controls`: shows the player's controls and where they are kept.
+fn controls() -> Result<(), String> {
+    let (said, problems) = cli::controls()?;
+    print!("{said}");
+    for problem in problems {
+        log::warn!("{problem}");
+    }
+    Ok(())
+}
+
+/// The settings a game is played with: the usual ones, with the player's own
+/// controls.
+fn player_config() -> Config {
+    let mut config = Config::default();
+    cli::use_player_controls(&mut config.actions);
+    config
+}
+
 /// `fossps demo`: shows live input in a window.
 fn demo() -> Result<(), String> {
     log::info!(
         "This is the input demo. Click the window to capture the mouse, then use \
          keyboard, mouse or a gamepad. Escape frees the mouse."
     );
-    let config = Config::default();
+    let config = player_config();
     let demo = InputDemo::new(config.actions.clone());
     play(config, demo)
 }
