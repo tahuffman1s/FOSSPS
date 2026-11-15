@@ -8,6 +8,7 @@ use ash::vk;
 use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::swapchain::COLOUR;
+use crate::ui_pass::UiPass;
 
 /// The shaders, compiled from `shaders/tonemap.wgsl` by the build script.
 const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tonemap.spv"));
@@ -24,6 +25,16 @@ pub(crate) enum Then {
     Copy,
 }
 
+/// An image to draw the finished picture into.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Canvas {
+    pub(crate) image: vk::Image,
+    /// A view of the whole image.
+    pub(crate) view: vk::ImageView,
+    /// The image's size in pixels.
+    pub(crate) extent: vk::Extent2D,
+}
+
 /// How much brighter the picture is for an exposure of `stops`.
 ///
 /// One stop doubles the light, as on a camera.
@@ -32,7 +43,7 @@ pub(crate) fn exposure_scale(stops: f32) -> f32 {
 }
 
 /// Whether images of `format` apply the sRGB curve themselves when written.
-fn stores_srgb(format: vk::Format) -> bool {
+pub(crate) fn stores_srgb(format: vk::Format) -> bool {
     matches!(
         format,
         vk::Format::B8G8R8A8_SRGB | vk::Format::R8G8B8A8_SRGB | vk::Format::A8B8G8R8_SRGB_PACK32
@@ -221,29 +232,36 @@ impl TonemapPipeline {
         unsafe { self.gpu.device().update_descriptor_sets(&writes, &[]) };
     }
 
-    /// Records drawing the tone-mapped scene over the whole of `image`.
+    /// Records drawing the tone-mapped scene over the whole of `canvas`.
     ///
     /// The scene's light is multiplied by `exposure` first. The image's
-    /// previous contents are discarded.
+    /// previous contents are discarded. If `over` is given, the HUD and
+    /// menus it was prepared with are drawn on top.
     ///
     /// # Safety
     ///
     /// `commands` must be a command buffer of this pipeline's device that is
-    /// being recorded. `image` and `view` must be a live colour image of this
-    /// pipeline's format and its whole-image view, `extent` its size, and the
+    /// being recorded. `canvas` must be a live colour image of this
+    /// pipeline's format with its whole-image view and its size, and the
     /// image must not be in use by other work on the graphics card. The scene
     /// given to [`read_from`](Self::read_from) must be alive, at least
     /// `extent` in size, and ready to be read by shaders when these commands run.
+    /// `over` must have been made for this pipeline's format, and
+    /// [`prepare`](UiPass::prepare)d with `commands` for this frame.
     pub(crate) unsafe fn record(
         &self,
         commands: vk::CommandBuffer,
-        image: vk::Image,
-        view: vk::ImageView,
-        extent: vk::Extent2D,
+        canvas: Canvas,
         exposure: f32,
+        over: Option<&UiPass>,
         then: Then,
     ) {
         let device = self.gpu.device();
+        let Canvas {
+            image,
+            view,
+            extent,
+        } = canvas;
         let area = vk::Rect2D {
             offset: vk::Offset2D::default(),
             extent,
@@ -338,6 +356,9 @@ impl TonemapPipeline {
             device.cmd_set_viewport(commands, 0, &[viewport]);
             device.cmd_set_scissor(commands, 0, &[area]);
             device.cmd_draw(commands, 3, 1, 0, 0);
+            if let Some(over) = over {
+                over.draw(commands, extent);
+            }
             device.cmd_end_rendering(commands);
             device.cmd_pipeline_barrier2(
                 commands,

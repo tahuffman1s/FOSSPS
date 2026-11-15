@@ -60,6 +60,7 @@ pub use app::{AppError, Config, run};
 #[cfg(feature = "window")]
 pub use fossps_render::Upscaling;
 pub use fossps_script as script;
+pub use fossps_ui as ui;
 pub use game::{Frame, Game};
 pub use script_game::ScriptGame;
 pub use tick::TickClock;

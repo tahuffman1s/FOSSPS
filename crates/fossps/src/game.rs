@@ -1,6 +1,7 @@
 //! The interface a game implements to be driven by the engine.
 
 use fossps_input::{ActionSetId, InputFrame, Rumble};
+use fossps_ui::{DrawBuffer, Ui};
 
 /// A game the engine can run.
 pub trait Game {
@@ -29,10 +30,16 @@ impl<G: Game + ?Sized> Game for &mut G {
     }
 }
 
+/// The size a frame says the window is when there is no window: on a
+/// server and in tests. It is the size HUD and menu sizes are written for.
+const NO_WINDOW: [u32; 2] = [1920, 1080];
+
 /// What a game can read and change while presenting one frame.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Frame {
     alpha: f32,
+    screen: [u32; 2],
+    ui: DrawBuffer,
     title: Option<String>,
     close: bool,
     view: Option<View>,
@@ -49,12 +56,20 @@ pub(crate) struct View {
     pub(crate) pitch: f32,
 }
 
+impl Default for Frame {
+    fn default() -> Self {
+        Self::new(0.0)
+    }
+}
+
 impl Frame {
     /// A frame that is `alpha` of the way from the last tick to the next.
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn new(alpha: f32) -> Self {
         Self {
             alpha,
+            screen: NO_WINDOW,
+            ui: DrawBuffer::default(),
             title: None,
             close: false,
             view: None,
@@ -70,6 +85,77 @@ impl Frame {
     #[must_use]
     pub fn alpha(&self) -> f32 {
         self.alpha
+    }
+
+    /// The size of the window in pixels, `[width, height]`: what a
+    /// [`Ui`] is updated with so that it fills the window.
+    ///
+    /// A game on a server has no window; there this is 1920 by 1080.
+    #[must_use]
+    pub fn screen_size(&self) -> [u32; 2] {
+        self.screen
+    }
+
+    /// Draws `ui` over the game this frame: its HUD, and its menu if one
+    /// is open.
+    ///
+    /// Call it every frame the UI should be seen, after
+    /// [`Ui::update`]; a frame without the call shows the game alone. Called
+    /// with several UIs in one frame, each is drawn on top of the ones
+    /// before it. The UI is drawn at the window's full size after
+    /// upscaling, so its text stays sharp.
+    ///
+    /// ```
+    /// use fossps::ui::{Anchor, Ui, UiInput};
+    /// use fossps::{Frame, Game, InputFrame};
+    ///
+    /// struct Hud {
+    ///     ui: Ui,
+    /// }
+    ///
+    /// impl Hud {
+    ///     fn new() -> Self {
+    ///         let mut ui = Ui::default();
+    ///         ui.hud_text(Anchor::BottomRight, [0.0, 0.0], 32.0, "30 / 90");
+    ///         Self { ui }
+    ///     }
+    /// }
+    ///
+    /// impl Game for Hud {
+    ///     fn tick(&mut self, _input: &InputFrame, _step: f32) {}
+    ///
+    ///     fn frame(&mut self, frame: &mut Frame) {
+    ///         self.ui
+    ///             .update(&UiInput::default(), 1.0 / 60.0, frame.screen_size());
+    ///         frame.draw_ui(&self.ui);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// A new `Ui` guesses how wide text is. In a game with a window, give
+    /// it the font text is drawn in, so that centred text is centred
+    /// exactly: `ui.set_text_measure(Box::new(fossps::render::Font::bundled()))`.
+    ///
+    /// A game on a server has no window, so nothing is drawn there.
+    pub fn draw_ui(&mut self, ui: &Ui) {
+        self.ui.add(ui.draw());
+    }
+
+    /// Starts the frame for a window of `screen` pixels, if there is one yet, with `buffer` to
+    /// gather the UI in: the last frame's, so its memory is used again.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn for_window(mut self, screen: Option<[u32; 2]>, mut buffer: DrawBuffer) -> Self {
+        buffer.clear();
+        // A minimised window has no size; a UI still needs one to lay out in.
+        self.screen = screen.map_or(NO_WINDOW, |[width, height]| [width.max(1), height.max(1)]);
+        self.ui = buffer;
+        self
+    }
+
+    /// Everything the game asked to be drawn over it this frame.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn take_ui(&mut self) -> DrawBuffer {
+        std::mem::take(&mut self.ui)
     }
 
     /// Changes the window title.
@@ -165,5 +251,54 @@ impl Frame {
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn take_title(&mut self) -> Option<String> {
         self.title.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fossps_ui::{Anchor, Draw, UiInput};
+
+    use super::*;
+
+    /// A UI with one line of HUD text, laid out for `frame`.
+    fn hud(words: &str, frame: &Frame) -> Ui {
+        let mut ui = Ui::default();
+        ui.hud_text(Anchor::BottomRight, [0.0, 0.0], 32.0, words);
+        ui.update(&UiInput::default(), 1.0 / 60.0, frame.screen_size());
+        ui
+    }
+
+    fn words(buffer: &DrawBuffer) -> Vec<String> {
+        buffer
+            .draw()
+            .iter()
+            .filter_map(|draw| match draw {
+                Draw::Text { text, .. } => Some(text.to_owned()),
+                Draw::Rect { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_frame_gathers_each_ui_in_the_order_it_was_drawn() {
+        let mut frame = Frame::new(0.5);
+        assert_eq!(frame.screen_size(), [1920, 1080]);
+        frame.draw_ui(&hud("30 / 90", &frame));
+        frame.draw_ui(&hud("Paused", &frame));
+        let drawn = frame.take_ui();
+        assert_eq!(words(&drawn), ["30 / 90", "Paused"]);
+
+        // The next frame starts with nothing, in the window's size.
+        let mut next = Frame::new(0.5).for_window(Some([1280, 720]), drawn);
+        assert_eq!(next.screen_size(), [1280, 720]);
+        assert!(next.take_ui().draw().is_empty());
+    }
+
+    #[test]
+    fn a_window_with_no_size_still_gives_a_ui_room() {
+        let minimised = Frame::new(0.0).for_window(Some([0, 0]), DrawBuffer::default());
+        assert_eq!(minimised.screen_size(), [1, 1]);
+        let not_open_yet = Frame::new(0.0).for_window(None, DrawBuffer::default());
+        assert_eq!(not_open_yet.screen_size(), [1920, 1080]);
     }
 }

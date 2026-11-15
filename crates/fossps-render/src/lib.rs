@@ -15,20 +15,24 @@
 mod buffer;
 mod camera;
 mod error;
+mod font;
 mod gpu;
 mod headless;
 mod mesh;
 #[cfg(test)]
 mod offscreen;
+mod overlay;
 mod renderer;
 mod scene;
 mod swapchain;
 mod tonemap;
+mod ui_pass;
 mod upscale;
 mod view;
 
 pub use camera::Camera;
 pub use error::{RenderError, Version};
+pub use font::Font;
 pub use gpu::{Gpu, validation_errors};
 pub use headless::{FrameTime, Headless};
 pub use renderer::{RenderConfig, Renderer};

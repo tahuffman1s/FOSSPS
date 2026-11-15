@@ -23,6 +23,8 @@ fossps-script = { path = "../fossps-script" }
 fossps-net = { path = "../fossps-net" }
 fossps-pack = { path = "../fossps-pack" }
 fossps-physics = { path = "../fossps-physics" }
+# The HUD and menus a game hands over each frame. No dependencies of its own.
+fossps-ui = { path = "../fossps-ui" }
 fossps-render = { path = "../fossps-render", optional = true }
 # Only for the stand-in level drawn until levels are loaded from files.
 fossps-assets = { path = "../fossps-assets", optional = true, default-features = false }

@@ -6,14 +6,18 @@ use std::time::Instant;
 
 use ash::vk;
 use fossps_assets::Scene;
+use fossps_ui::DrawList;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::camera::Camera;
 use crate::error::RenderError;
+use crate::font::Font;
 use crate::gpu::Gpu;
 use crate::mesh::{MeshPipeline, Meshes};
+use crate::overlay::Overlay;
 use crate::swapchain::Swapchain;
-use crate::tonemap::{Then, TonemapPipeline, exposure_scale};
+use crate::tonemap::{Canvas, Then, TonemapPipeline, exposure_scale};
+use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
 
@@ -141,6 +145,10 @@ pub struct Renderer {
     frames: Vec<FrameSlot>,
     /// Which of `frames` the next frame uses.
     next: usize,
+    /// Draws the HUD and menus; made for the swapchain's colour format.
+    ui: Option<UiPass>,
+    /// The HUD and menus to draw over each frame.
+    overlay: Overlay,
     tonemap: Option<TonemapPipeline>,
     mesh: Option<MeshPipeline>,
     /// The level's meshes on the graphics card; `None` until a scene is set.
@@ -208,6 +216,8 @@ impl Renderer {
         let mut renderer = Self {
             frames,
             next: 0,
+            ui: None,
+            overlay: Overlay::new(Font::bundled()),
             tonemap: None,
             mesh: None,
             meshes: None,
@@ -327,6 +337,44 @@ impl Renderer {
         }
     }
 
+    /// Draws `list` over the game from the next frame on, in place of any
+    /// list given before: the boxes and text of a HUD or a menu, as
+    /// `fossps_ui::Ui::draw` gives them.
+    ///
+    /// The list is drawn after upscaling, at the full size of the window,
+    /// so text stays sharp whatever [`Upscaling`] is, and exposure does not
+    /// change its colours. Positions are in pixels from the window's
+    /// top-left corner, which is what a `Ui` gives when it is updated with
+    /// the window's size. Call this every frame with what the UI wants
+    /// drawn; an empty list draws nothing.
+    ///
+    /// ```no_run
+    /// # fn show(renderer: &mut fossps_render::Renderer, size: [u32; 2]) {
+    /// use fossps_ui::{Anchor, Ui, UiInput};
+    ///
+    /// let mut ui = Ui::default();
+    /// ui.set_text_measure(Box::new(renderer.font()));
+    /// ui.hud_text(Anchor::BottomRight, [0.0, 0.0], 32.0, "30 / 90");
+    ///
+    /// // Every frame:
+    /// ui.update(&UiInput::default(), 1.0 / 60.0, size);
+    /// renderer.set_ui(ui.draw());
+    /// # }
+    /// ```
+    ///
+    /// At most 8192 boxes and letters are drawn in a frame; the rest are
+    /// left out and a warning is logged once.
+    pub fn set_ui(&mut self, list: DrawList<'_>) {
+        self.overlay.set(list);
+    }
+
+    /// The font text is drawn in. Give it to a `Ui` with
+    /// `set_text_measure` so that it centres text by its real width.
+    #[must_use]
+    pub fn font(&self) -> Font {
+        self.overlay.font().clone()
+    }
+
     /// Tells the renderer the window is now `width` by `height` pixels.
     ///
     /// Cheap: the images are rebuilt on the next [`render`](Self::render).
@@ -395,6 +443,11 @@ impl Renderer {
             // The new pipeline has not been told about the picture yet.
             self.view = None;
         }
+        if self.ui.as_ref().is_none_or(|ui| ui.format() != format) {
+            // Dropped first, so the old and new atlases are never both held.
+            self.ui = None;
+            self.ui = Some(UiPass::new(&self.gpu, format, FRAMES_IN_FLIGHT)?);
+        }
         let wanted = (extent, self.config.upscaling);
         if self.view.is_none() || self.view_for != wanted {
             // Dropped first, so the old and new images are never both held.
@@ -428,9 +481,13 @@ impl Renderer {
             // `rebuild` found no area to draw into.
             return Ok(Drawn::No);
         }
-        let (Some(swapchain), Some(mesh), Some(tonemap), Some(view)) =
-            (&self.swapchain, &self.mesh, &self.tonemap, &mut self.view)
-        else {
+        let (Some(swapchain), Some(mesh), Some(tonemap), Some(view), Some(ui)) = (
+            &self.swapchain,
+            &self.mesh,
+            &self.tonemap,
+            &mut self.view,
+            &mut self.ui,
+        ) else {
             return Ok(Drawn::No);
         };
         let slot = &self.frames[self.next];
@@ -493,12 +550,16 @@ impl Renderer {
                 &self.camera,
                 seconds,
             )?;
+            ui.prepare(slot.commands, self.next, &mut self.overlay)?;
             tonemap.record(
                 slot.commands,
-                target.image,
-                target.view,
-                swapchain.extent,
+                Canvas {
+                    image: target.image,
+                    view: target.view,
+                    extent: swapchain.extent,
+                },
                 self.exposure,
+                Some(ui),
                 Then::Show,
             );
             device
