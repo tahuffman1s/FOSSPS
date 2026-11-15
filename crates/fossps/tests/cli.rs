@@ -237,6 +237,52 @@ fn run_with_a_file_asks_for_the_folder() {
 }
 
 #[test]
+fn edit_outside_a_game_says_how_to_get_one_and_opens_no_window() {
+    let folder = scratch("edit-empty");
+
+    let output = fossps(&folder, &["edit"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("There is no game here"), "{said}");
+    assert!(said.contains("`fossps edit my-game`"), "{said}");
+
+    let output = fossps(&folder, &["edit", "nowhere"]);
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("There is no folder called nowhere"), "{said}");
+}
+
+#[test]
+fn edit_with_a_packaged_game_asks_for_its_folder() {
+    let folder = scratch("edit-pack");
+    fs::write(folder.join("Game.fpk"), "").unwrap();
+
+    let output = fossps(&folder, &["edit", "Game.fpk"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(
+        said.contains("Game.fpk is a packaged game, which cannot be edited"),
+        "{said}"
+    );
+}
+
+#[test]
+fn edit_help_says_how_to_fly_with_a_mouse_and_with_a_gamepad() {
+    let folder = scratch("edit-help");
+
+    let output = fossps(&folder, &["edit", "--help"]);
+
+    assert!(output.status.success());
+    let said = stdout(&output);
+    assert!(said.contains("Hold the right mouse button"), "{said}");
+    assert!(said.contains("On a gamepad"), "{said}");
+    let listed = stdout(&fossps(&folder, &[]));
+    assert!(listed.contains("edit "), "{listed}");
+}
+
+#[test]
 fn no_arguments_shows_help_and_succeeds() {
     let folder = scratch("bare");
 

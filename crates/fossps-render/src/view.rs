@@ -7,7 +7,7 @@ use ash::vk;
 use crate::camera::{Camera, Mat4, shifted};
 use crate::error::RenderError;
 use crate::gpu::Gpu;
-use crate::mesh::{MeshPipeline, Meshes, View};
+use crate::mesh::{Contents, MeshPipeline, View};
 use crate::scene::SceneTarget;
 use crate::upscale::{Drawn, Upscale, Upscaling};
 
@@ -75,7 +75,7 @@ impl SceneView {
         self.before = None;
     }
 
-    /// Records drawing `meshes` as `camera` sees them, and upscaling the result.
+    /// Records drawing `contents` as `camera` sees them, and upscaling the result.
     ///
     /// `seconds` is how long the last frame took.
     ///
@@ -86,7 +86,7 @@ impl SceneView {
     /// # Safety
     ///
     /// `commands` must be a command buffer of this view's device that is
-    /// being recorded, outside a render pass. `mesh` and `meshes` must
+    /// being recorded, outside a render pass. `mesh` and the meshes in `contents` must
     /// belong to the same device, and they and this view must stay alive
     /// until the commands have run. The view must only be in use by earlier
     /// commands on the same queue. `frame` is as for [`MeshPipeline::record`].
@@ -95,7 +95,7 @@ impl SceneView {
         commands: vk::CommandBuffer,
         frame: usize,
         mesh: &MeshPipeline,
-        meshes: Option<&Meshes>,
+        contents: Contents<'_>,
         camera: &Camera,
         seconds: f32,
     ) -> Result<(), RenderError> {
@@ -122,7 +122,16 @@ impl SceneView {
 
         // SAFETY: the caller's guarantees are the ones `MeshPipeline::record`
         // asks for, and the target is this view's own.
-        unsafe { mesh.record(commands, frame, &self.target, &view, meshes) }?;
+        unsafe {
+            mesh.record(
+                commands,
+                frame,
+                &self.target,
+                &view,
+                contents.meshes,
+                contents.grid.then_some(camera.position),
+            )
+        }?;
         if let Some(upscale) = &mut self.upscale {
             let drawn = Drawn {
                 jitter,

@@ -7,11 +7,15 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["window", "cli"]
+default = ["window", "cli", "editor"]
 # Opens a window, draws into it and reads keyboard, mouse and gamepads. A
 # dedicated server builds without it and links no windowing, graphics or
 # gamepad libraries.
 window = ["dep:winit", "dep:gilrs", "dep:fossps-render", "dep:fossps-assets"]
+# Edit mode, `fossps edit`: a game's level with a fly camera and a ground
+# grid, in the same program. A build for players only can leave it out, and
+# a dedicated server never has it.
+editor = ["window"]
 # The `fossps` command (`fossps new`, `fossps run`, `fossps package`). Off when
 # the crate is used as a library, so a game written in Rust does not build a
 # command-line parser or an archive writer.

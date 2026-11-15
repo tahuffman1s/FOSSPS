@@ -75,6 +75,21 @@ enum Command {
         #[arg(long)]
         open: bool,
     },
+    /// Open a game's level in the editor and fly around it
+    #[cfg(feature = "editor")]
+    #[command(
+        after_help = "Examples:\n  fossps edit            Edit the game in this folder\n  \
+                            fossps edit my-game    Edit the game in the folder my-game\n\n\
+                      Hold the right mouse button to look around. W, A, S and D fly, E and Q \
+                      go up and\ndown, Shift flies faster and the mouse wheel changes the \
+                      speed. On a gamepad the\nsticks fly and look, the triggers go down and \
+                      up, pressing the left stick flies\nfaster and the d-pad changes the \
+                      speed. The lines on the ground are a metre apart."
+    )]
+    Edit {
+        /// The game's folder. Leave it out to edit the game in the folder you are in
+        folder: Option<PathBuf>,
+    },
     /// Test a game's script without opening a window
     #[command(
         after_help = "Loads main.luau, starts the game and runs one second of it with nothing \
@@ -306,6 +321,8 @@ fn command() -> Result<(), String> {
         Some(Command::Run { folder, open }) => {
             run(folder.as_deref().unwrap_or(Path::new(".")), open)
         }
+        #[cfg(feature = "editor")]
+        Some(Command::Edit { folder }) => edit(folder.as_deref().unwrap_or(Path::new("."))),
         Some(Command::Check { folder }) => check(folder.as_deref().unwrap_or(Path::new("."))),
         Some(Command::Serve { folder, port }) => cli::serve_game(
             folder.as_deref().unwrap_or(Path::new(".")),
@@ -482,6 +499,32 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
         config.title = format!("{name} | FOSSPS");
     }
     start(config, game, &name, others_may_join)
+}
+
+/// `fossps edit`: opens the level of the game in `folder` to fly around
+/// until the window is closed.
+#[cfg(feature = "editor")]
+fn edit(folder: &Path) -> Result<(), String> {
+    if folder.is_file() && player::is_pack(folder) {
+        return Err(format!(
+            "{} is a packaged game, which cannot be edited. Edit the game's folder, the \
+             one it was packaged from: `fossps edit my-game`.",
+            folder.display()
+        ));
+    }
+    cli::find_game(folder, "fossps edit")?;
+    let name = cli::game_name(folder);
+    log::info!(
+        "Editing {}. Hold the right mouse button to look around; W, A, S and D fly. \
+         `fossps edit --help` lists the rest, for a gamepad too.",
+        if name.is_empty() { "the game" } else { &name }
+    );
+    // Until levels are loaded from files (#60).
+    log::info!(
+        "Games do not have levels of their own yet, so this is the stand-in level \
+         every game is played in."
+    );
+    fossps::editor::run(&name).map_err(|error| error.to_string())
 }
 
 /// Starts `game`, called `name`, and plays it until its window is closed.

@@ -12,7 +12,7 @@ use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::font::Font;
 use crate::gpu::Gpu;
-use crate::mesh::{MeshPipeline, Meshes};
+use crate::mesh::{Contents, MeshPipeline, Meshes};
 use crate::overlay::Overlay;
 use crate::swapchain::COLOUR;
 use crate::tonemap::{Canvas, Then, TonemapPipeline};
@@ -71,6 +71,8 @@ pub struct Headless {
     tonemap: TonemapPipeline,
     mesh: MeshPipeline,
     meshes: Option<Meshes>,
+    /// Whether the editor's ground grid is drawn.
+    grid: bool,
     view: SceneView,
     extent: vk::Extent2D,
     image: vk::Image,
@@ -163,6 +165,7 @@ impl Headless {
             tonemap,
             mesh,
             meshes: None,
+            grid: false,
             view,
             extent,
             image,
@@ -203,6 +206,12 @@ impl Headless {
         Ok(())
     }
 
+    /// Draws the editor's ground grid or not from now on, as
+    /// [`Renderer::set_grid`](crate::Renderer::set_grid) does.
+    pub fn set_grid(&mut self, shown: bool) {
+        self.grid = shown;
+    }
+
     /// Draws `list` over every frame from now on, as
     /// [`Renderer::set_ui`](crate::Renderer::set_ui) does.
     pub fn set_ui(&mut self, list: DrawList<'_>) {
@@ -237,7 +246,10 @@ impl Headless {
                 self.commands,
                 0,
                 &self.mesh,
-                self.meshes.as_ref(),
+                Contents {
+                    meshes: self.meshes.as_ref(),
+                    grid: self.grid,
+                },
                 camera,
                 FRAME_SECONDS,
             )?;
@@ -462,13 +474,14 @@ mod tests {
     use super::*;
     use crate::gpu::validation_errors;
 
-    #[test]
-    fn frames_are_drawn_and_timed_with_no_window() {
+    /// Something to draw `width` by `height` pictures with, or `None` on a
+    /// computer that cannot draw, unless `FOSSPS_REQUIRE_VULKAN` says it must.
+    fn headless(width: u32, height: u32) -> Option<Headless> {
         // FSR runs on one graphics device at a time in a program, and the
-        // offscreen tests beside this one use it; `fossps bench`'s own test
+        // offscreen tests beside these use it; `fossps bench`'s own test
         // draws through here with upscaling on.
-        let mut headless = match Headless::new(96, 64, Upscaling::Off) {
-            Ok(headless) => headless,
+        match Headless::new(width, height, Upscaling::Off) {
+            Ok(headless) => Some(headless),
             Err(
                 error @ (RenderError::NoVulkan(_)
                 | RenderError::OldVulkan { .. }
@@ -478,9 +491,79 @@ mod tests {
                     std::env::var("FOSSPS_REQUIRE_VULKAN").is_ok_and(|value| value != "0");
                 assert!(!required, "FOSSPS_REQUIRE_VULKAN is set, but: {error}");
                 eprintln!("Skipping the drawing test: {error}");
-                return;
+                None
             }
             Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn the_ground_grid_is_drawn_with_its_axes_in_colour() {
+        const SIZE: [usize; 2] = [256, 144];
+        let Some(mut headless) = headless(256, 144) else {
+            return;
+        };
+        headless.gpu().require_validation();
+        // Five metres back from the middle of the world and three up,
+        // looking straight at it: the X axis runs across the middle of the
+        // picture, and the Z axis from the middle down to the bottom.
+        let camera = Camera {
+            position: [0.0, 3.0, 5.0],
+            pitch: -(3.0_f32 / 5.0).atan(),
+            ..Camera::default()
+        };
+        let plain = headless.screenshot(&camera).unwrap();
+        headless.set_grid(true);
+        let with_grid = headless.screenshot(&camera).unwrap();
+        // Set `FOSSPS_SAVE_PICTURES` to a folder to look at the picture:
+        // 256 by 144 pixels of four bytes each.
+        if let Some(folder) = std::env::var_os("FOSSPS_SAVE_PICTURES") {
+            std::fs::write(std::path::Path::new(&folder).join("grid.rgba"), &with_grid).unwrap();
+        }
+        let pixel = |picture: &[u8], x: usize, y: usize| {
+            let at = (y * SIZE[0] + x) * 4;
+            [picture[at], picture[at + 1], picture[at + 2]].map(i32::from)
+        };
+        // The brightest of the pixels around the place, since a line is a
+        // pixel or two wide.
+        let near = |x: usize, y: usize| {
+            let mut best = [0; 3];
+            for (x, y) in (y - 2..=y + 2).flat_map(|y| (x - 2..=x + 2).map(move |x| (x, y))) {
+                let found = pixel(&with_grid, x, y);
+                if found.iter().sum::<i32>() > best.iter().sum::<i32>() {
+                    best = found;
+                }
+            }
+            best
+        };
+        let [red, green, blue] = near(SIZE[0] / 4 + 5, SIZE[1] / 2);
+        assert!(
+            red > 2 * green && red > 2 * blue,
+            "X axis: {red} {green} {blue}"
+        );
+        let [red, green, blue] = near(SIZE[0] / 2, SIZE[1] * 3 / 4 + 3);
+        assert!(
+            blue > 2 * red && blue > green,
+            "Z axis: {red} {green} {blue}"
+        );
+        // Lines a metre apart, lighter than the background between them.
+        let background = pixel(&plain, 40, 100);
+        let lit = (0..SIZE[0])
+            .filter(|&x| pixel(&with_grid, x, 100)[1] > background[1] + 12)
+            .count();
+        assert!((4..SIZE[0] / 2).contains(&lit), "{lit} lit pixels in a row");
+        // Nothing above the horizon, and nothing once it is switched off.
+        assert_eq!(pixel(&with_grid, 128, 4), pixel(&plain, 128, 4));
+        headless.set_grid(false);
+        assert_eq!(headless.screenshot(&camera).unwrap(), plain);
+        drop(headless);
+        assert_eq!(validation_errors(), 0);
+    }
+
+    #[test]
+    fn frames_are_drawn_and_timed_with_no_window() {
+        let Some(mut headless) = headless(96, 64) else {
+            return;
         };
         headless.gpu().require_validation();
         let (width, height) = headless.drawn_size();

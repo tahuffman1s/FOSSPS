@@ -17,6 +17,7 @@ mod camera;
 mod error;
 mod font;
 mod gpu;
+mod grid;
 mod headless;
 mod mesh;
 #[cfg(test)]
