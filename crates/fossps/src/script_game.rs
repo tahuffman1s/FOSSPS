@@ -5,7 +5,7 @@ use std::path::Path;
 use fossps_input::{ActionMap, InputFrame};
 use fossps_script::{OpenError, ScriptHost};
 
-use crate::game::Game;
+use crate::game::{Frame, Game};
 
 /// A [`Game`] that runs the `main.luau` in a game folder and loads it again
 /// whenever the file is saved.
@@ -68,5 +68,11 @@ impl Game for ScriptGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
         self.host.poll_reload();
         self.host.tick(input, step);
+    }
+
+    fn frame(&mut self, frame: &mut Frame) {
+        if let Some(rumble) = self.host.take_rumble() {
+            frame.rumble(rumble);
+        }
     }
 }

@@ -4,11 +4,14 @@
 //! `pause` (Escape or Start) switches to a second action set, as a pause
 //! menu would: the cursor comes back and no gameplay action hears anything
 //! until `resume` (the same two buttons) switches back.
+//!
+//! `fire` shakes the gamepad like a shot and `melee` like a hit taken, to
+//! feel rumble by hand.
 
 use std::fmt::Write as _;
 
 use fossps::input::ActionKind;
-use fossps::{ActionId, ActionMap, ActionSetId, Frame, Game, InputFrame, MouseMode};
+use fossps::{ActionId, ActionMap, ActionSetId, Frame, Game, InputFrame, MouseMode, Rumble};
 
 /// Shows which actions are active in the window title and logs every press.
 pub struct InputDemo {
@@ -18,6 +21,11 @@ pub struct InputDemo {
     /// The set that is live while paused, and the action that leaves it.
     menu: Option<(ActionSetId, ActionId)>,
     paused: bool,
+    /// The buttons that shake the gamepad: one like a shot, one like a hit.
+    fire: Option<ActionId>,
+    melee: Option<ActionId>,
+    /// The rumble to start on the next frame.
+    rumble: Option<Rumble>,
     /// Total look movement, to show that mouse and stick both drive it.
     aim: [f32; 2],
     title: String,
@@ -42,6 +50,9 @@ impl InputDemo {
             pause: map.action("pause").ok(),
             menu,
             paused: false,
+            fire: map.action("fire").ok(),
+            melee: map.action("melee").ok(),
+            rumble: None,
             map,
             aim: [0.0; 2],
             title: String::new(),
@@ -87,6 +98,19 @@ impl Game for InputDemo {
             }
         }
 
+        // A shot is short and mostly buzz; a hit is longer and mostly thump.
+        let pressed = |action: Option<ActionId>| action.is_some_and(|id| input.just_pressed(id));
+        if pressed(self.fire) {
+            self.rumble = Some(Rumble::new(0.2, 0.6, 0.1));
+        }
+        if pressed(self.melee) {
+            self.rumble = Some(Rumble::new(1.0, 0.3, 0.4));
+        }
+        // Pausing stops a rumble that is playing.
+        if self.paused && self.rumble.is_none() && pressed(self.pause) {
+            self.rumble = Some(Rumble::STOP);
+        }
+
         self.title.clear();
         // Writing to a String cannot fail.
         let _ = write!(self.title, "aim {:.0}, {:.0}", self.aim[0], self.aim[1]);
@@ -110,6 +134,9 @@ impl Game for InputDemo {
     }
 
     fn frame(&mut self, frame: &mut Frame) {
+        if let Some(rumble) = self.rumble.take() {
+            frame.rumble(rumble);
+        }
         if let Some((menu, _)) = self.menu {
             frame.use_action_set(if self.paused {
                 menu
@@ -164,6 +191,29 @@ mod tests {
         step(&mut demo, &mut input);
         assert!(!demo.paused, "the same press must not pause again");
         assert_eq!(input.active_set(), ActionMap::GAMEPLAY);
+    }
+
+    #[test]
+    fn fire_and_melee_ask_for_rumble_once_per_press() {
+        let mut demo = InputDemo::new(ActionMap::default_fps());
+        let mut input = Input::new(demo.actions().clone());
+        // What the window does each frame: tick, then let the demo present.
+        let asked = |demo: &mut InputDemo, input: &mut Input| {
+            demo.tick(input.tick(), 1.0 / 60.0);
+            let asked = demo.rumble;
+            demo.frame(&mut Frame::default());
+            assert!(demo.rumble.is_none(), "a frame takes the rumble");
+            asked
+        };
+
+        assert_eq!(asked(&mut demo, &mut input), None);
+        input.press(fossps::input::GamepadButton::RightTrigger);
+        assert_eq!(
+            asked(&mut demo, &mut input),
+            Some(Rumble::new(0.2, 0.6, 0.1))
+        );
+        // Still held: the shot is not felt again.
+        assert_eq!(asked(&mut demo, &mut input), None);
     }
 
     #[test]

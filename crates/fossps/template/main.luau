@@ -26,6 +26,10 @@ game.onTick(function(step)
     if game.input.justPressed("fire") then
         local x, y = game.input.axis("move")
         print("Fire! Moving " .. x .. ", " .. y)
+        -- A gamepad shakes with the shot. The numbers are how hard its heavy
+        -- motor thumps, how hard its light motor buzzes, and for how long:
+        -- game.input.rumble(strong, weak, seconds).
+        game.input.rumble(0.2, 0.6, 0.1)
     end
 end)
 

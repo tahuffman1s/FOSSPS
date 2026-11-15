@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
-use fossps_input::{ActionMap, InputFrame};
+use fossps_input::{ActionMap, InputFrame, Rumble};
 use fossps_mode::{Event, Match, PlayerId};
 use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, VmState};
 
@@ -108,7 +108,7 @@ fn stamp(path: &Path) -> Option<Stamp> {
 /// table and Luau's standard library, and nothing else on the computer.
 ///
 /// ```no_run
-/// use fossps_input::{ActionMap, InputFrame};
+/// use fossps_input::{ActionMap, InputFrame, Rumble};
 /// use fossps_script::ScriptHost;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -241,6 +241,13 @@ impl ScriptHost {
         self.call_all(|handlers| &handlers.tick, step);
         self.mode.game.borrow_mut().tick(step);
         self.tell_script();
+    }
+
+    /// The rumble the script asked for with `game.input.rumble` since this
+    /// was last called, for whoever owns the gamepad to play. When the script
+    /// asked more than once, this is the latest.
+    pub fn take_rumble(&mut self) -> Option<Rumble> {
+        self.running.as_ref()?.shared.rumble.take()
     }
 
     /// The match being played: the rules the script set with `game.mode`,
@@ -410,6 +417,7 @@ impl ScriptHost {
             handles: Handles::default(),
             loading: Cell::new(true),
             rules: RefCell::new(None),
+            rumble: Cell::new(None),
         });
         let lua = Lua::new();
         let run = || -> mlua::Result<()> {

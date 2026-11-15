@@ -1,6 +1,7 @@
 //! Reads gamepads and feeds them into the input state.
 
-use fossps_input::{GamepadButton, Input, Stick, StickAxis};
+use fossps_input::{GamepadButton, Input, Rumble, Stick, StickAxis};
+use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Repeat, Replay, Ticks};
 use gilrs::{Axis, EventType, GamepadId, Gilrs, GilrsBuilder};
 
 use crate::translate;
@@ -13,6 +14,10 @@ const DPAD_AXIS_PRESS: f32 = 0.5;
 /// Stick drift and resting-trigger noise stay well below this, so a gamepad
 /// lying on the desk cannot steal control.
 const TAKE_OVER_AT: f32 = 0.5;
+
+/// How long a rumble's motors wait before they would start again, in
+/// milliseconds: far longer than any rumble lasts, so they never do.
+const NEVER_AGAIN_MS: u32 = 60_000;
 
 /// Every stick and d-pad axis FOSSPS reads.
 const AXES: [Axis; 6] = [
@@ -53,6 +58,11 @@ pub(crate) struct Gamepads {
     /// `None` when the gamepad library could not start; the game then runs without gamepads.
     gilrs: Option<Gilrs>,
     active: Option<GamepadId>,
+    /// The rumble that was last started. Dropping it stops it, and it stops
+    /// by itself when its time is up.
+    rumble: Option<Effect>,
+    /// Whether a rumble that could not be played has been reported.
+    rumble_failed: bool,
 }
 
 impl Gamepads {
@@ -73,6 +83,8 @@ impl Gamepads {
         Self {
             gilrs,
             active: None,
+            rumble: None,
+            rumble_failed: false,
         }
     }
 
@@ -84,6 +96,7 @@ impl Gamepads {
         let Some(gilrs) = &mut self.gilrs else {
             return;
         };
+        let held = self.active;
         while let Some(event) = gilrs.next_event() {
             match event.event {
                 EventType::Connected => {
@@ -115,6 +128,66 @@ impl Gamepads {
                 _ => {}
             }
         }
+        // A rumble belongs to the gamepad it started on: it does not carry
+        // on in one that was put down or unplugged.
+        if self.active != held {
+            self.rumble = None;
+        }
+    }
+
+    /// Shakes the gamepad being played with, in place of the rumble before.
+    ///
+    /// Nothing happens when no gamepad is in use or the one in use cannot
+    /// rumble.
+    pub(crate) fn rumble(&mut self, rumble: Rumble) {
+        // Dropping the rumble before stops it.
+        self.rumble = None;
+        let (Some(gilrs), Some(id)) = (&mut self.gilrs, self.active) else {
+            return;
+        };
+        let Some((strong, weak, time)) = motor_levels(rumble) else {
+            return;
+        };
+        // The library plays a motor for `play_for`, waits `with_delay` and
+        // starts over. A wait longer than any rumble makes it play once, and
+        // the whole rumble is ended on the step the motors go quiet; ending
+        // it by `Repeat::For` alone would play two steps (100 ms) too long.
+        let motor = |kind| BaseEffect {
+            kind,
+            scheduling: Replay {
+                play_for: time,
+                with_delay: Ticks::from_ms(NEVER_AGAIN_MS),
+                ..Replay::default()
+            },
+            ..BaseEffect::default()
+        };
+        let started = EffectBuilder::new()
+            .add_effect(motor(BaseEffectType::Strong { magnitude: strong }))
+            .add_effect(motor(BaseEffectType::Weak { magnitude: weak }))
+            .repeat(Repeat::For(time - Ticks::from_ms(1)))
+            .gamepads(&[id])
+            .finish(gilrs)
+            .and_then(|effect| effect.play().map(|()| effect));
+        match started {
+            Ok(effect) => self.rumble = Some(effect),
+            // Plenty of gamepads have no motors, and one can be unplugged at
+            // any moment: neither is worth a word.
+            Err(gilrs::ff::Error::FfNotSupported(_) | gilrs::ff::Error::Disconnected(_)) => {}
+            Err(error) => {
+                if !self.rumble_failed {
+                    self.rumble_failed = true;
+                    log::warn!(
+                        "The gamepad could not be made to rumble: {error} The game carries on \
+                         without rumble."
+                    );
+                }
+            }
+        }
+    }
+
+    /// Stops the rumble that is playing, if one is.
+    pub(crate) fn stop_rumble(&mut self) {
+        self.rumble = None;
     }
 
     /// Whether an event of strength `amount` from gamepad `id` should be applied.
@@ -170,6 +243,28 @@ impl Gamepads {
     }
 }
 
+/// What the gamepad library is told for `rumble`: the strength of the strong
+/// and the weak motor out of `u16::MAX`, and how long to play. `None` when
+/// there is nothing to feel.
+fn motor_levels(rumble: Rumble) -> Option<(u16, u16, Ticks)> {
+    if rumble.is_still() {
+        return None;
+    }
+    // Strengths are 0 to 1 and the time is at most a few seconds, so both
+    // products fit: the casts cannot cut anything off.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let level = |strength: f32| (strength * f32::from(u16::MAX)).round() as u16;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let milliseconds = (rumble.seconds() * 1000.0).ceil() as u32;
+    // The library counts time in steps of 50 ms and rounds up to the next,
+    // so there is always at least one step.
+    Some((
+        level(rumble.strong()),
+        level(rumble.weak()),
+        Ticks::from_ms(milliseconds.max(1)),
+    ))
+}
+
 /// Applies one axis reading. Some gamepads report the d-pad as two axes.
 fn apply_axis(input: &mut Input, axis: Axis, value: f32) {
     match axis {
@@ -221,6 +316,36 @@ mod tests {
         apply_axis(&mut input, Axis::DPadX, 0.0);
         apply_axis(&mut input, Axis::DPadY, 0.0);
         assert_eq!(input.tick().axis2d(menu), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn rumble_strengths_become_motor_levels() {
+        let (strong, weak, time) = motor_levels(Rumble::new(1.0, 0.5, 0.2)).unwrap();
+        assert_eq!((strong, weak), (u16::MAX, 32768));
+        assert_eq!(time, Ticks::from_ms(200));
+        // Out-of-range numbers were already brought into range.
+        let (strong, weak, time) = motor_levels(Rumble::new(9.0, 0.0, 99.0)).unwrap();
+        assert_eq!((strong, weak), (u16::MAX, 0));
+        assert_eq!(time, Ticks::from_ms(5000));
+        // A rumble cannot outlast the wait that keeps it from starting again.
+        assert!(Ticks::from_ms(NEVER_AGAIN_MS) > time);
+    }
+
+    #[test]
+    fn a_very_short_rumble_still_plays_and_a_still_one_does_not() {
+        let (_, _, time) = motor_levels(Rumble::new(0.0, 1.0, 0.001)).unwrap();
+        assert_eq!(time, Ticks::from_ms(50));
+        assert_eq!(motor_levels(Rumble::STOP), None);
+        assert_eq!(motor_levels(Rumble::new(1.0, 1.0, 0.0)), None);
+    }
+
+    #[test]
+    fn rumble_without_a_gamepad_does_nothing() {
+        // No gamepad has been used, whether or not one is plugged in.
+        let mut gamepads = Gamepads::new();
+        gamepads.rumble(Rumble::new(1.0, 1.0, 0.1));
+        assert!(gamepads.rumble.is_none());
+        gamepads.stop_rumble();
     }
 
     #[test]

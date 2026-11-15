@@ -6,7 +6,7 @@ use std::fmt::{Display, Write as _};
 use std::rc::Rc;
 use std::time::Instant;
 
-use fossps_input::{ActionKind, ActionMap, ActionState, InputFrame};
+use fossps_input::{ActionKind, ActionMap, ActionState, InputFrame, Rumble};
 use fossps_mode::Rules;
 use mlua::{Function, Lua, MultiValue, Table, Value, Variadic};
 
@@ -39,6 +39,7 @@ pub(crate) const INPUT_FUNCTIONS: &[&str] = &[
     "value",
     "axis",
     "mouse",
+    "rumble",
 ];
 
 /// How many functions one event accepts. Far more than a game needs: reaching
@@ -82,6 +83,8 @@ pub(crate) struct Shared {
     /// The rules this version asked for with `game.mode`, and the line it
     /// did so on.
     pub rules: RefCell<Option<(Rules, Option<usize>)>>,
+    /// The rumble the script asked for and the engine has not yet taken.
+    pub rumble: Cell<Option<Rumble>>,
 }
 
 /// How far up the stack to look for the script line that made a call.
@@ -227,6 +230,7 @@ pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
         "mouse",
         reader(lua, shared, "mouse", two, |s| (s.delta[0], s.delta[1]))?,
     )?;
+    input.set("rumble", rumble(lua, shared)?)?;
     strict(lua, &input, "game.input", INPUT_FUNCTIONS)?;
     game.set("input", input)?;
 
@@ -360,6 +364,42 @@ fn reader<R: mlua::IntoLuaMulti + 'static>(
                 Err(fail(lua, message))
             }
         }
+    })
+}
+
+/// `game.input.rumble(strong, weak, seconds)`: remember a rumble for the
+/// engine to play on the player's gamepad. `seconds` can be left out.
+fn rumble(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Function> {
+    const NAMES: [&str; 3] = ["strong", "weak", "seconds"];
+    let shared = Rc::clone(shared);
+    lua.create_function(move |lua, values: Variadic<Value>| {
+        let mut numbers = [0.0, 0.0, Rumble::DEFAULT_SECONDS];
+        for (index, name) in NAMES.into_iter().enumerate() {
+            let value = values.get(index).unwrap_or(&Value::Nil);
+            // Rumble needs no more precision than an f32 holds.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            let number = match value {
+                Value::Number(number) => *number as f32,
+                Value::Integer(number) => *number as f32,
+                Value::Nil if name == "seconds" => continue,
+                other => {
+                    return Err(fail(
+                        lua,
+                        format!(
+                            "game.input.rumble needs a number for `{name}`, but it was given \
+                             {}. It takes how hard the heavy motor shakes (0 to 1), how hard \
+                             the light motor shakes (0 to 1) and how many seconds it lasts. \
+                             Write it like this: game.input.rumble(0.2, 0.6, 0.1)",
+                            describe(other)
+                        ),
+                    ));
+                }
+            };
+            numbers[index] = number;
+        }
+        let [strong, weak, seconds] = numbers;
+        shared.rumble.set(Some(Rumble::new(strong, weak, seconds)));
+        Ok(())
     })
 }
 

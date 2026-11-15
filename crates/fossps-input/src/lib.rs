@@ -13,6 +13,9 @@
 //! [`InputFrame`]: a plain snapshot of every action that game code, replays and
 //! the network layer can all consume.
 //!
+//! One thing goes the other way: a [`Rumble`] is what a game asks the
+//! player's gamepad to do.
+//!
 //! ```
 //! use fossps_input::{ActionMap, Input, Key};
 //!
@@ -39,6 +42,7 @@ mod frame;
 mod input;
 mod map;
 mod names;
+mod rumble;
 mod shaping;
 
 pub use binding::{ActionKind, Binding, Button};
@@ -48,4 +52,5 @@ pub use frame::{ActionState, InputFrame};
 pub use input::{Input, RebindError, Rebound};
 pub use map::{ActionId, ActionMap, ActionSetId, Conflict, Device, MapError, MouseMode, ParityGap};
 pub use names::UnknownName;
+pub use rumble::Rumble;
 pub use shaping::Deadzone;

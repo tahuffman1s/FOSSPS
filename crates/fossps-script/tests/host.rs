@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use fossps_input::{ActionMap, GamepadButton, Input, InputFrame, Key};
+use fossps_input::{ActionMap, GamepadButton, Input, InputFrame, Key, Rumble};
 use fossps_script::{ENTRY_SCRIPT, OpenError, ScriptHost};
 
 thread_local! {
@@ -139,6 +139,82 @@ fn scripts_read_keyboard_and_gamepad_through_the_same_action() {
     input.press(Key::W);
     host.tick(input.tick(), STEP);
     assert_eq!(printed(), ["move 0 1"]);
+}
+
+#[test]
+fn a_script_rumbles_the_gamepad_and_the_latest_call_wins() {
+    let game = GameFolder::new(
+        r#"
+        game.onTick(function()
+            if game.input.justPressed("fire") then
+                game.input.rumble(0.9, 0.1, 2)
+                game.input.rumble(0.25, 0.5, 0.125)
+            end
+            if game.input.justPressed("jump") then
+                game.input.rumble(50, -1, 600)
+            end
+        end)
+        "#,
+    );
+    let mut host = game.open();
+    let mut input = Input::new(ActionMap::default_fps());
+    host.tick(input.tick(), STEP);
+    assert_eq!(host.take_rumble(), None);
+
+    input.press(GamepadButton::RightTrigger);
+    host.tick(input.tick(), STEP);
+    assert_eq!(host.take_rumble(), Some(Rumble::new(0.25, 0.5, 0.125)));
+    // Taken once, not played again every frame.
+    host.tick(input.tick(), STEP);
+    assert_eq!(host.take_rumble(), None);
+
+    // Numbers out of range are brought into it instead of failing mid-game.
+    input.press(Key::Space);
+    host.tick(input.tick(), STEP);
+    let rumble = host.take_rumble().unwrap();
+    assert_eq!(
+        (rumble.strong(), rumble.weak(), rumble.seconds()),
+        (1.0, 0.0, Rumble::MAX_SECONDS)
+    );
+    assert!(host.last_error().is_none());
+}
+
+#[test]
+fn a_rumble_missing_a_number_says_which_and_how_to_write_it() {
+    let game = GameFolder::new("game.input.rumble(0.5)");
+    let host = game.open();
+    let error = host.last_error().unwrap();
+    assert_eq!(error.line, Some(1));
+    assert!(
+        error
+            .message
+            .starts_with("game.input.rumble needs a number for `weak`, but it was given nothing.")
+            && error
+                .message
+                .ends_with("Write it like this: game.input.rumble(0.2, 0.6, 0.1)"),
+        "{error}"
+    );
+
+    let game = GameFolder::new(r#"game.input.rumble(0.5, 0.5, "long")"#);
+    let host = game.open();
+    let error = host.last_error().unwrap();
+    assert!(
+        error
+            .message
+            .contains("a number for `seconds`, but it was given text"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_rumble_with_no_time_given_is_a_short_one() {
+    let game = GameFolder::new("game.onStart(function() game.input.rumble(1, 0.5) end)");
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    assert_eq!(
+        host.take_rumble(),
+        Some(Rumble::new(1.0, 0.5, Rumble::DEFAULT_SECONDS))
+    );
 }
 
 #[test]
