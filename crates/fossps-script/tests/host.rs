@@ -794,11 +794,16 @@ fn a_require_that_fails_is_not_tried_again_every_tick() {
             last = problem
         end
         print(last)"#;
-    let _host = ScriptHost::from_sources(
+    let host = ScriptHost::from_sources(
         [(ENTRY_SCRIPT.to_owned(), main.to_owned())],
         ActionMap::default_fps(),
     );
-    assert!(printed().join("").contains("the most it can"));
+    let said = printed().join("\n");
+    assert!(
+        said.contains("the most it can"),
+        "printed: {said}\nerror: {:?}",
+        host.last_error()
+    );
 }
 
 /// Polls until the host has loaded a save, or gives up.
