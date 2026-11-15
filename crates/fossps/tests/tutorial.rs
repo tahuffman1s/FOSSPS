@@ -19,7 +19,10 @@ fn site() -> PathBuf {
 }
 
 fn tutorial() -> String {
-    fs::read_to_string(site().join("docs/first-match.html")).unwrap()
+    // A Windows checkout may end the page's lines with a carriage return too.
+    fs::read_to_string(site().join("docs/first-match.html"))
+        .unwrap()
+        .replace("\r\n", "\n")
 }
 
 /// One `<pre>` of a page: its attributes as written, and its text.
