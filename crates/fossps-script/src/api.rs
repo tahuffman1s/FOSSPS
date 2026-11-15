@@ -11,6 +11,7 @@ use fossps_mode::Rules;
 use mlua::{Function, Lua, Table, Value, Variadic};
 
 use crate::error::{TookTooLong, closest};
+use crate::keep::{self, Kept, Store};
 use crate::mode_api::{self, Handles, ModeState};
 use crate::modules::{self, Modules};
 
@@ -20,6 +21,7 @@ pub(crate) const GAME_FUNCTIONS: &[&str] = &[
     "onStart",
     "onTick",
     "onReload",
+    "keep",
     "mode",
     "onPlayerJoin",
     "onPlayerLeave",
@@ -86,6 +88,10 @@ pub(crate) struct Shared {
     pub rumble: Cell<Option<Rumble>>,
     /// The script files this version has read, and what `require` gave for each.
     pub modules: Modules,
+    /// The tables this version asked for with `game.keep`.
+    pub kept: Kept,
+    /// What the version before this one kept. It outlives this version.
+    pub store: Rc<RefCell<Store>>,
 }
 
 /// How far up the stack to look for the script line that made a call.
@@ -198,6 +204,7 @@ pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
     for (name, example, list) in events {
         game.set(name, on_event(lua, shared, name, example, list)?)?;
     }
+    game.set("keep", keep::function(lua, shared)?)?;
     mode_api::install(lua, shared, &game)?;
 
     let input = lua.create_table()?;

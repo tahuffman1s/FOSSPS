@@ -2,7 +2,8 @@
 --
 -- Check it for mistakes by running this in the game's folder:
 --     fossps check
--- Change anything here and save: a running game picks it up and keeps the score.
+-- Change anything here and save: a running game picks it up and keeps the score
+-- and the kill streaks.
 
 -- The score a team needs to win a round.
 local scoreToWin = 50
@@ -22,7 +23,7 @@ game.mode {
 -- plays. print() writes to the server's terminal. This mode has teams, so a
 -- player's team is never nil here.
 
--- Kill streaks are kept in streaks.luau, the file beside this one. require
+-- Kill streaks are counted in streaks.luau, the file beside this one. require
 -- runs that file and gives back the table it returns. Saving either file
 -- reloads the game.
 local streaks = require("./streaks")

@@ -18,6 +18,7 @@ use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, VmState};
 
 use crate::api::{self, Handlers, Shared};
 use crate::error::{OpenError, ScriptError, TookTooLong, is_time_limit};
+use crate::keep::{Kept, Store};
 use crate::mode_api::{Handles, ModeState};
 use crate::modules::{Files, Modules, Stamp, Touched, stamp};
 
@@ -140,6 +141,9 @@ pub struct ScriptHost {
     /// The match. Kept here, outside the script's VM, so that saving the
     /// script does not reset the score.
     mode: Rc<ModeState>,
+    /// What the script asked to keep with `game.keep`, as it was at the
+    /// last reload, for the next version to pick up.
+    kept: Rc<RefCell<Store>>,
     /// Players who have come into the world and not yet been given a place.
     spawns: Vec<PlayerId>,
 }
@@ -239,6 +243,7 @@ impl ScriptHost {
             watched: Vec::new(),
             next_poll: Instant::now() + POLL_EVERY,
             mode: Rc::new(ModeState::new()),
+            kept: Rc::default(),
             spawns: Vec::new(),
         };
         // A script error is already logged and kept in `last_error`.
@@ -366,7 +371,8 @@ impl ScriptHost {
     ///
     /// The new version starts fresh: every script's variables are reset and
     /// its handlers replace the old ones, then its `game.onReload` functions
-    /// are called.
+    /// are called. The tables the script asked for with `game.keep` are
+    /// handed to the new version with what was in them.
     /// `game.onStart` functions are not called again. A script that was given
     /// as text ([`from_source`](Self::from_source)) has no file, and nothing
     /// happens.
@@ -380,6 +386,15 @@ impl ScriptHost {
             return Ok(());
         }
         let had_version = self.running.is_some();
+        if let Some(version) = &self.running {
+            // The new version asks for these while it loads. If it fails to
+            // load, the old one carries on with its own tables.
+            let (kept, problems) = version.shared.kept.snapshot();
+            for problem in problems {
+                log::error!("{problem}");
+            }
+            self.kept.replace(kept);
+        }
         self.install()?;
         if had_version {
             log::info!("Reloaded {}.", self.file);
@@ -462,6 +477,8 @@ impl ScriptHost {
             rules: RefCell::new(None),
             rumble: Cell::new(None),
             modules: Modules::new(Rc::clone(&self.files)),
+            kept: Kept::default(),
+            store: Rc::clone(&self.kept),
         });
         let built = self.run(&shared);
         (shared.modules.take_touched(), built)

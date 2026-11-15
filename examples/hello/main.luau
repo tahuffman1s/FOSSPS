@@ -8,7 +8,9 @@
 -- games have levels of their own. What happens in the game shows up as text:
 -- print() writes to the terminal you ran `fossps run` from.
 
-local jumps = 0
+-- What is in this table is kept when the file is saved and loaded again,
+-- until the game is closed. Everything else in the file starts over.
+local saved = game.keep("saved", { jumps = 0 })
 
 game.onStart(function()
     print("Welcome to hello! Click the game window so it can see your mouse.")
@@ -19,8 +21,8 @@ end)
 -- This runs 60 times a second. `step` is the length of one tick in seconds.
 game.onTick(function(step)
     if game.input.justPressed("jump") then
-        jumps += 1
-        print("Jump number " .. jumps)
+        saved.jumps += 1
+        print("Jump number " .. saved.jumps)
     end
 
     if game.input.justPressed("fire") then
@@ -34,5 +36,5 @@ game.onTick(function(step)
 end)
 
 game.onReload(function()
-    print("main.luau was saved and loaded again, so the jump count starts from 0.")
+    print("main.luau was saved and loaded again. Jumps so far: " .. saved.jumps)
 end)

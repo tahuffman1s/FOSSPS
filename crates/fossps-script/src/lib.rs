@@ -30,6 +30,7 @@
 mod api;
 mod error;
 mod host;
+mod keep;
 mod mode_api;
 mod modules;
 
