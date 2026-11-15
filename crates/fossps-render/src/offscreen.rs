@@ -10,8 +10,10 @@ use ash::vk;
 
 use crate::error::RenderError;
 use crate::gpu::{Gpu, validation_errors};
+use crate::scene::SceneTarget;
 use crate::swapchain::COLOUR;
-use crate::triangle::{Then, TrianglePipeline};
+use crate::tonemap::{Then, TonemapPipeline, exposure_scale};
+use crate::triangle::TrianglePipeline;
 
 const SIZE: u32 = 64;
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
@@ -35,32 +37,18 @@ fn gpu() -> Option<Arc<Gpu>> {
     }
 }
 
-/// Finds a kind of memory that `allowed` permits and that has the `wanted` properties.
-fn memory_type(gpu: &Gpu, allowed: u32, wanted: vk::MemoryPropertyFlags) -> u32 {
-    // SAFETY: the physical device belongs to the live instance.
-    let memory = unsafe {
-        gpu.instance()
-            .get_physical_device_memory_properties(gpu.physical_device())
-    };
-    (0..memory.memory_type_count)
-        .find(|&index| {
-            allowed & (1 << index) != 0
-                && memory.memory_types[index as usize]
-                    .property_flags
-                    .contains(wanted)
-        })
-        .expect("the graphics card has no memory of the kind the test needs")
-}
-
-/// Draws the triangle into a `SIZE` by `SIZE` image and returns its RGBA pixels.
-fn draw(gpu: &Arc<Gpu>) -> Vec<u8> {
+/// Draws the triangle, `stops` brighter than it is, into a `SIZE` by `SIZE`
+/// image and returns its RGBA pixels.
+fn draw(gpu: &Arc<Gpu>, stops: f32) -> Vec<u8> {
     let device = gpu.device();
     let extent = vk::Extent2D {
         width: SIZE,
         height: SIZE,
     };
     let bytes = u64::from(SIZE * SIZE * 4);
-    let pipeline = TrianglePipeline::new(gpu, FORMAT).unwrap();
+    let scene = SceneTarget::new(gpu, extent).unwrap();
+    let triangle = TrianglePipeline::new(gpu, SceneTarget::FORMAT).unwrap();
+    let tonemap = TonemapPipeline::new(gpu, FORMAT).unwrap();
 
     // SAFETY: every object is created on the live device from valid settings,
     // used only by the single submission below, which is waited for, and
@@ -86,11 +74,10 @@ fn draw(gpu: &Arc<Gpu>) -> Vec<u8> {
             .allocate_memory(
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(needs.size)
-                    .memory_type_index(memory_type(
-                        gpu,
-                        needs.memory_type_bits,
-                        vk::MemoryPropertyFlags::empty(),
-                    )),
+                    .memory_type_index(
+                        gpu.memory_type(needs.memory_type_bits, vk::MemoryPropertyFlags::empty())
+                            .unwrap(),
+                    ),
                 None,
             )
             .unwrap();
@@ -119,12 +106,14 @@ fn draw(gpu: &Arc<Gpu>) -> Vec<u8> {
             .allocate_memory(
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(needs.size)
-                    .memory_type_index(memory_type(
-                        gpu,
-                        needs.memory_type_bits,
-                        vk::MemoryPropertyFlags::HOST_VISIBLE
-                            | vk::MemoryPropertyFlags::HOST_COHERENT,
-                    )),
+                    .memory_type_index(
+                        gpu.memory_type(
+                            needs.memory_type_bits,
+                            vk::MemoryPropertyFlags::HOST_VISIBLE
+                                | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        )
+                        .unwrap(),
+                    ),
                 None,
             )
             .unwrap();
@@ -146,7 +135,16 @@ fn draw(gpu: &Arc<Gpu>) -> Vec<u8> {
         device
             .begin_command_buffer(commands, &vk::CommandBufferBeginInfo::default())
             .unwrap();
-        pipeline.record(commands, image, view, extent, Then::Copy);
+        tonemap.read_from(scene.view);
+        triangle.record(commands, scene.image, scene.view, scene.extent);
+        tonemap.record(
+            commands,
+            image,
+            view,
+            extent,
+            exposure_scale(stops),
+            Then::Copy,
+        );
         device.cmd_copy_image_to_buffer(
             commands,
             image,
@@ -207,13 +205,14 @@ fn the_triangle_is_drawn_over_the_background() {
         return;
     };
     eprintln!("Drawing with {}.", gpu.name());
-    let pixels = draw(&gpu);
+    let pixels = draw(&gpu, 0.0);
 
-    // The background is nearly black: linear 0.0091, 0.0116, 0.0176 is 2, 3, 4 out of 255.
+    // The background is dark: sRGB #181C24 with the tone curve's toe taken
+    // off is about 2, 8, 23 out of 255.
     for (x, y) in [(0, 0), (SIZE - 1, 0), (0, SIZE - 1), (SIZE - 1, SIZE - 1)] {
         let [red, green, blue] = pixel(&pixels, x, y);
         assert!(
-            red <= 4 && green <= 5 && blue <= 6,
+            red <= 4 && green <= 14 && blue <= 36,
             "corner {x},{y} should be background, but is {red},{green},{blue}"
         );
     }
@@ -243,6 +242,51 @@ fn the_triangle_is_drawn_over_the_background() {
     // Just above the tip and just below the base is background again.
     assert!(pixel(&pixels, SIZE / 2, 4)[0] <= 4);
     assert!(pixel(&pixels, SIZE / 2, SIZE - 5)[0] <= 4);
+
+    drop(gpu);
+    assert_eq!(
+        validation_errors(),
+        0,
+        "the Vulkan validation layer reported mistakes; see the log above"
+    );
+}
+
+#[test]
+fn light_brighter_than_the_display_rolls_off_and_keeps_its_colour() {
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let normal = draw(&gpu, 0.0);
+    // Four times the light: the red corner is now about 3.6, far over the
+    // display's 1.0, which would be a flat 255 red with nothing done to it.
+    let bright = draw(&gpu, 2.0);
+    let dark = draw(&gpu, -3.0);
+
+    let top = (SIZE / 2, SIZE / 4);
+    let [red, green, blue] = pixel(&bright, top.0, top.1);
+    assert!(
+        red > green && red > blue,
+        "the top should still be mostly red, but is {red},{green},{blue}"
+    );
+    assert!(
+        red < 255,
+        "the brightest red should stop short of the display's limit"
+    );
+    let [_, normal_green, _] = pixel(&normal, top.0, top.1);
+    assert!(
+        green > normal_green,
+        "over-bright red should fade towards white: green {normal_green} became {green}"
+    );
+
+    // More light is never darker, and less is never brighter, anywhere.
+    for index in 0..normal.len() {
+        if index % 4 == 3 {
+            continue;
+        }
+        assert!(bright[index] >= normal[index] && normal[index] >= dark[index]);
+    }
+    let middle = (SIZE / 2, SIZE / 2);
+    assert!(pixel(&dark, middle.0, middle.1)[1] < pixel(&normal, middle.0, middle.1)[1]);
 
     drop(gpu);
     assert_eq!(

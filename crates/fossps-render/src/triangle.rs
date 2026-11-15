@@ -15,23 +15,11 @@ const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triangle.spv"));
 /// The background colour in linear light: sRGB `#181C24`.
 pub(crate) const BACKGROUND: [f32; 4] = [0.0091, 0.0116, 0.0176, 1.0];
 
-/// What happens to an image after the triangle is drawn into it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Then {
-    /// It is shown in the window.
-    Show,
-    /// Its pixels are copied out.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Copy,
-}
-
 /// Draws the triangle into images of one colour format.
 pub(crate) struct TrianglePipeline {
     gpu: Arc<Gpu>,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
-    /// The colour format of the images this can draw into.
-    pub(crate) format: vk::Format,
 }
 
 impl TrianglePipeline {
@@ -127,7 +115,6 @@ impl TrianglePipeline {
                 gpu: Arc::clone(gpu),
                 layout,
                 pipeline: pipelines[0],
-                format,
             }),
             failed => {
                 // SAFETY: no pipeline was created, so nothing uses the layout.
@@ -140,21 +127,21 @@ impl TrianglePipeline {
 
     /// Records clearing `image` and drawing the triangle into it.
     ///
-    /// The image's previous contents are discarded.
+    /// The image's previous contents are discarded, and it is left ready
+    /// for shaders to read.
     ///
     /// # Safety
     ///
     /// `commands` must be a command buffer of this pipeline's device that is
     /// being recorded. `image` and `view` must be a live colour image of this
     /// pipeline's format and its whole-image view, `extent` its size, and the
-    /// image must not be in use by other work on the graphics card.
+    /// image must only be in use by earlier commands on the same queue.
     pub(crate) unsafe fn record(
         &self,
         commands: vk::CommandBuffer,
         image: vk::Image,
         view: vk::ImageView,
         extent: vk::Extent2D,
-        then: Then,
     ) {
         let device = self.gpu.device();
         let area = vk::Rect2D {
@@ -163,9 +150,8 @@ impl TrianglePipeline {
         };
 
         let to_draw = [vk::ImageMemoryBarrier2::default()
-            // Waiting at this stage lines up with the wait on the image
-            // becoming available when the commands are submitted.
-            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            // The last frame's tone mapping may still be reading the image.
+            .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
             .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
             .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
             .old_layout(vk::ImageLayout::UNDEFINED)
@@ -175,25 +161,13 @@ impl TrianglePipeline {
             .image(image)
             .subresource_range(COLOUR)];
 
-        let (stage, access, layout) = match then {
-            Then::Show => (
-                vk::PipelineStageFlags2::NONE,
-                vk::AccessFlags2::NONE,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-            ),
-            Then::Copy => (
-                vk::PipelineStageFlags2::COPY,
-                vk::AccessFlags2::TRANSFER_READ,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            ),
-        };
         let to_finish = [vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
             .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(stage)
-            .dst_access_mask(access)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(layout)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)

@@ -11,7 +11,7 @@ use naga::back::spv;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 /// Shader files to compile, by name without the `.wgsl` extension.
-const SHADERS: &[&str] = &["triangle"];
+const SHADERS: &[&str] = &["triangle", "tonemap"];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let out = PathBuf::from(env::var("OUT_DIR")?);
@@ -31,7 +31,8 @@ fn compile(path: &Path) -> Result<Vec<u32>, Box<dyn Error>> {
     let text = fs::read_to_string(path)?;
     let module =
         naga::front::wgsl::parse_str(&text).map_err(|error| error.emit_to_string(&text))?;
-    let info = Validator::new(ValidationFlags::all(), Capabilities::empty())
+    // Push constants carry the few numbers a pass needs, with no buffer to manage.
+    let info = Validator::new(ValidationFlags::all(), Capabilities::IMMEDIATES)
         .validate(&module)
         .map_err(|error| error.emit_to_string(&text))?;
     let options = spv::Options {

@@ -39,7 +39,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 
 ## M3 — Modern graphics and performance
 
-- Clustered lighting, shadows, HDR and tonemapping, temporal anti-aliasing (#15)
+- HDR and tone mapping (#15), sun shadows (#182), clustered lighting (#183), temporal anti-aliasing (#184)
 - FSR 3.1 upscaling (first verify the SDK builds on Linux) (#16)
 - Benchmark scene and frame-time budget checked in CI (#17)
 - Frame pacing: an accurate frame cap, a display-sync choice, low caps in menus and background (#75)
