@@ -1,13 +1,16 @@
 //! Script errors written for the person who has to fix them.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
 /// The marker a time-limit error carries so it can be told apart from the
 /// script's own errors.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct TookTooLong {
-    /// The script line that was running when time ran out.
+    /// The script file that was running when time ran out.
+    pub file: Option<String>,
+    /// The line in it.
     pub line: Option<u32>,
 }
 
@@ -33,7 +36,8 @@ impl std::error::Error for TookTooLong {}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptError {
-    /// The script's file name, such as `main.luau`.
+    /// The script file the error is in, such as `main.luau` or
+    /// `weapons/rifle.luau`.
     pub file: String,
     /// The line the error happened on, counting from 1, when known.
     pub line: Option<u32>,
@@ -48,8 +52,13 @@ pub struct ScriptError {
 }
 
 impl ScriptError {
-    /// Explains `error`, raised by the script called `file` whose text is `source`.
-    pub(crate) fn from_lua(error: &mlua::Error, file: &str, source: &str) -> Self {
+    /// Explains `error`, raised by a game whose scripts' text is in `sources`
+    /// by file name. An error that names no file is put down to `entry`.
+    pub(crate) fn from_lua(
+        error: &mlua::Error,
+        entry: &str,
+        sources: &HashMap<String, String>,
+    ) -> Self {
         let root = root_cause(error);
         let too_long = match root {
             mlua::Error::ExternalError(inner) => inner.downcast_ref::<TookTooLong>(),
@@ -64,8 +73,16 @@ impl ScriptError {
         };
         // Anything after the first line is the VM's own stack listing.
         let first_line = raw.lines().next().unwrap_or_default();
-        let (line, message) = split_location(first_line, file);
-        let line = line.or(too_long.and_then(|limit| limit.line));
+        let known = |file: &str| file == entry || sources.contains_key(file);
+        let (place, message) = split_location(first_line, known);
+        let place = place.or_else(|| {
+            let limit = too_long?;
+            Some((limit.file.as_deref()?, limit.line?))
+        });
+        let (file, line) = match place {
+            Some((file, line)) => (file, Some(line)),
+            None => (entry, None),
+        };
 
         let (message, hint) = if too_long.is_some() {
             (
@@ -94,7 +111,7 @@ impl ScriptError {
             file: file.to_owned(),
             line,
             message,
-            source_line: line.and_then(|line| nth_line(source, line)),
+            source_line: line.and_then(|line| nth_line(sources.get(file)?, line)),
             hint,
             note: None,
         }
@@ -203,15 +220,21 @@ fn root_cause(mut error: &mlua::Error) -> &mlua::Error {
     }
 }
 
-/// Splits `main.luau:12: message` into the line number and the message.
-fn split_location<'a>(message: &'a str, file: &str) -> (Option<u32>, &'a str) {
-    let parsed = message
-        .strip_prefix(file)
-        .and_then(|rest| rest.strip_prefix(':'))
-        .and_then(|rest| rest.split_once(':'))
-        .and_then(|(line, rest)| Some((line.parse().ok()?, rest.trim_start())));
+/// Splits `weapons/rifle.luau:12: message` into the file and line, and the
+/// message. Only a file that `known` says is one of the game's scripts
+/// counts, so a message that merely mentions a file is left whole.
+fn split_location(message: &str, known: impl Fn(&str) -> bool) -> (Option<(&str, u32)>, &str) {
+    const ENDING: &str = ".luau:";
+    let parsed = message.find(ENDING).and_then(|at| {
+        let (file, rest) = message.split_at(at + ENDING.len() - 1);
+        if !known(file) {
+            return None;
+        }
+        let (line, rest) = rest.strip_prefix(':')?.split_once(':')?;
+        Some(((file, line.parse().ok()?), rest.trim_start()))
+    });
     match parsed {
-        Some((line, rest)) => (Some(line), rest),
+        Some((place, rest)) => (Some(place), rest),
         None => (None, message),
     }
 }
@@ -320,13 +343,27 @@ mod tests {
 
     #[test]
     fn location_is_split_from_the_message() {
+        let known = |file: &str| matches!(file, "main.luau" | "weapons/rifle.luau");
         assert_eq!(
-            split_location("main.luau:12: attempt to call a nil value", "main.luau"),
-            (Some(12), "attempt to call a nil value")
+            split_location("main.luau:12: attempt to call a nil value", known),
+            (Some(("main.luau", 12)), "attempt to call a nil value")
         );
         assert_eq!(
-            split_location("something else", "main.luau"),
+            split_location("weapons/rifle.luau:3: no ammo: reload", known),
+            (Some(("weapons/rifle.luau", 3)), "no ammo: reload")
+        );
+        assert_eq!(
+            split_location("something else", known),
             (None, "something else")
+        );
+        assert_eq!(
+            split_location("There is no weapons.luau: make one", known),
+            (None, "There is no weapons.luau: make one")
+        );
+        assert_eq!(
+            split_location("could not load other.luau:3: bad", known),
+            (None, "could not load other.luau:3: bad"),
+            "not one of the game's scripts"
         );
     }
 

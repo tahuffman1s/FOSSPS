@@ -59,6 +59,13 @@ impl GameFolder {
         std::fs::write(self.0.join(ENTRY_SCRIPT), script).unwrap();
     }
 
+    /// Writes another script into the game, making its folder if needed.
+    fn write_file(&self, name: &str, script: &str) {
+        let path = self.0.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, script).unwrap();
+    }
+
     fn open(&self) -> ScriptHost {
         ScriptHost::open(&self.0, ActionMap::default_fps()).unwrap()
     }
@@ -421,7 +428,7 @@ fn scripts_cannot_reach_the_computer_or_change_the_api() {
         ("os.execute(\"true\")", "attempt to call a nil value"),
         ("game.onTick = nil", "readonly"),
         ("math.pi = 3", "readonly"),
-        ("require(\"./other\")", "require() is not available yet"),
+        ("require(\"../other\")", "outside the game's folder"),
     ] {
         let game = GameFolder::new(script);
         let host = game.open();
@@ -523,4 +530,396 @@ fn a_script_given_as_text_runs_and_is_never_loaded_again() {
 
     let broken = ScriptHost::from_source("game.onTik()", ActionMap::default_fps());
     assert!(broken.last_error().is_some());
+}
+
+#[test]
+fn a_game_is_split_over_files_with_require() {
+    let game = GameFolder::new(
+        r#"local weapons = require("./weapons")
+        local again = require("./weapons.luau")
+        require("./ui/hud")
+        print(weapons.rifle.damage, weapons == again)"#,
+    );
+    game.write_file(
+        "weapons.luau",
+        r#"print("weapons loaded")
+        return { rifle = require("./weapons/rifle") }"#,
+    );
+    game.write_file(
+        "weapons/rifle.luau",
+        r#"local names = require("../names")
+        return { damage = 30, name = names.rifle }"#,
+    );
+    game.write_file("names.luau", "return { rifle = \"Rifle\" }");
+    game.write_file(
+        "ui/hud.luau",
+        r#"local names = require("../names")
+        game.onStart(function() print("hud for " .. names.rifle) end)"#,
+    );
+    let mut host = game.open();
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+    // Each file runs once, however often it is required.
+    assert_eq!(printed(), ["weapons loaded", "30 true"]);
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["hud for Rifle"]);
+}
+
+#[test]
+fn an_error_in_a_required_script_names_that_file_and_line() {
+    let game = GameFolder::new(
+        r#"local weapons = require("./weapons")
+        game.onTick(function() weapons.fire() end)"#,
+    );
+    game.write_file(
+        "weapons.luau",
+        "local weapons = {}\nfunction weapons.fire()\n    local ammo = nil\n    \
+         return ammo.count\nend\nreturn weapons",
+    );
+    let mut host = game.open();
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+    host.tick(&idle(), STEP);
+    let error = host.last_error().expect("the tick failed").clone();
+    assert_eq!(error.file, "weapons.luau");
+    assert_eq!(error.line, Some(4));
+    assert_eq!(error.source_line.as_deref(), Some("return ammo.count"));
+    assert!(
+        error
+            .to_string()
+            .starts_with("Script error in weapons.luau, line 4:"),
+        "{error}"
+    );
+
+    // A mistake that stops the file from being read at all.
+    game.write_file("weapons.luau", "local weapons = {}\nreturn weapons +");
+    let error = host.reload().unwrap_err();
+    assert_eq!(error.file, "weapons.luau");
+    assert_eq!(error.line, Some(2), "{error}");
+
+    // The engine's own complaints point at the file that made the call.
+    game.write_file("weapons.luau", "\ngame.onTik(function() end)");
+    let error = host.reload().unwrap_err();
+    assert_eq!((error.file.as_str(), error.line), ("weapons.luau", Some(2)));
+    assert!(
+        error.message.contains("Did you mean game.onTick?"),
+        "{error}"
+    );
+
+    // A loop that never ends is found in the file it is in.
+    game.write_file(
+        "weapons.luau",
+        "local n = 0\nwhile true do\n    n += 1\nend",
+    );
+    let error = host.reload().unwrap_err();
+    assert_eq!(error.file, "weapons.luau");
+    assert!(error.message.contains("too long"), "{error}");
+    assert!(matches!(error.line, Some(2..=4)), "{error}");
+}
+
+#[test]
+fn a_require_that_cannot_work_says_what_to_write() {
+    /// A `main.luau`, the other files as name and text, and what the error says.
+    type Case = (
+        &'static str,
+        &'static [(&'static str, &'static str)],
+        &'static str,
+    );
+    let cases: &[Case] = &[
+        (
+            r#"require("weapons")"#,
+            &[("weapons.luau", "")],
+            r#"Write require("./weapons")"#,
+        ),
+        (
+            r#"require("./wepons")"#,
+            &[("weapons.luau", "")],
+            r#"There is no script called wepons.luau in the game's folder. Did you mean require("./weapons")?"#,
+        ),
+        (
+            r#"require("./guns/rifel")"#,
+            &[("guns/rifle.luau", "")],
+            r#"Did you mean require("./guns/rifle")?"#,
+        ),
+        (
+            r#"require("./Weapons")"#,
+            &[("weapons.luau", "")],
+            // Found under its real name on Windows and macOS, missing on Linux.
+            "weapons",
+        ),
+        (
+            r#"require("./guns")"#,
+            &[("guns/rifle.luau", "")],
+            "guns is a folder",
+        ),
+        (r#"require("./nothing")"#, &[], "or create the file"),
+        (
+            r#"require("../../etc/passwd")"#,
+            &[],
+            "outside the game's folder",
+        ),
+        (r#"require("/etc/passwd")"#, &[], "is a full path"),
+        (
+            r#"require("./guns.luau")"#,
+            &[("guns/rifle.luau", ""), ("guns/pistol.luau", "")],
+            r#"like require("./guns/pistol")"#,
+        ),
+        (r#"require(42)"#, &[], "it was given a number"),
+        (r#"require()"#, &[], "it was given nothing"),
+        (
+            r#"require("./a")"#,
+            &[
+                ("a.luau", r#"require("./b")"#),
+                ("b.luau", r#"require("./a")"#),
+            ],
+            "in a circle: a.luau, which requires b.luau, which requires a.luau.",
+        ),
+        (
+            r#"require("./a")"#,
+            &[("a.luau", r#"require("./a")"#)],
+            "a.luau requires itself.",
+        ),
+        (r#"require("./main")"#, &[], "where the game starts"),
+    ];
+    for (script, files, expected) in cases {
+        let game = GameFolder::new(script);
+        for (name, text) in *files {
+            game.write_file(name, text);
+        }
+        let host = game.open();
+        let error = host
+            .last_error()
+            .unwrap_or_else(|| panic!("`{script}` should fail"));
+        assert!(error.message.contains(expected), "`{script}`: {error}");
+        assert!(error.line.is_some(), "`{script}`: {error}");
+    }
+}
+
+#[test]
+fn a_required_script_cannot_be_reached_through_a_link() {
+    #[cfg(unix)]
+    {
+        let outside = GameFolder::new("");
+        outside.write_file("secret.luau", "return \"secret\"");
+        let game = GameFolder::new("print(require(\"./secret\"))");
+        std::os::unix::fs::symlink(outside.0.join("secret.luau"), game.0.join("secret.luau"))
+            .unwrap();
+        let host = game.open();
+        let error = host.last_error().expect("a link is refused");
+        assert!(error.message.contains("is a link"), "{error}");
+        assert_eq!(printed(), [] as [&str; 0]);
+
+        let game = GameFolder::new("print(require(\"./lib/secret\"))");
+        std::os::unix::fs::symlink(&outside.0, game.0.join("lib")).unwrap();
+        let host = game.open();
+        let error = host.last_error().expect("a linked folder is refused");
+        assert!(error.message.contains("is a link"), "{error}");
+    }
+}
+
+#[test]
+fn a_script_cannot_pretend_to_be_a_file_somewhere_else() {
+    // `loadstring` lets a script name its own chunk. A name that is not one
+    // of the game's files must not move where `./` starts from.
+    let outside = GameFolder::new("");
+    outside.write_file("secret.luau", "return \"secret\"");
+    let above = outside.0.file_name().unwrap().to_str().unwrap().to_owned();
+    for chunk in [
+        format!("@../{above}/x.luau"),
+        format!("@{}/x.luau", outside.0.display()),
+        "@../x.luau".to_owned(),
+        "@a/../../x.luau".to_owned(),
+    ] {
+        let game = GameFolder::new(&format!(
+            r#"local load = loadstring or function() return function() return "no loadstring" end end
+            local run = load("return require('./secret')", "{}")
+            print(select(2, pcall(run)))"#,
+            chunk.replace('\\', "/")
+        ));
+        game.write_file("inside.luau", "return 1");
+        let _host = game.open();
+        let said = printed().join("\n");
+        assert!(
+            !said.contains("secret\n") && said != "secret",
+            "{chunk}: {said}"
+        );
+        assert!(
+            said.contains("There is no script called secret.luau") || said == "no loadstring",
+            "{chunk}: {said}"
+        );
+    }
+
+    // From a chunk with a made-up name, `./` is the game's own folder.
+    let game = GameFolder::new(
+        r#"local load = loadstring or function() return function() return 1 end end
+        print(load("return require('./inside')", "@deep/down/x.luau")())"#,
+    );
+    game.write_file("inside.luau", "return 1");
+    let host = game.open();
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+    assert_eq!(printed(), ["1"]);
+}
+
+#[test]
+fn a_require_that_fails_is_not_tried_again_every_tick() {
+    let game = GameFolder::new(
+        r#"local n = 0
+        game.onTick(function()
+            n += 1
+            local ok = pcall(require, "./late")
+            print(n, ok)
+            pcall(require, "./made-up-" .. n)
+        end)"#,
+    );
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["1 false"]);
+    // The file appears, but this version already knows the answer: only a
+    // reload, which the new file sets off, asks again.
+    game.write_file("late.luau", "return 1");
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["2 false"]);
+    host.reload().unwrap();
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["1 true"]);
+
+    // Names made up as the game runs come to an end.
+    for _ in 0..1100 {
+        host.tick(&idle(), STEP);
+    }
+    let said = printed();
+    assert_eq!(said.last().unwrap(), "1101 true");
+    let game = GameFolder::new(
+        r#"local last
+        for n = 1, 2000 do
+            local ok, problem = pcall(require, "./made-up-" .. n)
+            last = problem
+        end
+        print(last)"#,
+    );
+    let _host = game.open();
+    assert!(printed().join("").contains("the most it can"));
+}
+
+/// Polls until the host has loaded a save, or gives up.
+fn wait_for_reload(host: &mut ScriptHost, done: impl Fn(&ScriptHost) -> bool) {
+    let start = Instant::now();
+    while start.elapsed().as_secs() < 10 {
+        host.poll_reload();
+        if done(host) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the save was not picked up");
+}
+
+#[test]
+fn saving_a_required_script_reloads_the_game() {
+    let game = GameFolder::new(
+        r#"local weapons = require("./weapons")
+        game.onTick(function() print(weapons.damage) end)"#,
+    );
+    game.write_file("weapons.luau", "return { damage = 30 }");
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["30"]);
+
+    // A longer file, so the save shows even if the clock has not moved.
+    game.write_file("weapons.luau", "return { damage = 45 } -- more");
+    let start = Instant::now();
+    loop {
+        host.poll_reload();
+        host.tick(&idle(), STEP);
+        if printed().last().is_some_and(|line| line == "45") {
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 10, "the save was not picked up");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // A mistake in it keeps the last version, and fixing it is picked up.
+    game.write_file("weapons.luau", "return {");
+    wait_for_reload(&mut host, |host| host.last_error().is_some());
+    assert_eq!(host.last_error().unwrap().file, "weapons.luau");
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["45"]);
+    game.write_file("weapons.luau", "return { damage = 60 }");
+    wait_for_reload(&mut host, |host| host.last_error().is_none());
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["60"]);
+}
+
+#[test]
+fn a_script_that_was_missing_is_picked_up_once_it_is_made() {
+    let game = GameFolder::new(
+        r#"local weapons = require("./weapons")
+        print(weapons.damage)"#,
+    );
+    let mut host = game.open();
+    assert!(host.last_error().is_some());
+    game.write_file("weapons.luau", "return { damage = 30 }");
+    wait_for_reload(&mut host, |host| host.last_error().is_none());
+    assert_eq!(printed(), ["30"]);
+}
+
+#[test]
+fn a_script_required_while_the_game_runs_is_watched_too() {
+    let game = GameFolder::new(r#"game.onTick(function() print(require("./late").text) end)"#);
+    game.write_file("late.luau", "return { text = \"first\" }");
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["first"]);
+    game.write_file("late.luau", "return { text = \"second one\" }");
+    let start = Instant::now();
+    loop {
+        host.poll_reload();
+        host.tick(&idle(), STEP);
+        if printed().last().is_some_and(|line| line == "second one") {
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 10, "the save was not picked up");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn scripts_given_as_text_require_each_other() {
+    let _ = log::set_logger(&Capture);
+    log::set_max_level(log::LevelFilter::Info);
+    let scripts = |main: &str| {
+        [
+            ("main.luau", main),
+            (
+                "weapons/rifle.luau",
+                "return { damage = require(\"../balance\").rifle }",
+            ),
+            ("balance.luau", "return { rifle = 30 }"),
+        ]
+        .map(|(name, text)| (name.to_owned(), text.to_owned()))
+    };
+    let host = ScriptHost::from_sources(
+        scripts("print(require(\"./weapons/rifle\").damage)"),
+        ActionMap::default_fps(),
+    );
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+    assert_eq!(printed(), ["30"]);
+
+    let host = ScriptHost::from_sources(
+        scripts("require(\"./weapons/Rifle\")"),
+        ActionMap::default_fps(),
+    );
+    let error = host.last_error().expect("the name's capitals differ");
+    assert!(
+        error.message.contains("saved as weapons/rifle.luau"),
+        "{error}"
+    );
+
+    let host = ScriptHost::from_sources(
+        [("weapons.luau".to_owned(), String::new())],
+        ActionMap::default_fps(),
+    );
+    let error = host.last_error().expect("there is no main.luau");
+    assert!(
+        error.message.contains("no script called main.luau"),
+        "{error}"
+    );
 }

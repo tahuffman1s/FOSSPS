@@ -417,10 +417,11 @@ fn check(folder: &Path) -> Result<(), String> {
     }
 
     // The error itself was printed when it happened.
-    if game.host().last_error().is_some() {
+    if let Some(error) = game.host().last_error() {
         return Err(format!(
-            "{ENTRY_SCRIPT} has a mistake (the error is shown above). No game is running \
-             during a check, so nothing reloads: fix it, then run `fossps check` again."
+            "{} has a mistake (the error is shown above). No game is running \
+             during a check, so nothing reloads: fix it, then run `fossps check` again.",
+            error.file
         ));
     }
     println!(
@@ -473,7 +474,7 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     }
 
     log::info!(
-        "Playing {}. Edit the file and save it to see changes right away.",
+        "Playing {}. Edit it, or a script it requires, and save to see changes right away.",
         folder.join(ENTRY_SCRIPT).display()
     );
     let name = cli::game_name(folder);
@@ -550,10 +551,11 @@ fn package(folder: &Path, target: Target, runtime_dir: Option<&Path>) -> Result<
     // Loading the script is the cheapest check there is: a game that does not
     // load for its maker will not load for a player.
     let game = open(folder, &Config::default(), "package")?;
-    if game.host().last_error().is_some() {
+    if let Some(error) = game.host().last_error() {
         return Err(format!(
-            "{ENTRY_SCRIPT} has a mistake (the error is shown above), so the game was not \
-             packaged. Fix it, try it with `fossps check`, then run `fossps package` again."
+            "{} has a mistake (the error is shown above), so the game was not \
+             packaged. Fix it, try it with `fossps check`, then run `fossps package` again.",
+            error.file
         ));
     }
     drop(game);

@@ -22,26 +22,28 @@ game.mode {
 -- plays. print() writes to the server's terminal. This mode has teams, so a
 -- player's team is never nil here.
 
--- How many kills each player has made since they last died.
-local streak = {}
+-- Kill streaks are kept in streaks.luau, the file beside this one. require
+-- runs that file and gives back the table it returns. Saving either file
+-- reloads the game.
+local streaks = require("./streaks")
 
 game.onPlayerJoin(function(player)
     print(player.name .. " joined " .. player.team.name .. ".")
 end)
 
 game.onPlayerLeave(function(player)
-    streak[player] = nil
+    streaks.forget(player)
     print(player.name .. " left.")
 end)
 
 game.onRoundStart(function()
-    streak = {}
+    streaks.clear()
     print("The round is on! First team to " .. scoreToWin .. " wins.")
 end)
 
 -- `killer` is nil when nobody else did it, such as a fall.
 game.onKill(function(killer, victim)
-    streak[victim] = 0
+    streaks.forget(victim)
     if killer == nil then
         print(victim.name .. " died.")
     elseif killer.team == victim.team then
@@ -49,12 +51,12 @@ game.onKill(function(killer, victim)
         killer.team:addScore(-1)
         print(killer.name .. " killed a team-mate. " .. killer.team.name .. " loses a point.")
     else
-        streak[killer] = (streak[killer] or 0) + 1
+        local kills = streaks.add(killer)
         print(killer.name .. " killed " .. victim.name .. ".")
         -- Every fifth kill without dying is worth a bonus point.
-        if streak[killer] % 5 == 0 then
+        if kills % 5 == 0 then
             killer.team:addScore(1)
-            print(killer.name .. " is on a streak of " .. streak[killer] .. "! Bonus point.")
+            print(killer.name .. " is on a streak of " .. kills .. "! Bonus point.")
         end
     end
 end)

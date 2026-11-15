@@ -764,3 +764,37 @@ fn a_player_shows_help_under_the_games_own_options() {
     // None of the `fossps` command's own commands are offered.
     assert!(!said.contains("serve"), "{said}");
 }
+
+#[test]
+fn check_names_the_required_script_a_mistake_is_in() {
+    let folder = scratch("check-required");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    let game = folder.join("game");
+    std::fs::write(
+        game.join("main.luau"),
+        "local weapons = require(\"./weapons\")\nprint(weapons.rifle)",
+    )
+    .unwrap();
+    std::fs::write(game.join("weapons.luau"), "return { rifle = 30 }").unwrap();
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("30"), "{}", stderr(&output));
+
+    std::fs::write(
+        game.join("weapons.luau"),
+        "local weapons = {}\nweapons.rifle = nothing.here\nreturn weapons",
+    )
+    .unwrap();
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(
+        said.contains("Script error in weapons.luau, line 2:"),
+        "{said}"
+    );
+    assert!(said.contains("weapons.luau has a mistake"), "{said}");
+}

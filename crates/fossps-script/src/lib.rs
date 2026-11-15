@@ -2,8 +2,13 @@
 //!
 //! A game is a folder with a `main.luau` in it. [`ScriptHost`] runs that file
 //! in a sandbox, calls the functions it registers on the `game` table, loads
-//! the file again whenever it is saved, and turns script mistakes into
-//! messages that say where the problem is and what to try.
+//! it again whenever it is saved, and turns script mistakes into messages
+//! that say where the problem is and what to try.
+//!
+//! A game can be split over files: `require("./weapons")` runs `weapons.luau`,
+//! the file beside the one that asks, once, and gives back what it returned. Only scripts
+//! inside the game's folder can be required, and saving any of them loads
+//! the game again.
 //!
 //! ```lua
 //! -- main.luau
@@ -26,6 +31,7 @@ mod api;
 mod error;
 mod host;
 mod mode_api;
+mod modules;
 
 pub use error::{OpenError, ScriptError};
 pub use fossps_mode as mode;

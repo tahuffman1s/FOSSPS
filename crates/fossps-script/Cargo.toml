@@ -1,6 +1,6 @@
 [package]
 name = "fossps-script"
-description = "Luau scripting for FOSSPS: runs a game's main.luau, reloads it on save and explains script errors"
+description = "Luau scripting for FOSSPS: runs a game's main.luau and the scripts it requires, reloads them on save and explains script errors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

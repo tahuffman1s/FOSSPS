@@ -69,10 +69,12 @@ pub enum PlayError {
         /// The pack.
         pack: PathBuf,
     },
-    /// The pack's `main.luau` has a mistake. The error itself was logged.
+    /// One of the pack's scripts has a mistake. The error itself was logged.
     ScriptMistake {
         /// The pack.
         pack: PathBuf,
+        /// The script the mistake is in, such as `main.luau`.
+        file: String,
     },
 }
 
@@ -86,9 +88,9 @@ impl fmt::Display for PlayError {
                  your game, package it again with `fossps package`.",
                 pack.display()
             ),
-            Self::ScriptMistake { pack } => write!(
+            Self::ScriptMistake { pack, file } => write!(
                 f,
-                "The game in {} cannot start: its {ENTRY_SCRIPT} has a mistake (the error \
+                "The game in {} cannot start: its {file} has a mistake (the error \
                  is shown above). If it is your game, fix the script, try it with \
                  `fossps check`, then package it again. Otherwise, tell the game's maker.",
                 pack.display()
@@ -112,6 +114,9 @@ impl From<PackError> for PlayError {
     }
 }
 
+/// The ending of a script's file name.
+const SCRIPT_ENDING: &str = ".luau";
+
 /// Opens the game in the pack at `pack`. The script reads input through
 /// `actions`, which should be the same actions the engine is started with.
 ///
@@ -127,11 +132,22 @@ pub fn open(pack: &Path, actions: &ActionMap) -> Result<PackedGame, PlayError> {
             pack: pack.to_owned(),
         });
     }
-    let source = opened.read_text(ENTRY_SCRIPT)?;
-    let game = ScriptGame::from_source(source, actions);
-    if game.host().last_error().is_some() {
+    // Every script, so that `main.luau` can require the others.
+    let names: Vec<String> = opened
+        .files()
+        .filter(|name| name.ends_with(SCRIPT_ENDING))
+        .map(str::to_owned)
+        .collect();
+    let mut scripts = Vec::with_capacity(names.len());
+    for name in names {
+        let source = opened.read_text(&name)?;
+        scripts.push((name, source));
+    }
+    let game = ScriptGame::from_sources(scripts, actions);
+    if let Some(error) = game.host().last_error() {
         return Err(PlayError::ScriptMistake {
             pack: pack.to_owned(),
+            file: error.file.clone(),
         });
     }
     Ok(PackedGame {
@@ -163,7 +179,7 @@ mod tests {
         let sources: Vec<Source> = files
             .iter()
             .map(|(name, contents)| {
-                let path = folder.join(format!("source-{name}"));
+                let path = folder.join(format!("source-{}", name.replace('/', "-")));
                 fs::write(&path, contents).unwrap();
                 Source {
                     name: (*name).to_owned(),
@@ -230,6 +246,43 @@ mod tests {
         let mut input = fossps_input::Input::new(actions);
         packed.game.tick(input.tick(), 1.0 / 60.0);
         assert!(packed.game.host().last_error().is_none());
+    }
+
+    #[test]
+    fn a_packed_game_requires_its_other_scripts() {
+        let folder = scratch("requires");
+        let made = pack(
+            &folder,
+            &[
+                (
+                    "main.luau",
+                    "local rifle = require(\"./weapons/rifle\")\nassert(rifle.damage == 30)",
+                ),
+                (
+                    "weapons/rifle.luau",
+                    "return { damage = require(\"../balance\").rifle }",
+                ),
+                ("balance.luau", "return { rifle = 30 }"),
+                ("notes.txt", "not a script"),
+            ],
+        );
+        let actions = ActionMap::default_fps();
+
+        let packed = open(&made, &actions).unwrap();
+
+        assert!(packed.game.host().last_error().is_none());
+
+        // A mistake in a required script is put down to that script.
+        let folder = scratch("requires-mistake");
+        let made = pack(
+            &folder,
+            &[
+                ("main.luau", "require(\"./weapons\")"),
+                ("weapons.luau", "game.onTik()"),
+            ],
+        );
+        let said = open(&made, &actions).unwrap_err().to_string();
+        assert!(said.contains("its weapons.luau has a mistake"), "{said}");
     }
 
     #[test]

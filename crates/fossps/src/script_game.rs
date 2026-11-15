@@ -7,8 +7,8 @@ use fossps_script::{OpenError, ScriptHost};
 
 use crate::game::{Frame, Game};
 
-/// A [`Game`] that runs the `main.luau` in a game folder and loads it again
-/// whenever the file is saved.
+/// A [`Game`] that runs the `main.luau` in a game folder, with the scripts
+/// it requires, and loads them again whenever one of them is saved.
 ///
 /// ```no_run
 /// use fossps::{Config, ScriptGame};
@@ -41,13 +41,29 @@ impl ScriptGame {
         })
     }
 
-    /// Runs `source` as the game's `main.luau` with no file behind it, as a
-    /// packaged game does. Nothing is watched or loaded again, and a mistake
-    /// inside the script is logged and kept in the host's `last_error`.
+    /// Runs `source` as the game's `main.luau` with no file behind it and no
+    /// other scripts to require. Nothing is watched or loaded again, and a
+    /// mistake inside the script is logged and kept in the host's
+    /// `last_error`.
     #[must_use]
     pub fn from_source(source: impl Into<String>, actions: &ActionMap) -> Self {
         Self {
             host: ScriptHost::from_source(source, actions.clone()),
+        }
+    }
+
+    /// Runs a game whose scripts are given as text, as a packaged game does.
+    /// `scripts` are pairs of a name (`main.luau`, `weapons/rifle.luau`) and
+    /// the script's text; `main.luau` is run and can require the others.
+    /// Nothing is watched or loaded again, and a mistake inside a script is
+    /// logged and kept in the host's `last_error`.
+    #[must_use]
+    pub fn from_sources(
+        scripts: impl IntoIterator<Item = (String, String)>,
+        actions: &ActionMap,
+    ) -> Self {
+        Self {
+            host: ScriptHost::from_sources(scripts, actions.clone()),
         }
     }
 
