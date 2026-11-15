@@ -51,7 +51,7 @@ Running it needs a graphics driver with Vulkan 1.3; building does not need the V
 
 `fossps package`, run in a game's folder on Linux, writes `dist/<game>-linux-x86_64.tar.gz`: one folder holding the game's program, its files in one game pack (`<game>.fpk`), its icon if the folder has an `icon.png`, a `.desktop` file, and the licence of the font built into the program. A player unpacks it and runs the program; nothing is compiled, and the program is a copy of the `fossps` that made the package, which plays the pack beside it when it has one. `fossps run <game>.fpk` plays a pack too. So far the pack stores files as they are, everything in the folder goes in except hidden files and the ones `fossps new` made for the game's maker, and only Linux is packaged for: Windows, macOS, an AppImage, a dedicated server, smaller packs and packaging for another system than your own are still being built (#77 to #85, #121).
 
-The engine draws a HUD and menus over the picture: boxes with round corners and text, at the window's full size after upscaling, so text stays sharp at any upscaling setting. A game written in Rust builds them with `fossps::ui` (every menu works with a gamepad, keyboard or mouse) and shows them with `frame.draw_ui(&ui)`. Text is drawn in one font that comes with the engine, [Atkinson Hyperlegible Next](crates/fossps-render/fonts/README.md), which covers the Latin alphabet; other alphabets (#221) are not drawn yet. Scripts cannot build a HUD yet (#126), games get no pause menu by themselves yet (#125), and so far only the input demo shows any of it in a window.
+The engine draws a HUD and menus over the picture: boxes with round corners and text, at the window's full size after upscaling, so text stays sharp at any upscaling setting. A game written in Rust builds them with `fossps::ui` (every menu works with a gamepad, keyboard or mouse) and shows them with `frame.draw_ui(&ui)`. Text is drawn in one font that comes with the engine, [Atkinson Hyperlegible Next](crates/fossps-render/fonts/README.md), which covers the Latin alphabet; other alphabets (#221) are not drawn yet. Scripts cannot build a HUD yet (#126), games get no pause menu by themselves yet (#125), and so far only the input demo and the script error panel show any of it in a window.
 
 `fossps bench` draws a built-in scene (1,600 blocks seen from a camera walking a circle) with no window and says how long a usual frame, a slow frame (99 of 100 are faster) and the slowest took, and how much of that was the engine's own work. Every run draws the same frames. `--size`, `--upscaling` and `--frames` change what is drawn, `--json bench.json` saves the numbers, and `--budget-ms 16.6` makes it fail when a slow frame took longer. The engine's own checks run it on every change with a budget, on a software renderer, so that budget only catches drawing getting much slower; it says nothing about how fast a real graphics card is.
 
@@ -73,7 +73,7 @@ game.onTick(function(step)
 end)
 ```
 
-`print` writes to the terminal you started the game from. `game.input` reads actions by name (`jump`, `fire`, `move`, `look`, `reload` and [the rest of the standard set](crates/fossps-input/src/map.rs)), so the same line works for keyboard, mouse and gamepad. When a script has a mistake, the game keeps running and the terminal shows the file, the line and what to try:
+`print` writes to the terminal you started the game from. `game.input` reads actions by name (`jump`, `fire`, `move`, `look`, `reload` and [the rest of the standard set](crates/fossps-input/src/map.rs)), so the same line works for keyboard, mouse and gamepad. When a script has a mistake, the game keeps running, and the terminal and the game's window both show the file, the line and what to try:
 
 ```text
 Script error in main.luau, line 1:
@@ -83,6 +83,8 @@ Script error in main.luau, line 1:
   game.onTik does not exist. Did you mean game.onTick?
   The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.
 ```
+
+In the window the same words are in a panel in the top-left corner, over the game, until a save loads the script again. A packaged game does not show it: its players did not write the script and have no file to fix. The panel has been drawn and checked without a window; nobody has looked at it in a real one yet (#203).
 
 A script can shake the gamepad: `game.input.rumble(0.2, 0.6, 0.1)` is how hard the heavy motor thumps and the light one buzzes, each from 0 to 1, then for how many seconds. It works on Linux and Windows for the player at the computer running the script (`fossps run`). macOS (#210) and players who joined from another computer (#211) do not rumble yet, the player cannot turn it down yet (#212), and nobody has felt it on a real gamepad yet (#29). Never make rumble the only sign of something: show or play it as well.
 

@@ -32,6 +32,7 @@ pub mod bench;
 #[doc(hidden)]
 pub mod cli;
 pub mod controls;
+mod error_overlay;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;

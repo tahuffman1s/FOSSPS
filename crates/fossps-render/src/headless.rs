@@ -7,6 +7,7 @@ use ash::vk;
 use fossps_assets::Scene;
 use fossps_ui::DrawList;
 
+use crate::buffer::Buffer;
 use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::font::Font;
@@ -277,6 +278,85 @@ impl Headless {
             drawing: handed_over.elapsed(),
         })
     }
+
+    /// Draws one frame as `camera` sees it, as [`render`](Self::render)
+    /// does, and gives the finished picture: four bytes a pixel (red,
+    /// green, blue, opacity), row by row from the top-left corner, as a
+    /// screen would show them.
+    ///
+    /// It waits for the picture to be copied off the graphics card, so it
+    /// is for tests and tools, not for every frame.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the graphics driver or the upscaler reports a failure, or
+    /// there is no memory for the picture.
+    pub fn screenshot(&mut self, camera: &Camera) -> Result<Vec<u8>, RenderError> {
+        let doing = "reading a picture back";
+        self.render(camera)?;
+        let length = self.extent.width as usize * self.extent.height as usize * 4;
+        let pixels = Buffer::writable(
+            &self.gpu,
+            length as u64,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            doing,
+        )?;
+        let device = self.gpu.device();
+        let whole = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        // SAFETY: every handle belongs to `self.gpu`'s device and is alive.
+        // The frame above was waited for, so the command buffer is free to
+        // record again, and it left the picture laid out to be copied from.
+        // The buffer holds exactly the picture's bytes, and the copy is
+        // waited for before the buffer is read or dropped.
+        unsafe {
+            device
+                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
+                .map_err(RenderError::driver(doing))?;
+            device
+                .begin_command_buffer(
+                    self.commands,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(RenderError::driver(doing))?;
+            device.cmd_copy_image_to_buffer(
+                self.commands,
+                self.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                pixels.handle,
+                &[vk::BufferImageCopy::default()
+                    .image_subresource(whole)
+                    .image_extent(self.extent.into())],
+            );
+            device
+                .end_command_buffer(self.commands)
+                .map_err(RenderError::driver(doing))?;
+            device
+                .reset_fences(&[self.finished])
+                .map_err(RenderError::driver(doing))?;
+            let buffers = [vk::CommandBufferSubmitInfo::default().command_buffer(self.commands)];
+            device
+                .queue_submit2(
+                    self.gpu.queue(),
+                    &[vk::SubmitInfo2::default().command_buffer_infos(&buffers)],
+                    self.finished,
+                )
+                .map_err(RenderError::driver(doing))?;
+            if let Err(code) = device.wait_for_fences(&[self.finished], true, u64::MAX) {
+                // The copy may still be running, and the buffer it writes
+                // is about to be dropped. If this fails too the driver is
+                // gone, and so is its work.
+                let _ = device.device_wait_idle();
+                return Err(RenderError::driver(doing)(code));
+            }
+            pixels.read(length)
+        }
+    }
 }
 
 impl Raw {
@@ -430,6 +510,15 @@ mod tests {
             let time = headless.render(&camera).unwrap();
             assert_eq!(time.total(), time.recording + time.drawing);
         }
+        // The finished picture can be read back, and the menu is in it.
+        let with_menu = headless.screenshot(&Camera::default()).unwrap();
+        assert_eq!(with_menu.len(), 96 * 64 * 4);
+        headless.set_ui(fossps_ui::Ui::default().draw());
+        let without = headless.screenshot(&Camera::default()).unwrap();
+        assert_ne!(with_menu, without);
+        assert_eq!(without, headless.screenshot(&Camera::default()).unwrap());
+        // A frame can be drawn after one was read back.
+        headless.render(&Camera::default()).unwrap();
         drop(headless);
         assert_eq!(validation_errors(), 0);
     }
