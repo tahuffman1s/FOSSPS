@@ -422,3 +422,58 @@ fn two_processes_exchange_commands_and_snapshots() {
     said.for_each(drop);
     assert!(server.0.wait().unwrap().success());
 }
+
+/// Polls `search` for half a second and gives what it found.
+fn found_by(
+    search: &mut fossps_net::UdpSearch,
+    mut meanwhile: impl FnMut(),
+) -> Vec<fossps_net::FoundServer> {
+    let mut found = Vec::new();
+    while search.elapsed() < Duration::from_millis(500) {
+        meanwhile();
+        while let Some(server) = search.poll() {
+            found.push(server);
+        }
+        sleep(TICK);
+    }
+    found
+}
+
+#[test]
+fn a_search_finds_the_server_on_this_machine_with_its_name_and_players() {
+    let mut hosted = Hosted::new(HostSettings::default());
+    hosted.host.set_name("zombie-night");
+    let address = hosted.host.local_addr().unwrap();
+    let mut joined = Joining::new(&address.to_string(), LinkSettings::default());
+    let deadline = Instant::now() + PATIENCE;
+    while joined.link.id().is_none() {
+        assert!(Instant::now() < deadline, "never joined");
+        joined.tick();
+        hosted.tick();
+        sleep(TICK);
+    }
+
+    let mut search = fossps_net::UdpSearch::start(address.port()).unwrap();
+    let found = found_by(&mut search, || {
+        joined.tick();
+        hosted.tick();
+    });
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    let server = &found[0];
+    assert_eq!(server.address, address);
+    assert_eq!(server.name, "zombie-night");
+    assert_eq!((server.players, server.places), (1, 64));
+    assert!(server.same_version);
+}
+
+#[test]
+fn a_search_with_no_server_finds_nothing() {
+    let free = UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut search = fossps_net::UdpSearch::start(free).unwrap();
+    assert_eq!(found_by(&mut search, || {}), Vec::new());
+}

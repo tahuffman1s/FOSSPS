@@ -391,3 +391,70 @@ fn a_player_joins_a_running_serve_and_walks() {
     assert!(here[2] < -2.0, "{here:?}");
     assert!(joined.closed().is_none());
 }
+
+#[test]
+fn servers_with_nothing_being_served_says_what_to_check() {
+    let output = fossps(
+        &scratch("servers-none"),
+        &["servers", "--port", &free_port().to_string()],
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(
+        said.contains("No games were found on this network."),
+        "{said}"
+    );
+    assert!(said.contains("`fossps serve`"), "{said}");
+    assert!(said.contains("`fossps run --open`"), "{said}");
+    assert!(said.contains("UDP (not TCP)"), "{said}");
+}
+
+#[test]
+fn servers_lists_a_running_serve_by_its_folder_name() {
+    /// Stops the server even when the test fails.
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let folder = scratch("servers-found").join("zombie-night");
+    assert!(
+        fossps(folder.parent().unwrap(), &["new", "zombie-night"])
+            .status
+            .success()
+    );
+    let port = free_port();
+    let _server = Running(
+        Command::new(env!("CARGO_BIN_EXE_fossps"))
+            .args(["serve", "--port", &port.to_string()])
+            .current_dir(&folder)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    // The server may still be starting: each try looks for a second.
+    let mut said = String::new();
+    for _ in 0..10 {
+        let output = fossps(&folder, &["servers", "--port", &port.to_string()]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        said = stdout(&output);
+        if said.contains("zombie-night") {
+            break;
+        }
+    }
+    assert!(
+        said.contains(&format!(
+            "  1. zombie-night   localhost:{port}   0 of 64 players (on this computer)"
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("`fossps join localhost:{port}`")),
+        "{said}"
+    );
+}

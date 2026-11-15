@@ -12,6 +12,9 @@
 //! [`LocalGame`] is both in one program, which is what `fossps run` plays:
 //! the same code runs alone as runs over the internet.
 //!
+//! [`find_servers`] looks for the games being served on the local network,
+//! so a player can join one without knowing its address.
+//!
 //! ```no_run
 //! use fossps::online::{DEFAULT_PORT, HostedGame};
 //! use fossps::server::{ServerConfig, StopSignal, serve};
@@ -36,8 +39,9 @@ use fossps_input::{ActionId, ActionMap, InputFrame};
 use fossps_net::{
     Client, ClientSettings, Closed, HostEvent, HostSettings, LinkEvent, LinkSettings, MAX_PLAYERS,
     PlayerId, PlayerInput, Refusal, RemotePlayer, Server, ServerSettings, SocketError, UdpHost,
-    UdpLink,
+    UdpLink, UdpSearch,
 };
+pub use fossps_net::{FoundServer, lan_address};
 use fossps_physics::{Level, MoveInput, MoveSettings, Player};
 
 use crate::game::{Frame, Game};
@@ -54,6 +58,10 @@ const STICK_TURN: f32 = 3.5;
 
 /// Half the width of the floor players stand on until a game has a level.
 const FLOOR_REACH: f32 = 500.0;
+
+/// How long [`find_servers`] is usually given: long enough for every server
+/// on a local network to answer, short enough not to feel like waiting.
+pub const SEARCH_TIME: Duration = Duration::from_secs(1);
 
 /// How long to wait between looks at the socket while joining.
 const JOIN_POLL: Duration = Duration::from_millis(5);
@@ -129,6 +137,14 @@ impl HostedGame {
             names: [None; MAX_PLAYERS],
             packet: Vec::new(),
         })
+    }
+
+    /// Names the game for players looking for one to join
+    /// ([`find_servers`]). The game's folder name is the usual choice.
+    #[must_use]
+    pub fn named(mut self, name: &str) -> Self {
+        self.host.set_name(name);
+        self
     }
 
     /// The address and port players join through, if the system can say.
@@ -539,8 +555,9 @@ impl Game for JoinedGame {
     }
 }
 
-/// A game played alone: a server and one player joined to it, in one
-/// program, talking over this machine's own network. Nobody else can join.
+/// A server and one player joined to it, in one program, talking over this
+/// machine's own network. [`start`](Self::start) is a game played alone;
+/// [`open`](Self::open) lets other players join it too.
 #[derive(Debug)]
 pub struct LocalGame {
     hosted: HostedGame,
@@ -560,9 +577,40 @@ impl LocalGame {
         actions: &ActionMap,
         tick_rate: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut hosted = HostedGame::open(game, "127.0.0.1:0", tick_rate)?;
-        let address = hosted.host.local_addr()?;
-        let mut joined = JoinedGame::connect(&address.to_string(), actions, tick_rate)?;
+        Self::join_own(
+            HostedGame::open(game, "127.0.0.1:0", tick_rate)?,
+            actions,
+            tick_rate,
+        )
+    }
+
+    /// Starts `game` for other players to join on the UDP port `port`, and
+    /// joins it. `name` is what players looking for a game are shown.
+    /// `actions` and `tick_rate` must be the ones the game is then run with.
+    ///
+    /// # Errors
+    ///
+    /// When the port cannot be opened, most often because another server
+    /// already has it, or the game cannot be joined through it.
+    pub fn open(
+        game: ScriptGame,
+        name: &str,
+        port: u16,
+        actions: &ActionMap,
+        tick_rate: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let hosted = HostedGame::open(game, &format!("0.0.0.0:{port}"), tick_rate)?.named(name);
+        Self::join_own(hosted, actions, tick_rate)
+    }
+
+    /// Joins `hosted` from this program, over this machine's own network.
+    fn join_own(
+        mut hosted: HostedGame,
+        actions: &ActionMap,
+        tick_rate: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let port = hosted.host.local_addr()?.port();
+        let mut joined = JoinedGame::connect(&format!("127.0.0.1:{port}"), actions, tick_rate)?;
         joined.wait_until_joined(|| hosted.listen())?;
         Ok(Self { hosted, joined })
     }
@@ -595,6 +643,31 @@ impl Game for LocalGame {
 
     fn frame(&mut self, frame: &mut Frame) {
         self.joined.frame(frame);
+    }
+}
+
+/// Looks for `wait` (usually [`SEARCH_TIME`]) for games being served on
+/// this computer and its local network on the UDP port `port` (usually
+/// [`DEFAULT_PORT`]), and gives the ones that answered, first to answer
+/// first. A game on this computer is found at `127.0.0.1`.
+///
+/// Only games reached without a router in between are found; one
+/// elsewhere on the internet is joined by its address.
+///
+/// # Errors
+///
+/// When this machine will not open a socket to search with.
+pub fn find_servers(port: u16, wait: Duration) -> Result<Vec<FoundServer>, SocketError> {
+    let mut search = UdpSearch::start(port)?;
+    let mut found = Vec::new();
+    loop {
+        while let Some(server) = search.poll() {
+            found.push(server);
+        }
+        if search.elapsed() >= wait {
+            return Ok(found);
+        }
+        std::thread::sleep(JOIN_POLL);
     }
 }
 
