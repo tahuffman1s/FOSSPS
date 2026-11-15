@@ -64,7 +64,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 A graphical editor for FPS maps and game modes only, built after the engine ships. No terrain, material graphs or visual scripting.
 
 - `fossps edit`: open a game in edit mode with a fly camera and grid (#38)
-- Panels on the Vulkan renderer: entity list and inspector (#39)
+- Panels on the Vulkan renderer: entity list and inspector (#39, done: `egui`, read-only)
 - Map file for entities, saved as text beside the level (#40)
 - Place and move spawn points, zones and objectives (#41)
 - Play from where you stand, and return to editing with one key (#42)

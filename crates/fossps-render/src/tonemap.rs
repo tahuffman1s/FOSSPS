@@ -63,6 +63,28 @@ pub(crate) struct TonemapPipeline {
     pub(crate) format: vk::Format,
 }
 
+/// What is drawn over the tone-mapped scene, in this order.
+#[derive(Default)]
+pub(crate) struct Over<'a> {
+    /// The HUD and menus.
+    pub(crate) ui: Option<&'a UiPass>,
+    /// The editor's panels.
+    #[cfg(feature = "panels")]
+    pub(crate) panels: Option<&'a mut crate::panels::PanelHost>,
+}
+
+impl<'a> Over<'a> {
+    /// The HUD and menus alone.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn ui(ui: Option<&'a UiPass>) -> Self {
+        Self {
+            ui,
+            #[cfg(feature = "panels")]
+            panels: None,
+        }
+    }
+}
+
 impl TonemapPipeline {
     /// Builds the pipeline for drawing into images of `format`.
     pub(crate) fn new(gpu: &Arc<Gpu>, format: vk::Format) -> Result<Self, RenderError> {
@@ -235,8 +257,13 @@ impl TonemapPipeline {
     /// Records drawing the tone-mapped scene over the whole of `canvas`.
     ///
     /// The scene's light is multiplied by `exposure` first. The image's
-    /// previous contents are discarded. If `over` is given, the HUD and
-    /// menus it was prepared with are drawn on top.
+    /// previous contents are discarded. What `over` holds is drawn on top:
+    /// the HUD and menus it was prepared with, then the editor's panels.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the editor's panels cannot be drawn. The commands are left
+    /// complete, but the frame should not be shown.
     ///
     /// # Safety
     ///
@@ -246,16 +273,18 @@ impl TonemapPipeline {
     /// image must not be in use by other work on the graphics card. The scene
     /// given to [`read_from`](Self::read_from) must be alive, at least
     /// `extent` in size, and ready to be read by shaders when these commands run.
-    /// `over` must have been made for this pipeline's format, and
-    /// [`prepare`](UiPass::prepare)d with `commands` for this frame.
+    /// `over.ui` must have been made for this pipeline's format, and
+    /// [`prepare`](UiPass::prepare)d with `commands` for this frame; the
+    /// panels must have been prepared for this pipeline's format since they
+    /// were last set.
     pub(crate) unsafe fn record(
         &self,
         commands: vk::CommandBuffer,
         canvas: Canvas,
         exposure: f32,
-        over: Option<&UiPass>,
+        over: Over<'_>,
         then: Then,
-    ) {
+    ) -> Result<(), RenderError> {
         let device = self.gpu.device();
         let Canvas {
             image,
@@ -356,14 +385,24 @@ impl TonemapPipeline {
             device.cmd_set_viewport(commands, 0, &[viewport]);
             device.cmd_set_scissor(commands, 0, &[area]);
             device.cmd_draw(commands, 3, 1, 0, 0);
-            if let Some(over) = over {
-                over.draw(commands, extent);
+            if let Some(ui) = over.ui {
+                ui.draw(commands, extent);
             }
+            #[cfg(feature = "panels")]
+            let panels = match over.panels {
+                Some(panels) => panels.draw(commands, extent),
+                None => Ok(()),
+            };
+            #[cfg(not(feature = "panels"))]
+            let panels = Ok(());
+            // The pass is ended even if the panels failed, so the commands
+            // are whole whatever the caller does with them.
             device.cmd_end_rendering(commands);
             device.cmd_pipeline_barrier2(
                 commands,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_finish),
             );
+            panels
         }
     }
 }

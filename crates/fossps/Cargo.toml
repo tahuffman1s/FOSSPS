@@ -15,7 +15,7 @@ window = ["dep:winit", "dep:gilrs", "dep:fossps-render", "dep:fossps-assets"]
 # Edit mode, `fossps edit`: a game's level with a fly camera and a ground
 # grid, in the same program. A build for players only can leave it out, and
 # a dedicated server never has it.
-editor = ["window"]
+editor = ["window", "fossps-render/panels", "dep:egui", "dep:egui-winit"]
 # The `fossps` command (`fossps new`, `fossps run`, `fossps package`). Off when
 # the crate is used as a library, so a game written in Rust does not build a
 # command-line parser or an archive writer.
@@ -54,6 +54,10 @@ clap = { version = "4.5", optional = true, default-features = false, features = 
     # A packaged game's help is shown under the game's own name.
     "string",
 ] }
+# The editor's panels. Without egui's own fonts (it is given the engine's),
+# and without the clipboard and link opening, which nothing uses yet.
+egui = { version = "0.36.2", default-features = false, optional = true }
+egui-winit = { version = "0.36.2", default-features = false, optional = true }
 
 [[bin]]
 name = "fossps"

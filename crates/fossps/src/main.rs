@@ -76,7 +76,7 @@ enum Command {
         #[arg(long)]
         open: bool,
     },
-    /// Open a game's level in the editor and fly around it
+    /// Open a game's level in the editor: fly around it and see what is in it
     #[cfg(feature = "editor")]
     #[command(
         after_help = "Examples:\n  fossps edit            Edit the game in this folder\n  \
@@ -85,7 +85,10 @@ enum Command {
                       go up and\ndown, Shift flies faster and the mouse wheel changes the \
                       speed. On a gamepad the\nsticks fly and look, the triggers go down and \
                       up, pressing the left stick flies\nfaster and the d-pad changes the \
-                      speed. The lines on the ground are a metre apart."
+                      speed. The lines on the ground are a metre apart.\n\nThe list on the left \
+                      names everything in the level. Click a name to see where it is and\nhow \
+                      big it is on the right; double-click it to fly there. Nothing can be \
+                      changed yet."
     )]
     Edit {
         /// The game's folder. Leave it out to edit the game in the folder you are in

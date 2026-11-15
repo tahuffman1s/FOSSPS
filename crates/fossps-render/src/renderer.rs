@@ -16,7 +16,7 @@ use crate::gpu::Gpu;
 use crate::mesh::{Contents, MeshPipeline, Meshes};
 use crate::overlay::Overlay;
 use crate::swapchain::Swapchain;
-use crate::tonemap::{Canvas, Then, TonemapPipeline, exposure_scale};
+use crate::tonemap::{Canvas, Over, Then, TonemapPipeline, exposure_scale};
 use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
@@ -149,6 +149,9 @@ pub struct Renderer {
     ui: Option<UiPass>,
     /// The HUD and menus to draw over each frame.
     overlay: Overlay,
+    /// The editor's panels, drawn over those.
+    #[cfg(feature = "panels")]
+    panels: crate::panels::PanelHost,
     tonemap: Option<TonemapPipeline>,
     mesh: Option<MeshPipeline>,
     /// The level's meshes on the graphics card; `None` until a scene is set.
@@ -220,6 +223,8 @@ impl Renderer {
             next: 0,
             ui: None,
             overlay: Overlay::new(Font::bundled()),
+            #[cfg(feature = "panels")]
+            panels: crate::panels::PanelHost::default(),
             tonemap: None,
             mesh: None,
             meshes: None,
@@ -381,6 +386,17 @@ impl Renderer {
         self.overlay.set(list);
     }
 
+    /// Draws the editor's panels over every frame from now on, on top of
+    /// the HUD and menus, until other panels are set.
+    ///
+    /// Call it once for every frame `egui` was run: see [`Panels`](crate::Panels).
+    /// Nothing is made on the graphics card for panels until the first
+    /// time there is something to draw.
+    #[cfg(feature = "panels")]
+    pub fn set_panels(&mut self, panels: crate::Panels) {
+        self.panels.set(panels);
+    }
+
     /// The font text is drawn in. Give it to a `Ui` with
     /// `set_text_measure` so that it centres text by its real width.
     #[must_use]
@@ -503,6 +519,9 @@ impl Renderer {
         ) else {
             return Ok(Drawn::No);
         };
+        #[cfg(feature = "panels")]
+        self.panels
+            .prepare(&self.gpu, swapchain.format, FRAMES_IN_FLIGHT)?;
         let slot = &self.frames[self.next];
         let device = self.gpu.device();
         let now = Instant::now();
@@ -575,9 +594,13 @@ impl Renderer {
                     extent: swapchain.extent,
                 },
                 self.exposure,
-                Some(ui),
+                Over {
+                    ui: Some(ui),
+                    #[cfg(feature = "panels")]
+                    panels: Some(&mut self.panels),
+                },
                 Then::Show,
-            );
+            )?;
             device
                 .end_command_buffer(slot.commands)
                 .map_err(RenderError::driver("recording a frame"))?;

@@ -45,6 +45,39 @@ pub struct Frame {
     view: Option<View>,
     action_set: Option<ActionSetId>,
     rumble: Option<Rumble>,
+    /// The editor's panels: what they are made with, and what was made.
+    #[cfg(feature = "editor")]
+    panels: Option<PanelFrame>,
+}
+
+/// One frame of the editor's panels.
+#[cfg(feature = "editor")]
+struct PanelFrame {
+    context: egui::Context,
+    /// What the mouse and keyboard did; taken when the panels are made.
+    input: Option<egui::RawInput>,
+    /// What to draw, once the panels are made.
+    output: Option<egui::FullOutput>,
+}
+
+#[cfg(feature = "editor")]
+impl Drop for PanelFrame {
+    fn drop(&mut self) {
+        // Panels nobody took are not drawn; `egui` asks to be told their
+        // texture changes are thrown away on purpose.
+        if let Some(output) = &mut self.output {
+            output.textures_delta.clear();
+        }
+    }
+}
+
+#[cfg(feature = "editor")]
+impl std::fmt::Debug for PanelFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PanelFrame")
+            .field("made", &self.output.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Where the world is seen from: the eye's position, then which way it
@@ -75,7 +108,40 @@ impl Frame {
             view: None,
             action_set: None,
             rumble: None,
+            #[cfg(feature = "editor")]
+            panels: None,
         }
+    }
+
+    /// Gives the frame what the editor's panels are made with: `context`,
+    /// and what the mouse and keyboard did since the last frame.
+    #[cfg(feature = "editor")]
+    pub(crate) fn with_panels(mut self, context: egui::Context, input: egui::RawInput) -> Self {
+        self.panels = Some(PanelFrame {
+            context,
+            input: Some(input),
+            output: None,
+        });
+        self
+    }
+
+    /// Makes the editor's panels for this frame: `build` is given an area
+    /// that covers the window. Without a window there is nothing to make
+    /// them with and `build` is not called; called twice in a frame, only
+    /// the first call counts.
+    #[cfg(feature = "editor")]
+    pub(crate) fn panels(&mut self, build: impl FnMut(&mut egui::Ui)) {
+        if let Some(panels) = &mut self.panels
+            && let Some(input) = panels.input.take()
+        {
+            panels.output = Some(panels.context.run_ui(input, build));
+        }
+    }
+
+    /// The panels made this frame, if any were.
+    #[cfg(feature = "editor")]
+    pub(crate) fn take_panels(&mut self) -> Option<egui::FullOutput> {
+        self.panels.as_mut()?.output.take()
     }
 
     /// How far the frame is between the last tick and the next, from 0 to 1.

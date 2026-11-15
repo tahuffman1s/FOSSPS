@@ -18,7 +18,7 @@ use crate::gpu::{Gpu, validation_errors};
 use crate::mesh::{Contents, MeshPipeline, Meshes};
 use crate::overlay::Overlay;
 use crate::swapchain::COLOUR;
-use crate::tonemap::{Canvas, Then, TonemapPipeline, exposure_scale};
+use crate::tonemap::{Canvas, Over, Then, TonemapPipeline, exposure_scale};
 use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
@@ -234,17 +234,19 @@ fn frames(
                     1.0 / 60.0,
                 )
                 .unwrap();
-            tonemap.record(
-                commands,
-                Canvas {
-                    image,
-                    view,
-                    extent,
-                },
-                exposure_scale(stops),
-                None,
-                Then::Copy,
-            );
+            tonemap
+                .record(
+                    commands,
+                    Canvas {
+                        image,
+                        view,
+                        extent,
+                    },
+                    exposure_scale(stops),
+                    Over::default(),
+                    Then::Copy,
+                )
+                .unwrap();
             device.cmd_copy_image_to_buffer(
                 commands,
                 image,
@@ -898,17 +900,19 @@ fn overlaid(gpu: &Arc<Gpu>, format: vk::Format, lists: &[DrawList<'_>]) -> Vec<V
                 )
                 .unwrap();
             ui.prepare(commands, 0, &mut overlay).unwrap();
-            tonemap.record(
-                commands,
-                Canvas {
-                    image: picture.image,
-                    view: picture.view,
-                    extent,
-                },
-                1.0,
-                Some(&ui),
-                Then::Copy,
-            );
+            tonemap
+                .record(
+                    commands,
+                    Canvas {
+                        image: picture.image,
+                        view: picture.view,
+                        extent,
+                    },
+                    1.0,
+                    Over::ui(Some(&ui)),
+                    Then::Copy,
+                )
+                .unwrap();
             device.cmd_copy_image_to_buffer(
                 commands,
                 picture.image,
