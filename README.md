@@ -39,7 +39,9 @@ cargo run -- demo             # opens the input demo window
 cargo run --release -- bench  # times a built-in test scene, with no window
 ```
 
-`cargo run --` stands in for the `fossps` command until there are packaged builds; to get a real `fossps` command now, run `cargo install --path crates/fossps`.
+`cargo run --` stands in for the `fossps` command when building from source; to get a real `fossps` command that way, run `cargo install --path crates/fossps`.
+
+Every tagged version is also built for Linux, Windows and macOS and put on the [releases page](https://github.com/tahuffman1s/FOSSPS/releases) as one archive per system, holding `fossps`, `fossps-server` and a short README, with nothing to compile. No version has been tagged yet, so until the first one building from source is the only way in. How a release is made is in [docs/releasing.md](docs/releasing.md).
 
 A machine that only hosts can use the separate `fossps-server` program, which does what `fossps serve` does and has no windowing, graphics, gamepad or sound code in it: `cargo build --release -p fossps-server`. It ticks the game 60 times a second, sleeps in between, logs a status line every minute and warns when it cannot keep up. Players on the same network join with just `fossps join`, which finds the server by itself (`fossps servers` lists what is there); from elsewhere they add the server's address, which it prints when it starts. It listens on UDP port 24680 unless `--port` says otherwise. `fossps run --open` plays a game and lets others on the network join it, with no separate server. A joined player walks with no wait for the server (`fossps-net`: commands, snapshots, prediction and correction), and `fossps run` plays through the same netcode on its own. What is drawn is a stand-in: a chequered floor and some blocks you walk through, seen from your own eyes, and the window's title says where you are. Other players are not drawn yet; everyone stands on a flat floor until games have levels, and other players are not yet smoothed between snapshots.
 
