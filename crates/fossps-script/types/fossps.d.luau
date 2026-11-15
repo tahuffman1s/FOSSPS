@@ -216,5 +216,15 @@ declare game: {
         --- distance, so do not multiply it by `step`.
         --- Example: local x, y = game.input.mouse("look")
         mouse: (action: string) -> (number, number),
+
+        --- Shakes the player's gamepad. `strong` is the heavy motor (a
+        --- thump) and `weak` the light one (a buzz), each from 0 (off) to 1
+        --- (full). It stops by itself after `seconds`: 0.2 if left out, and
+        --- at most 5. Numbers outside those ranges are brought into them. A
+        --- new rumble replaces the one playing, so `rumble(0, 0)` stops it.
+        --- Only the player at the computer running the script feels it
+        --- (`fossps run`), on a gamepad, on Linux and Windows.
+        --- Example: if game.input.justPressed("fire") then game.input.rumble(0.2, 0.6, 0.1) end
+        rumble: (strong: number, weak: number, seconds: number?) -> (),
     },
 }

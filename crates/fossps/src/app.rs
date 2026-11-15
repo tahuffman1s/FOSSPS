@@ -354,6 +354,12 @@ impl<G: Game> App<G> {
         if let Some(set) = frame.action_set() {
             self.use_action_set(set);
         }
+        // Like every other gamepad event, rumble is for the window in front.
+        if let Some(rumble) = frame.rumble_requested()
+            && self.focused
+        {
+            self.gamepads.rumble(rumble);
+        }
         if let (Some(title), Some(window)) = (frame.take_title(), &self.window) {
             window.set_title(&title);
         }
@@ -428,6 +434,7 @@ impl<G: Game> ApplicationHandler for App<G> {
                 } else {
                     self.release_mouse();
                     self.input.release_all();
+                    self.gamepads.stop_rumble();
                 }
             }
             WindowEvent::KeyboardInput {

@@ -1,6 +1,6 @@
 //! The interface a game implements to be driven by the engine.
 
-use fossps_input::{ActionSetId, InputFrame};
+use fossps_input::{ActionSetId, InputFrame, Rumble};
 
 /// A game the engine can run.
 pub trait Game {
@@ -37,6 +37,7 @@ pub struct Frame {
     close: bool,
     view: Option<View>,
     action_set: Option<ActionSetId>,
+    rumble: Option<Rumble>,
 }
 
 /// Where the world is seen from: the eye's position, then which way it
@@ -58,6 +59,7 @@ impl Frame {
             close: false,
             view: None,
             action_set: None,
+            rumble: None,
         }
     }
 
@@ -110,6 +112,24 @@ impl Frame {
         self.action_set = Some(set);
     }
 
+    /// Shakes the gamepad the player is holding: `Rumble::new(strong, weak,
+    /// seconds)`.
+    ///
+    /// It replaces the rumble that is playing, so
+    /// [`Rumble::STOP`](fossps_input::Rumble::STOP) ends one early, and it
+    /// stops by itself when its time is up, when the window is no longer in
+    /// front and when the gamepad is unplugged. Called twice in one frame,
+    /// the later call wins.
+    ///
+    /// Nothing happens when the player is on keyboard and mouse, when the
+    /// gamepad has no rumble motors, or on macOS, where rumble is not
+    /// supported yet. Never make rumble the only sign of something: show or
+    /// play it as well. A game on a server has no gamepad, so nothing happens
+    /// there.
+    pub fn rumble(&mut self, rumble: Rumble) {
+        self.rumble = Some(rumble);
+    }
+
     /// Closes the window and ends the game after this frame, as if the
     /// player had closed it. A game on a server has no window, so nothing
     /// happens there.
@@ -133,6 +153,12 @@ impl Frame {
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn action_set(&self) -> Option<ActionSetId> {
         self.action_set
+    }
+
+    /// The rumble requested this frame, if any.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn rumble_requested(&self) -> Option<Rumble> {
+        self.rumble
     }
 
     /// The title requested this frame, if any.

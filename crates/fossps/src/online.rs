@@ -239,6 +239,12 @@ impl Game for HostedGame {
         self.game.tick(input, step);
         self.place_spawned();
     }
+
+    /// The script's own presenting, such as its rumble, which is for the
+    /// player at this computer.
+    fn frame(&mut self, frame: &mut Frame) {
+        self.game.frame(frame);
+    }
 }
 
 /// The actions that move a player, looked up once. An action the map does
@@ -645,6 +651,7 @@ impl Game for LocalGame {
     }
 
     fn frame(&mut self, frame: &mut Frame) {
+        self.hosted.frame(frame);
         self.joined.frame(frame);
     }
 }
@@ -696,6 +703,35 @@ pub fn with_port(address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_played_alone_rumbles_the_players_gamepad() {
+        use fossps_input::{GamepadButton, Input, Rumble};
+
+        let actions = ActionMap::default_fps();
+        let script = ScriptGame::from_source(
+            r#"game.onTick(function()
+                if game.input.justPressed("fire") then game.input.rumble(0.2, 0.6, 0.1) end
+            end)"#,
+            &actions,
+        );
+        let mut game = LocalGame::start(script, &actions, 60).unwrap();
+        let mut input = Input::new(actions);
+        let asked = |game: &mut LocalGame, input: &mut Input| {
+            game.tick(input.tick(), 1.0 / 60.0);
+            let mut frame = Frame::new(0.0);
+            game.frame(&mut frame);
+            frame.rumble_requested()
+        };
+
+        assert_eq!(asked(&mut game, &mut input), None);
+        input.press(GamepadButton::RightTrigger);
+        assert_eq!(
+            asked(&mut game, &mut input),
+            Some(Rumble::new(0.2, 0.6, 0.1))
+        );
+        assert_eq!(asked(&mut game, &mut input), None);
+    }
 
     #[test]
     fn an_address_without_a_port_gets_the_usual_one() {
