@@ -315,6 +315,8 @@ pub struct Gpu {
     physical: vk::PhysicalDevice,
     queue_family: u32,
     queue: vk::Queue,
+    /// Whether the features the upscaler's shaders use are switched on.
+    can_upscale: bool,
     name: String,
     /// Last, so the device above is destroyed first.
     instance: Instance,
@@ -369,10 +371,22 @@ impl Gpu {
         let mut features = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
-        let info = vk::DeviceCreateInfo::default()
+        // The upscaler needs two more features, which every desktop card
+        // has. Without them the game still runs, drawn at full size.
+        // SAFETY: `physical` came from this live instance.
+        let offered = unsafe { instance.raw.get_physical_device_features(physical) };
+        let wanted = fossps_fsr::REQUIRED_FEATURES;
+        let can_upscale = offered.shader_storage_image_extended_formats
+            >= wanted.shader_storage_image_extended_formats
+            && offered.shader_storage_image_write_without_format
+                >= wanted.shader_storage_image_write_without_format;
+        let mut info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(&extensions)
             .push_next(&mut features);
+        if can_upscale {
+            info = info.enabled_features(&wanted);
+        }
         // SAFETY: `physical` came from this instance, and the extensions and
         // features asked for were all reported as supported by `inspect`.
         let device = unsafe { instance.raw.create_device(physical, &info, None) }
@@ -391,9 +405,15 @@ impl Gpu {
             physical,
             queue_family,
             queue,
+            can_upscale,
             name: candidate.name.clone(),
             instance,
         })
+    }
+
+    /// Whether this graphics card can run the upscaler.
+    pub(crate) fn can_upscale(&self) -> bool {
+        self.can_upscale
     }
 
     /// The name of the graphics card, as its driver reports it.

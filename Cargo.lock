@@ -805,6 +805,7 @@ dependencies = [
  "ash",
  "ash-window",
  "fossps-assets",
+ "fossps-fsr",
  "log",
  "naga",
  "raw-window-handle",

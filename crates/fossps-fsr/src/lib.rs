@@ -95,8 +95,10 @@ impl Quality {
 /// from any number; the shifts repeat after a while. Both values are between
 /// -0.5 and 0.5. Pass the same pair to [`Frame::jitter`].
 ///
-/// To apply it, add `2.0 * x / render_width` and `-2.0 * y / render_height`
-/// to the projection matrix's third-column x and y.
+/// To apply it, move the whole drawn picture `x` pixels to the right and
+/// `y` pixels down: where the picture runs from -1 to 1 with y up, that is
+/// `2.0 * x / render_width` across and `-2.0 * y / render_height` up, added
+/// after the projection.
 #[must_use]
 pub fn jitter(frame: u32, render_width: u32, output_width: u32) -> (f32, f32) {
     let phases = jitter_phases(render_width, output_width);

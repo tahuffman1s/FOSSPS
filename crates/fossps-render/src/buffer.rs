@@ -75,6 +75,50 @@ impl Buffer {
         Ok(buffer)
     }
 
+    /// Makes a buffer of `size` bytes for `usage` that [`write`](Self::write)
+    /// can fill every frame.
+    pub(crate) fn writable(
+        gpu: &Arc<Gpu>,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        doing: &'static str,
+    ) -> Result<Self, RenderError> {
+        Self::new(
+            gpu,
+            size,
+            usage,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            false,
+            doing,
+        )
+    }
+
+    /// Replaces the start of the buffer with `bytes`.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must come from [`writable`](Self::writable) and be at
+    /// least as long as `bytes`, and the graphics card must not be reading
+    /// it: commands that use it must have finished.
+    pub(crate) unsafe fn write(&self, bytes: &[u8]) -> Result<(), RenderError> {
+        let device = self.gpu.device();
+        // SAFETY: the caller guarantees the memory can be mapped, is at least
+        // `bytes.len()` long and is not in use; it is unmapped straight after.
+        unsafe {
+            let mapped = device
+                .map_memory(
+                    self.memory,
+                    0,
+                    bytes.len() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(RenderError::driver("drawing a frame"))?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
+            device.unmap_memory(self.memory);
+        }
+        Ok(())
+    }
+
     /// Makes a buffer for `usage` that holds `bytes`, which must not be empty.
     ///
     /// Waits for the graphics card to finish the copy, so this is for

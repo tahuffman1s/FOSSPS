@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use fossps_input::{ActionMap, Input, MouseWheel};
-use fossps_render::{Camera, RenderConfig, RenderError, Renderer};
+use fossps_render::{Camera, RenderConfig, RenderError, Renderer, Upscaling};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
@@ -21,6 +21,11 @@ use crate::translate;
 /// Where the eye is before a game says where to look from: as high as a
 /// standing player's, in metres.
 const STANDING_EYE: f32 = 1.6;
+
+/// A view that moves further than this in one frame, in metres, has jumped
+/// rather than moved. Falling at terminal speed at 20 frames a second is
+/// under 3 m a frame.
+const CUT_METRES: f32 = 5.0;
 
 /// How many pixels of smooth scrolling count as one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 40.0;
@@ -59,12 +64,23 @@ pub struct Config {
     /// };
     /// ```
     pub vsync: bool,
+    /// How much smaller than the window the game is drawn before AMD's
+    /// FSR 3.1 makes it full size. Smaller is faster.
+    ///
+    /// ```
+    /// let config = fossps::Config {
+    ///     upscaling: fossps::Upscaling::Performance,
+    ///     ..fossps::Config::default()
+    /// };
+    /// ```
+    pub upscaling: Upscaling,
     /// The actions the game reads and what they are bound to.
     pub actions: ActionMap,
 }
 
 impl Default for Config {
-    /// A 1280x720 window, 60 ticks per second, vsync on and the standard FPS controls.
+    /// A 1280x720 window, 60 ticks per second, vsync on, FSR upscaling at
+    /// Quality and the standard FPS controls.
     fn default() -> Self {
         Self {
             title: "FOSSPS".to_owned(),
@@ -72,6 +88,7 @@ impl Default for Config {
             height: 720,
             tick_rate: 60,
             vsync: true,
+            upscaling: Upscaling::default(),
             actions: ActionMap::default_fps(),
         }
     }
@@ -150,6 +167,7 @@ pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
         captured: false,
         scroll: 0.0,
         last_frame: Instant::now(),
+        last_view: None,
         error: None,
     };
     event_loop.run_app(&mut app).map_err(AppError::EventLoop)?;
@@ -177,6 +195,8 @@ struct App<G> {
     /// Smooth-scroll pixels that have not yet added up to a whole notch.
     scroll: f32,
     last_frame: Instant,
+    /// Where the game was last seen from, to notice the view jumping.
+    last_view: Option<[f32; 3]>,
     /// A failure from inside the event loop, reported once it exits.
     error: Option<AppError>,
 }
@@ -277,12 +297,27 @@ impl<G: Game> App<G> {
         let mut frame = Frame::new(self.clock.alpha());
         self.game.frame(&mut frame);
         if let (Some(view), Some(renderer)) = (frame.view(), &mut self.renderer) {
-            renderer.set_camera(Camera {
+            let camera = Camera {
                 position: view.position,
                 yaw: view.yaw,
                 pitch: view.pitch,
                 ..Camera::default()
+            };
+            // Nobody walks or falls this far in one frame: it is a respawn
+            // or a teleport, and the frames from before it do not belong
+            // in the picture.
+            let jumped = self.last_view.is_some_and(|last| {
+                let moved: f32 = (0..3)
+                    .map(|axis| (view.position[axis] - last[axis]).powi(2))
+                    .sum();
+                moved > CUT_METRES * CUT_METRES
             });
+            if jumped {
+                renderer.cut_to(camera);
+            } else {
+                renderer.set_camera(camera);
+            }
+            self.last_view = Some(view.position);
         }
         if let (Some(title), Some(window)) = (frame.take_title(), &self.window) {
             window.set_title(&title);
@@ -305,6 +340,7 @@ impl<G: Game> ApplicationHandler for App<G> {
                 let size = window.inner_size();
                 let config = RenderConfig {
                     vsync: self.config.vsync,
+                    upscaling: self.config.upscaling,
                 };
                 let renderer = Renderer::new(Rc::clone(&window), size.width, size.height, config)
                     .and_then(|mut renderer| {

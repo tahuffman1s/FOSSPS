@@ -23,7 +23,7 @@ pub(crate) struct Picture {
 
 impl Picture {
     /// A picture that holds nothing; destroying it does nothing.
-    const fn null() -> Self {
+    pub(crate) const fn null() -> Self {
         Self {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
@@ -35,7 +35,7 @@ impl Picture {
     ///
     /// On failure, what was created so far is left in `self` for
     /// [`destroy`](Self::destroy) to clean up.
-    fn create(
+    pub(crate) fn create(
         &mut self,
         gpu: &Gpu,
         extent: vk::Extent2D,
@@ -106,7 +106,7 @@ impl Picture {
     ///
     /// The picture must have been made on `gpu` (or be null), and the
     /// graphics card must have finished using it.
-    unsafe fn destroy(&self, gpu: &Gpu) {
+    pub(crate) unsafe fn destroy(&self, gpu: &Gpu) {
         let device = gpu.device();
         // SAFETY: the caller guarantees the handles are this device's and
         // idle; destroying a null handle is allowed.
@@ -118,8 +118,9 @@ impl Picture {
     }
 }
 
-/// What the scene is drawn into: a high-dynamic-range colour image and a
-/// depth image, both the size of the picture.
+/// What the scene is drawn into: a high-dynamic-range colour image, a depth
+/// image and how far each pixel moved since the last frame, all the size the
+/// scene is drawn at.
 ///
 /// Light is stored as it is, with no upper limit, so the sun can be thousands
 /// of times brighter than a shadow; [`TonemapPipeline`](crate::tonemap::TonemapPipeline)
@@ -128,6 +129,7 @@ pub(crate) struct SceneTarget {
     gpu: Arc<Gpu>,
     pub(crate) colour: Picture,
     pub(crate) depth: Picture,
+    pub(crate) motion: Picture,
     pub(crate) extent: vk::Extent2D,
 }
 
@@ -147,6 +149,14 @@ impl SceneTarget {
     /// distance, where a shooter needs it.
     pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
+    /// Two sixteen-bit floats for how far a pixel moved across and down the
+    /// picture since the last frame: where it was minus where it is, as a
+    /// fraction of the picture, so the same numbers hold at any size.
+    ///
+    /// Sixteen bits tell apart moves of a thousandth of a pixel, which the
+    /// upscaler needs to keep a slowly turning view sharp.
+    pub(crate) const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
+
     /// The depth of a pixel nothing was drawn on: infinitely far away.
     pub(crate) const FARTHEST: f32 = 0.0;
 
@@ -156,6 +166,7 @@ impl SceneTarget {
             gpu: Arc::clone(gpu),
             colour: Picture::null(),
             depth: Picture::null(),
+            motion: Picture::null(),
             extent,
         };
         // Dropping `target` cleans up whatever was created.
@@ -174,17 +185,28 @@ impl SceneTarget {
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             DEPTH,
         )?;
+        // Copied out by the tests, which check the numbers.
+        target.motion.create(
+            gpu,
+            extent,
+            Self::MOTION_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+            COLOUR,
+        )?;
         Ok(target)
     }
 }
 
 impl Drop for SceneTarget {
     fn drop(&mut self) {
-        // SAFETY: both pictures were made on `self.gpu`, and the owner waits
+        // SAFETY: the pictures were made on `self.gpu`, and the owner waits
         // for the graphics card to go idle before dropping the target.
         unsafe {
             self.colour.destroy(&self.gpu);
             self.depth.destroy(&self.gpu);
+            self.motion.destroy(&self.gpu);
         }
     }
 }

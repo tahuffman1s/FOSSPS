@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ash::vk;
 use fossps_assets::Scene;
@@ -11,9 +12,10 @@ use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::mesh::{MeshPipeline, Meshes};
-use crate::scene::SceneTarget;
 use crate::swapchain::Swapchain;
 use crate::tonemap::{Then, TonemapPipeline, exposure_scale};
+use crate::upscale::Upscaling;
+use crate::view::SceneView;
 
 /// How many frames can be in progress on the graphics card at once.
 ///
@@ -36,14 +38,25 @@ pub struct RenderConfig {
     /// drawn as fast as possible for the lowest input delay, but this uses more
     /// power and can show a visible split line (tearing).
     pub vsync: bool,
+    /// How much smaller than the window the scene is drawn before FSR makes
+    /// it full size. Smaller is faster; see [`Upscaling`].
+    pub upscaling: Upscaling,
 }
 
 impl Default for RenderConfig {
-    /// Vsync on.
+    /// Vsync on, and [`Upscaling::Quality`].
     fn default() -> Self {
-        Self { vsync: true }
+        Self {
+            vsync: true,
+            upscaling: Upscaling::default(),
+        }
     }
 }
+
+/// The frame time given to the upscaler when none has been measured yet, and
+/// the longest it is told about: a pause is not a slow frame.
+const USUAL_FRAME_SECONDS: f32 = 1.0 / 60.0;
+const LONGEST_FRAME_SECONDS: f32 = 0.25;
 
 /// What one in-progress frame needs for itself.
 struct FrameSlot {
@@ -124,7 +137,7 @@ impl Drop for FrameSlot {
 pub struct Renderer {
     // Fields are dropped top to bottom: everything made from the graphics
     // card first, then the card, then the window it draws into. The tone
-    // mapping goes before the scene image it reads.
+    // mapping goes before the picture it reads.
     frames: Vec<FrameSlot>,
     /// Which of `frames` the next frame uses.
     next: usize,
@@ -134,8 +147,13 @@ pub struct Renderer {
     meshes: Option<Meshes>,
     /// Where the scene is seen from.
     camera: Camera,
-    /// What the scene is drawn into; the size of the swapchain's images.
-    scene: Option<SceneTarget>,
+    /// What the scene is drawn into and upscaled by; its finished picture
+    /// is the size of the swapchain's images.
+    view: Option<SceneView>,
+    /// The picture size and upscaling `view` was made for.
+    view_for: (vk::Extent2D, Upscaling),
+    /// When the last frame was drawn.
+    last_frame: Option<Instant>,
     /// What the scene's light is multiplied by before tone mapping.
     exposure: f32,
     /// `None` while the window has no area to draw into.
@@ -194,7 +212,9 @@ impl Renderer {
             mesh: None,
             meshes: None,
             camera: Camera::default(),
-            scene: None,
+            view: None,
+            view_for: (vk::Extent2D::default(), config.upscaling),
+            last_frame: None,
             exposure: 1.0,
             swapchain: None,
             size: (width, height),
@@ -243,12 +263,53 @@ impl Renderer {
         // Dropped first, so the old and new meshes are never both held.
         self.meshes = None;
         self.meshes = Some(Meshes::new(&self.gpu, scene)?);
+        // Nothing of the old level belongs in the new one's first frame.
+        if let Some(view) = &mut self.view {
+            view.cut();
+        }
         Ok(())
     }
 
     /// Sets where the scene is seen from, from the next frame on.
+    ///
+    /// Use this for a view that moves smoothly: walking, turning, falling.
+    /// When the view jumps, use [`cut_to`](Self::cut_to).
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
+    }
+
+    /// Jumps the view to `camera`: for a respawn, a teleport or switching
+    /// to another player's eyes.
+    ///
+    /// Upscaling builds each frame from the ones before it. After a jump
+    /// those show somewhere else, and would smear into the new view for a
+    /// moment; this throws them away instead.
+    ///
+    /// ```no_run
+    /// # fn respawn(renderer: &mut fossps_render::Renderer) {
+    /// renderer.cut_to(fossps_render::Camera {
+    ///     position: [12.0, 1.7, -30.0],
+    ///     ..fossps_render::Camera::default()
+    /// });
+    /// # }
+    /// ```
+    pub fn cut_to(&mut self, camera: Camera) {
+        self.camera = camera;
+        if let Some(view) = &mut self.view {
+            view.cut();
+        }
+    }
+
+    /// Changes how much smaller than the window the scene is drawn, from the
+    /// next frame on. For a settings menu; see [`Upscaling`].
+    ///
+    /// If the graphics card cannot run FSR, the reason is logged and the
+    /// scene is drawn at full size.
+    pub fn set_upscaling(&mut self, upscaling: Upscaling) {
+        if self.config.upscaling != upscaling {
+            self.config.upscaling = upscaling;
+            self.stale = true;
+        }
     }
 
     /// Makes the whole picture brighter or darker, in camera stops.
@@ -323,7 +384,7 @@ impl Renderer {
         // has been replaced once must not be offered for replacement again.
         self.swapchain = Some(swapchain);
         if self.mesh.is_none() {
-            self.mesh = Some(MeshPipeline::new(&self.gpu)?);
+            self.mesh = Some(MeshPipeline::new(&self.gpu, FRAMES_IN_FLIGHT)?);
         }
         if self
             .tonemap
@@ -331,23 +392,31 @@ impl Renderer {
             .is_none_or(|tonemap| tonemap.format != format)
         {
             self.tonemap = Some(TonemapPipeline::new(&self.gpu, format)?);
-            // The new pipeline has not been told about the scene yet.
-            self.scene = None;
+            // The new pipeline has not been told about the picture yet.
+            self.view = None;
         }
-        if self
-            .scene
-            .as_ref()
-            .is_none_or(|scene| scene.extent != extent)
-        {
+        let wanted = (extent, self.config.upscaling);
+        if self.view.is_none() || self.view_for != wanted {
             // Dropped first, so the old and new images are never both held.
-            self.scene = None;
-            let scene = SceneTarget::new(&self.gpu, extent)?;
-            if let Some(tonemap) = &self.tonemap {
-                // SAFETY: the view is the new scene's, which is stored next to
-                // the pipeline and replaced only here; the card is idle.
-                unsafe { tonemap.read_from(scene.colour.view) };
+            self.view = None;
+            let view = SceneView::new(&self.gpu, extent, self.config.upscaling)?;
+            let drawn = view.render_size();
+            if drawn != extent {
+                log::info!(
+                    "Drawing at {}x{} and upscaling to {}x{} with FSR 3.1.",
+                    drawn.width,
+                    drawn.height,
+                    extent.width,
+                    extent.height
+                );
             }
-            self.scene = Some(scene);
+            if let Some(tonemap) = &self.tonemap {
+                // SAFETY: the picture is the new view's, which is stored next
+                // to the pipeline and replaced only here; the card is idle.
+                unsafe { tonemap.read_from(view.picture()) };
+            }
+            self.view = Some(view);
+            self.view_for = wanted;
         }
         self.stale = false;
         Ok(())
@@ -359,13 +428,18 @@ impl Renderer {
             // `rebuild` found no area to draw into.
             return Ok(Drawn::No);
         }
-        let (Some(swapchain), Some(mesh), Some(tonemap), Some(scene)) =
-            (&self.swapchain, &self.mesh, &self.tonemap, &self.scene)
+        let (Some(swapchain), Some(mesh), Some(tonemap), Some(view)) =
+            (&self.swapchain, &self.mesh, &self.tonemap, &mut self.view)
         else {
             return Ok(Drawn::No);
         };
         let slot = &self.frames[self.next];
         let device = self.gpu.device();
+        let now = Instant::now();
+        let seconds = self.last_frame.map_or(USUAL_FRAME_SECONDS, |last| {
+            (now - last).as_secs_f32().min(LONGEST_FRAME_SECONDS)
+        });
+        self.last_frame = Some(now);
 
         // SAFETY: every handle used here belongs to `self.gpu`'s device and
         // is alive; the fence wait makes sure this slot's command buffer and
@@ -411,10 +485,14 @@ impl Renderer {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .map_err(RenderError::driver("recording a frame"))?;
-            let clip_from_world = self
-                .camera
-                .clip_from_world(scene.extent.width, scene.extent.height);
-            mesh.record(slot.commands, scene, &clip_from_world, self.meshes.as_ref());
+            view.record(
+                slot.commands,
+                self.next,
+                mesh,
+                self.meshes.as_ref(),
+                &self.camera,
+                seconds,
+            )?;
             tonemap.record(
                 slot.commands,
                 target.image,

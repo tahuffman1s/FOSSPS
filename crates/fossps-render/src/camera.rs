@@ -64,6 +64,18 @@ impl Camera {
         multiply(&self.projection(width, height), &self.view())
     }
 
+    /// How much is seen from the bottom of the picture to the top, in radians.
+    pub(crate) fn fov_radians(&self) -> f32 {
+        finite_or(self.fov_degrees, 74.0)
+            .clamp(1.0, 179.0)
+            .to_radians()
+    }
+
+    /// The distance in metres closer than which nothing is drawn.
+    pub(crate) fn near_metres(&self) -> f32 {
+        finite_or(self.near, 0.05).max(0.001)
+    }
+
     /// The matrix that takes a point in the world to where it is from the
     /// eye: x right, y up, and -z ahead.
     fn view(&self) -> Mat4 {
@@ -89,12 +101,11 @@ impl Camera {
 
     /// The matrix that takes a point as seen from the eye to where it is drawn.
     fn projection(&self, width: u32, height: u32) -> Mat4 {
-        let fov = finite_or(self.fov_degrees, 74.0).clamp(1.0, 179.0);
-        let near = finite_or(self.near, 0.05).max(0.001);
+        let near = self.near_metres();
         // Picture sizes are far below the point where f32 stops being exact.
         #[allow(clippy::cast_precision_loss)]
         let aspect = width.max(1) as f32 / height.max(1) as f32;
-        let zoom = 1.0 / (fov.to_radians() / 2.0).tan();
+        let zoom = 1.0 / (self.fov_radians() / 2.0).tan();
         [
             [zoom / aspect, 0.0, 0.0, 0.0],
             [0.0, zoom, 0.0, 0.0],
@@ -116,6 +127,21 @@ pub(crate) fn multiply(outer: &Mat4, inner: &Mat4) -> Mat4 {
         for (row, cell) in out_column.iter_mut().enumerate() {
             *cell = (0..4).map(|k| outer[k][row] * inner[column][k]).sum();
         }
+    }
+    out
+}
+
+/// `clip_from_world` with everything it draws moved `right` and `up`, where
+/// the whole picture is 2 wide and 2 high.
+///
+/// The upscaler has the camera moved by a different part of a pixel each
+/// frame, which is how it sees detail smaller than a pixel.
+pub(crate) fn shifted(clip_from_world: &Mat4, right: f32, up: f32) -> Mat4 {
+    let mut out = *clip_from_world;
+    for column in &mut out {
+        // A point is drawn at x / w, so moving it by `right` adds `right * w`.
+        column[0] += right * column[3];
+        column[1] += up * column[3];
     }
     out
 }
@@ -249,6 +275,26 @@ mod tests {
         ];
         let ([x, y, _], in_front) = drawn(&both, ahead);
         assert!(in_front && close(x, 0.0) && close(y, 0.0));
+    }
+
+    #[test]
+    fn a_shifted_picture_moves_every_point_by_the_same_amount() {
+        let camera = Camera::default();
+        let plain = camera.clip_from_world(100, 100);
+        let moved = shifted(&plain, 0.02, -0.01);
+        for point in [[0.0, 0.0, -5.0, 1.0], [3.0, -1.0, -40.0, 1.0_f32]] {
+            let through = |matrix: &Mat4| -> [f32; 2] {
+                let clip: [f32; 4] = std::array::from_fn(|row| {
+                    (0..4)
+                        .map(|column| matrix[column][row] * point[column])
+                        .sum()
+                });
+                [clip[0] / clip[3], clip[1] / clip[3]]
+            };
+            let [x, y] = through(&plain);
+            let [moved_x, moved_y] = through(&moved);
+            assert!(close(moved_x - x, 0.02) && close(moved_y - y, -0.01));
+        }
     }
 
     #[test]
