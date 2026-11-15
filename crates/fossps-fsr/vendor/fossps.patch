@@ -1,0 +1,51 @@
+--- a/include/FidelityFX/host/ffx_types.h
++++ b/include/FidelityFX/host/ffx_types.h
+@@ -77,7 +77,10 @@
+ #define FFX_API __declspec(dllexport)
+ #endif // #if defined (FFX_GCC)
+ 
++// FOSSPS: may be set from the build, because the context is bigger where wchar_t is 4 bytes.
++#ifndef FFX_SDK_DEFAULT_CONTEXT_SIZE
+ #define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 128)
++#endif // #ifndef FFX_SDK_DEFAULT_CONTEXT_SIZE
+ 
+ /// Maximum supported number of simultaneously bound SRVs.
+ ///
+--- a/src/backends/vk/ffx_vk.cpp
++++ b/src/backends/vk/ffx_vk.cpp
+@@ -402,13 +402,21 @@
+     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+ 
+     uint32_t bestCandidate = UINT32_MAX;
++    // FOSSPS: where all device-local memory is also host-visible (software
++    // renderers, some integrated cards) the test below finds nothing and
++    // every allocation fails. The first such type is kept to fall back on.
++    uint32_t visibleCandidate = UINT32_MAX;
+ 
+     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+         if ((memRequirements.memoryTypeBits & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & requestedProperties)) {
+ 
+             // if just device-local memory is requested, make sure this is the invisible heap to prevent over-subscribing the local heap
+             if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
++            {
++                if (visibleCandidate == UINT32_MAX)
++                    visibleCandidate = i;
+                 continue;
++            }
+ 
+             bestCandidate = i;
+             outProperties = memProperties.memoryTypes[i].propertyFlags;
+@@ -419,6 +427,13 @@
+         }
+     }
+ 
++    // FOSSPS: see above.
++    if (bestCandidate == UINT32_MAX && visibleCandidate != UINT32_MAX)
++    {
++        bestCandidate = visibleCandidate;
++        outProperties = memProperties.memoryTypes[visibleCandidate].propertyFlags;
++    }
++
+     return bestCandidate;
+ }
+ 

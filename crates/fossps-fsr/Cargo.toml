@@ -1,0 +1,23 @@
+[package]
+name = "fossps-fsr"
+description = "AMD FSR 3.1 upscaling for the FOSSPS renderer, built from source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ash = { version = "0.38", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# The test finds the Vulkan library when it runs, as the game does.
+ash = { version = "0.38", default-features = false, features = ["loaded", "std", "debug"] }
+
+[build-dependencies]
+# Compiles AMD's C++ and, with glslang, its GLSL shaders, so building FOSSPS
+# needs no CMake, Vulkan SDK or system shader compiler.
+cc = "1"
+glslang = "0.9"
+
+[lints]
+workspace = true
