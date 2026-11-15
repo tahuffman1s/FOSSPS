@@ -350,6 +350,73 @@ fn check_reports_a_mistake_that_only_a_match_reaches() {
 }
 
 #[test]
+fn check_reports_a_mistake_that_only_a_press_reaches_and_names_the_action() {
+    let folder = scratch("check-press-mistake");
+    let script = [
+        "game.onTick(function()",
+        "    if game.input.justPressed(\"fire\") then",
+        "        local weapon = nil",
+        "        print(weapon.ammo)",
+        "    end",
+        "    local x, y = game.input.axis(\"move\")",
+        "    if y < -0.5 then",
+        "        print(missing.speed)",
+        "    end",
+        "end)",
+        // Wrong on every tick, pressed or not: no action is blamed for it.
+        "game.onTick(function() print(always.wrong) end)",
+    ];
+    fs::write(folder.join("main.luau"), script.join("\n")).unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let said = stderr(&output);
+    // Both are found in one run: the check carries on after the first.
+    let at = |words: &str| {
+        said.find(words)
+            .unwrap_or_else(|| panic!("{words}: {said}"))
+    };
+    let moved = at("Script error in main.luau, line 8");
+    let pushing = at("That happened while the check was pushing \"move\".");
+    let fired = at("Script error in main.luau, line 4");
+    let pressing = at("That happened while the check was pressing \"fire\".");
+    assert!(
+        moved < pushing && pushing < fired && fired < pressing,
+        "{said}"
+    );
+    assert!(
+        said.contains("Script error in main.luau, line 11"),
+        "{said}"
+    );
+    assert_eq!(said.matches("That happened while").count(), 2, "{said}");
+    assert!(said.contains("run `fossps check` again"), "{said}");
+}
+
+#[test]
+fn check_presses_every_action_of_a_new_game_and_says_so() {
+    let folder = scratch("check-press");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    // Jump and fire are each bound to a key and to a gamepad button, and
+    // the new game's script prints on both.
+    for line in ["Jump number 2", "Fire! Moving 0, 0"] {
+        assert!(stderr(&output).contains(line), "{}", stderr(&output));
+    }
+    assert!(!stderr(&output).contains("Jump number 3"));
+    let said = stdout(&output);
+    assert!(
+        said.contains("Each of the 15 actions was also pressed, held and let go"),
+        "{said}"
+    );
+    assert!(!said.contains("Nothing was pressed"), "{said}");
+    assert!(!said.contains("Not pressed"), "{said}");
+}
+
+#[test]
 fn check_passes_a_new_game_without_a_window() {
     let folder = scratch("check-ok");
     assert!(fossps(&folder, &["new", "game"]).status.success());
