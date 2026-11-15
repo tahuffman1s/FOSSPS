@@ -12,14 +12,16 @@ default = ["window", "cli"]
 # dedicated server builds without it and links no windowing, graphics or
 # gamepad libraries.
 window = ["dep:winit", "dep:gilrs", "dep:fossps-render", "dep:fossps-assets"]
-# The `fossps` command (`fossps new`, `fossps run`). Off when the crate is used
-# as a library, so a game written in Rust does not build a command-line parser.
-cli = ["dep:clap"]
+# The `fossps` command (`fossps new`, `fossps run`, `fossps package`). Off when
+# the crate is used as a library, so a game written in Rust does not build a
+# command-line parser or an archive writer.
+cli = ["dep:clap", "dep:tar", "dep:flate2"]
 
 [dependencies]
 fossps-input = { path = "../fossps-input" }
 fossps-script = { path = "../fossps-script" }
 fossps-net = { path = "../fossps-net" }
+fossps-pack = { path = "../fossps-pack" }
 fossps-physics = { path = "../fossps-physics" }
 fossps-render = { path = "../fossps-render", optional = true }
 # Only for the stand-in level drawn until levels are loaded from files.
@@ -27,6 +29,11 @@ fossps-assets = { path = "../fossps-assets", optional = true, default-features =
 log = "0.4"
 # Ctrl-C and the operating system's "please end" requests, for a clean server stop.
 ctrlc = { version = "3.4", features = ["termination"] }
+# `fossps package` writes the Linux `.tar.gz` itself, so packaging needs no
+# `tar` program (Windows has none to rely on). No extended attributes: an
+# archive should say nothing about the computer that made it.
+tar = { version = "0.4", optional = true, default-features = false }
+flate2 = { version = "1", optional = true }
 winit = { version = "0.30", optional = true }
 gilrs = { version = "0.11", optional = true }
 clap = { version = "4.5", optional = true, default-features = false, features = [
@@ -37,6 +44,8 @@ clap = { version = "4.5", optional = true, default-features = false, features = 
     "error-context",
     "suggestions",
     "color",
+    # A packaged game's help is shown under the game's own name.
+    "string",
 ] }
 
 [[bin]]

@@ -1,7 +1,11 @@
 //! The `fossps` command: `fossps new` creates a game, `fossps run` plays it,
 //! `fossps serve` hosts it, `fossps join` joins a hosted one,
-//! `fossps servers` lists the ones on this network and `fossps bench`
-//! measures how fast this computer draws.
+//! `fossps servers` lists the ones on this network, `fossps package` makes a
+//! download for players and `fossps bench` measures how fast this computer
+//! draws.
+//!
+//! The same program is the player inside a packaged game: started with a
+//! game pack of its own name beside it, it plays that game.
 
 mod demo;
 
@@ -9,11 +13,13 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use fossps::Upscaling;
 use fossps::bench::Bench;
 use fossps::cli::{self, quoted};
 use fossps::online::{DEFAULT_PORT, FoundServer, JoinedGame, LocalGame, SEARCH_TIME, find_servers};
+use fossps::package;
+use fossps::player;
 use fossps::scaffold::{self, NewGame};
 use fossps::script::ENTRY_SCRIPT;
 use fossps::script::mode::Phase;
@@ -58,10 +64,12 @@ enum Command {
         after_help = "Examples:\n  fossps run            Play the game in this folder\n  \
                             fossps run my-game    Play the game in the folder my-game\n  \
                             fossps run --open     Play it, and let others on your network join \
-                            with `fossps join`"
+                            with `fossps join`\n  \
+                            fossps run dist/my-game.fpk    Play a game pack, as a packaged game does"
     )]
     Run {
-        /// The game's folder. Leave it out to play the game in the folder you are in
+        /// The game's folder, or a game pack (.fpk). Leave it out to play the game in the
+        /// folder you are in
         folder: Option<PathBuf>,
         /// Let other players on your network join this game with `fossps join`
         #[arg(long)]
@@ -120,6 +128,29 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_PORT, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
     },
+    /// Make a download of a game that players can unpack and run
+    #[command(
+        after_help = "Examples:\n  fossps package                   Package the game in this folder \
+                            for this kind of computer\n  \
+                            fossps package my-game           Package the game in the folder my-game\n  \
+                            fossps package --target linux    Package it for Linux\n\n\
+                      The package is written to the folder dist inside the game's folder. \
+                      For Linux it is a .tar.gz\nholding the game's program, its files in \
+                      one game pack (.fpk), and its icon if the game's\nfolder has an \
+                      icon.png. Nothing is compiled. Packages for Windows and macOS are \
+                      not built yet."
+    )]
+    Package {
+        /// The game's folder. Leave it out to package the game in the folder you are in
+        folder: Option<PathBuf>,
+        /// The kind of computer to package for. Leave it out to package for this kind
+        #[arg(long, value_enum, value_name = "SYSTEM")]
+        target: Option<Target>,
+        /// A folder holding ready-made FOSSPS programs to put in packages, instead of
+        /// this one: fossps-linux-x86_64 for Linux
+        #[arg(long, value_name = "FOLDER")]
+        runtime_dir: Option<PathBuf>,
+    },
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
     /// Measure how fast this computer draws a built-in test scene
@@ -159,10 +190,92 @@ enum Command {
     },
 }
 
+/// A kind of computer `fossps package` can be asked to package for.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Target {
+    /// Linux, Windows and macOS
+    All,
+    /// A .tar.gz for Linux (x86-64)
+    Linux,
+    /// Not built yet
+    Windows,
+    /// Not built yet
+    Macos,
+}
+
+impl Target {
+    /// The kind of computer this program runs on.
+    fn here() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::Macos
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// What a packaged game can be started with. The game's own name stands in
+/// for `game` in its help.
+#[derive(Parser)]
+#[command(name = "game", about = "Plays the game packed with this program.")]
+struct Player {
+    /// Play this game pack (.fpk) instead of the one beside the program
+    #[arg(long, value_name = "FILE")]
+    pack: Option<PathBuf>,
+}
+
+/// The game pack this program was started to play, if it was started as a
+/// packaged game: with `--pack` first, or with a pack of its own name beside
+/// it. `Err` is clap's own message, for `--help` or a mistyped option.
+fn pack_to_play() -> Option<Result<PathBuf, clap::Error>> {
+    let program = std::env::current_exe().ok();
+    let beside = program.as_deref().and_then(player::pack_beside);
+    let asked = std::env::args_os().nth(1).is_some_and(|first| {
+        let first = first.to_string_lossy();
+        first == "--pack" || first.starts_with("--pack=")
+    });
+    if beside.is_none() && !asked {
+        return None;
+    }
+    let name = program.as_deref().and_then(Path::file_stem).map_or_else(
+        || "game".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let pack = Player::command()
+        .name(name.clone())
+        .bin_name(name)
+        .try_get_matches()
+        .map(|matches| matches.get_one::<PathBuf>("pack").cloned());
+    match pack {
+        Ok(pack) => pack.or(beside).map(Ok),
+        Err(error) => Some(Err(error)),
+    }
+}
+
 fn main() -> ExitCode {
     cli::log_to_stderr();
 
-    let outcome = match Cli::parse().command {
+    let outcome = match pack_to_play() {
+        Some(Ok(pack)) => play_pack(&pack),
+        // Prints help to standard output and mistakes to standard error,
+        // with the exit code each should have.
+        Some(Err(error)) => error.exit(),
+        None => command(),
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Does what the `fossps` command was asked to.
+fn command() -> Result<(), String> {
+    match Cli::parse().command {
         Some(Command::New { folder }) => new(&folder),
         Some(Command::Run { folder, open }) => {
             run(folder.as_deref().unwrap_or(Path::new(".")), open)
@@ -178,6 +291,15 @@ fn main() -> ExitCode {
             None => find_and_join(),
         },
         Some(Command::Servers { port }) => servers(port),
+        Some(Command::Package {
+            folder,
+            target,
+            runtime_dir,
+        }) => package(
+            folder.as_deref().unwrap_or(Path::new(".")),
+            target.unwrap_or_else(Target::here),
+            runtime_dir.as_deref(),
+        ),
         Some(Command::Demo) => demo(),
         Some(Command::Bench {
             frames,
@@ -201,13 +323,6 @@ fn main() -> ExitCode {
         None => Cli::command()
             .print_help()
             .map_err(|error| error.to_string()),
-    };
-    match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("{message}");
-            ExitCode::FAILURE
-        }
     }
 }
 
@@ -310,6 +425,9 @@ fn check(folder: &Path) -> Result<(), String> {
 /// `fossps run`: plays the game in `folder` until its window is closed.
 /// With `others_may_join`, other players can join it meanwhile.
 fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
+    if folder.is_file() && player::is_pack(folder) {
+        return play_packed(folder, others_may_join);
+    }
     let mut config = Config::default();
     let game = open(folder, &config, "run")?;
 
@@ -335,8 +453,19 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     if !name.is_empty() {
         config.title = format!("{name} | FOSSPS");
     }
+    start(config, game, &name, others_may_join)
+}
+
+/// Starts `game`, called `name`, and plays it until its window is closed.
+/// With `others_may_join`, other players can join it meanwhile.
+fn start(
+    config: Config,
+    game: ScriptGame,
+    name: &str,
+    others_may_join: bool,
+) -> Result<(), String> {
     let game = if others_may_join {
-        let game = LocalGame::open(game, &name, DEFAULT_PORT, &config.actions, config.tick_rate)
+        let game = LocalGame::open(game, name, DEFAULT_PORT, &config.actions, config.tick_rate)
             .map_err(|error| {
                 format!(
                     "The game could not be opened for others to join: {error}\nIf another \
@@ -358,6 +487,60 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
         })?
     };
     play(config.clone(), game.with_title(config.title))
+}
+
+/// A packaged game started by its player: plays the game in the pack at
+/// `pack` until its window is closed.
+fn play_pack(pack: &Path) -> Result<(), String> {
+    play_packed(pack, false)
+}
+
+/// Plays the game in the pack at `pack` until its window is closed. With
+/// `others_may_join`, other players can join it meanwhile.
+fn play_packed(pack: &Path, others_may_join: bool) -> Result<(), String> {
+    let mut config = Config::default();
+    let packed = player::open(pack, &config.actions).map_err(|error| error.to_string())?;
+    // The window carries the game's own name; one with none keeps the usual title.
+    if !packed.name.is_empty() {
+        config.title.clone_from(&packed.name);
+    }
+    start(config, packed.game, &packed.name, others_may_join)
+}
+
+/// `fossps package`: makes a download of the game in `folder` for `target`.
+fn package(folder: &Path, target: Target, runtime_dir: Option<&Path>) -> Result<(), String> {
+    /// What to do about a system that cannot be packaged for yet.
+    const NOT_YET: &str = "This version of FOSSPS packages for Linux only: \
+                           `fossps package --target linux`.";
+    match target {
+        Target::Windows => {
+            return Err(format!("Packaging for Windows is not built yet. {NOT_YET}"));
+        }
+        Target::Macos => return Err(format!("Packaging for macOS is not built yet. {NOT_YET}")),
+        Target::All | Target::Linux => {}
+    }
+
+    // Loading the script is the cheapest check there is: a game that does not
+    // load for its maker will not load for a player.
+    let game = open(folder, &Config::default(), "package")?;
+    if game.host().last_error().is_some() {
+        return Err(format!(
+            "{ENTRY_SCRIPT} has a mistake (the error is shown above), so the game was not \
+             packaged. Fix it, try it with `fossps check`, then run `fossps package` again."
+        ));
+    }
+    drop(game);
+
+    let packaged =
+        package::package_linux(folder, runtime_dir).map_err(|error| error.to_string())?;
+    print!("{}", cli::packaged(&packaged));
+    if target == Target::All {
+        println!(
+            "\nPackages for Windows and macOS were not made: this version of FOSSPS \
+             packages for Linux only."
+        );
+    }
+    Ok(())
 }
 
 /// `fossps join`: plays on the server at `address` until the window is

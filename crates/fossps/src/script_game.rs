@@ -41,6 +41,16 @@ impl ScriptGame {
         })
     }
 
+    /// Runs `source` as the game's `main.luau` with no file behind it, as a
+    /// packaged game does. Nothing is watched or loaded again, and a mistake
+    /// inside the script is logged and kept in the host's `last_error`.
+    #[must_use]
+    pub fn from_source(source: impl Into<String>, actions: &ActionMap) -> Self {
+        Self {
+            host: ScriptHost::from_source(source, actions.clone()),
+        }
+    }
+
     /// The script host, for example to read its latest error.
     #[must_use]
     pub fn host(&self) -> &ScriptHost {

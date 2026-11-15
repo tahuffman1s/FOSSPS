@@ -371,6 +371,66 @@ pub fn bench(
     }
 }
 
+/// What `fossps package` says about the Linux package it made.
+#[must_use]
+pub fn packaged(packaged: &crate::package::Packaged) -> String {
+    let crate::package::Packaged {
+        name,
+        file_name,
+        archive,
+        size,
+        files,
+        icon,
+        left_out,
+    } = packaged;
+    let mut said = format!(
+        "Packaged \"{name}\" for Linux: {} ({}, {files} game {}).\n\
+         A player unpacks it and runs {file_name}/{file_name}. Nothing else has to be \
+         installed but a graphics driver with Vulkan 1.3.\n\
+         Send the .tar.gz to players as it is, or upload it to a store such as itch.io.\n",
+        archive.display(),
+        size_text(*size),
+        if *files == 1 { "file" } else { "files" },
+    );
+    if !icon {
+        // Writing to a `String` cannot fail.
+        let _ = writeln!(
+            said,
+            "The game has no icon: put a square PNG picture called {} in the game's \
+             folder (256 by 256 pixels is a good size) and package it again.",
+            crate::package::ICON_FILE
+        );
+    }
+    if !left_out.is_empty() {
+        said.push_str(
+            "Left out of the package, because a link can point anywhere on this computer \
+             and a name that is not readable text cannot be stored:\n",
+        );
+        for path in left_out {
+            let _ = writeln!(said, "  {}", path.display());
+        }
+        said.push_str("If the game needs one of them, put a real copy in the game's folder.\n");
+    }
+    said
+}
+
+/// A file size as a person reads it: `812 bytes`, `4.2 kB`, `13.0 MB`,
+/// `1.5 GB`, in thousands as file managers show them.
+#[must_use]
+pub fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 3] = ["kB", "MB", "GB"];
+    if bytes < 1000 {
+        return format!("{bytes} bytes");
+    }
+    let mut size = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while size >= 999.95 && unit + 1 < UNITS.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS.get(unit).copied().unwrap_or("GB"))
+}
+
 /// `text` as one word for a command line: in quotes if it has a space.
 #[must_use]
 pub fn quoted(text: &str) -> String {
@@ -466,6 +526,49 @@ mod tests {
             let said = chosen(wrong, 3).unwrap_err();
             assert!(said.contains("from 1 to 3"), "{said}");
         }
+    }
+
+    #[test]
+    fn sizes_are_given_in_the_unit_that_fits() {
+        assert_eq!(size_text(812), "812 bytes");
+        assert_eq!(size_text(4_200), "4.2 kB");
+        assert_eq!(size_text(999_999), "1.0 MB");
+        assert_eq!(size_text(13_000_000), "13.0 MB");
+        assert_eq!(size_text(1_500_000_000), "1.5 GB");
+        assert_eq!(size_text(2_500_000_000_000), "2500.0 GB");
+    }
+
+    #[test]
+    fn a_package_report_says_what_was_made_and_what_is_missing() {
+        let mut packaged = crate::package::Packaged {
+            name: "Zombie Night".to_owned(),
+            file_name: "Zombie-Night".to_owned(),
+            archive: "dist/Zombie-Night-linux-x86_64.tar.gz".into(),
+            size: 13_000_000,
+            files: 1,
+            icon: true,
+            left_out: Vec::new(),
+        };
+        let said = super::packaged(&packaged);
+        assert!(
+            said.starts_with(
+                "Packaged \"Zombie Night\" for Linux: dist/Zombie-Night-linux-x86_64.tar.gz \
+                 (13.0 MB, 1 game file).\n"
+            ),
+            "{said}"
+        );
+        assert!(said.contains("runs Zombie-Night/Zombie-Night."), "{said}");
+        assert!(!said.contains("icon"), "{said}");
+        assert!(!said.contains("Left out"), "{said}");
+
+        packaged.icon = false;
+        packaged.files = 3;
+        packaged.left_out = vec!["secret.txt".into()];
+        let said = super::packaged(&packaged);
+        assert!(said.contains("3 game files"), "{said}");
+        assert!(said.contains("called icon.png"), "{said}");
+        assert!(said.contains("Left out of the package"), "{said}");
+        assert!(said.contains("\n  secret.txt\n"), "{said}");
     }
 
     #[test]

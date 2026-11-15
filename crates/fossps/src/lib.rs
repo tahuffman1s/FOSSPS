@@ -35,6 +35,9 @@ mod game;
 #[cfg(feature = "window")]
 mod gamepad;
 pub mod online;
+#[cfg(feature = "cli")]
+pub mod package;
+pub mod player;
 pub mod scaffold;
 mod script_game;
 pub mod server;

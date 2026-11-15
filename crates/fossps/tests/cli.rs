@@ -522,3 +522,165 @@ fn bench_draws_and_reports_or_says_why_it_cannot() {
         stderr(&output)
     );
 }
+
+/// A game called `name` in `folder`, and beside it a folder of pretend
+/// engine programs to package it with. Returns the runtime folder.
+fn game_to_package(folder: &Path, name: &str) -> PathBuf {
+    assert!(fossps(folder, &["new", name]).status.success());
+    let runtime = folder.join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::write(
+        runtime.join("fossps-linux-x86_64"),
+        b"\x7fELF pretend program",
+    )
+    .unwrap();
+    runtime
+}
+
+#[test]
+fn package_makes_a_linux_download_and_says_where_it_is() {
+    let folder = scratch("package");
+    let runtime = game_to_package(&folder, "Zombie Night");
+    let game = folder.join("Zombie Night");
+
+    let output = fossps(
+        &game,
+        &[
+            "package",
+            "--target",
+            "linux",
+            "--runtime-dir",
+            runtime.to_str().unwrap(),
+        ],
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(
+        said.contains("Packaged \"Zombie Night\" for Linux"),
+        "{said}"
+    );
+    assert!(said.contains("Zombie-Night-linux-x86_64.tar.gz"), "{said}");
+    assert!(said.contains("runs Zombie-Night/Zombie-Night."), "{said}");
+    assert!(said.contains("called icon.png"), "{said}");
+    let archive = game.join("dist/Zombie-Night-linux-x86_64.tar.gz");
+    // A gzip file, with something in it.
+    let bytes = fs::read(archive).unwrap();
+    assert!(bytes.starts_with(&[0x1f, 0x8b]) && bytes.len() > 100);
+}
+
+#[test]
+fn package_for_every_system_says_which_were_not_made() {
+    let folder = scratch("package-all");
+    let runtime = game_to_package(&folder, "my-game");
+
+    let output = fossps(
+        &folder,
+        &[
+            "package",
+            "my-game",
+            "--target",
+            "all",
+            "--runtime-dir",
+            runtime.to_str().unwrap(),
+        ],
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(said.contains("Packaged \"my-game\" for Linux"), "{said}");
+    assert!(said.contains("Windows and macOS were not made"), "{said}");
+    assert!(
+        folder
+            .join("my-game/dist/my-game-linux-x86_64.tar.gz")
+            .is_file()
+    );
+}
+
+#[test]
+fn package_for_a_system_that_is_not_built_yet_says_what_works() {
+    let folder = scratch("package-windows");
+    game_to_package(&folder, "my-game");
+
+    for system in ["windows", "macos"] {
+        let output = fossps(&folder, &["package", "my-game", "--target", system]);
+
+        assert_eq!(output.status.code(), Some(1));
+        let said = stderr(&output);
+        assert!(said.contains("is not built yet"), "{said}");
+        assert!(said.contains("`fossps package --target linux`"), "{said}");
+    }
+    assert!(!folder.join("my-game/dist").exists());
+}
+
+#[test]
+fn package_refuses_a_game_whose_script_has_a_mistake() {
+    let folder = scratch("package-mistake");
+    let runtime = game_to_package(&folder, "my-game");
+    fs::write(folder.join("my-game/main.luau"), "game.onTik()").unwrap();
+
+    let output = fossps(
+        &folder,
+        &[
+            "package",
+            "my-game",
+            "--target",
+            "linux",
+            "--runtime-dir",
+            runtime.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("Did you mean game.onTick?"), "{said}");
+    assert!(said.contains("so the game was not packaged"), "{said}");
+    assert!(!folder.join("my-game/dist").exists());
+}
+
+#[test]
+fn package_outside_a_game_says_how_to_get_one() {
+    let folder = scratch("package-nothing");
+
+    let output = fossps(&folder, &["package", "--target", "linux"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("There is no game here"), "{said}");
+    assert!(said.contains("`fossps package my-game`"), "{said}");
+}
+
+#[test]
+fn a_player_given_something_that_is_not_a_pack_says_so() {
+    let folder = scratch("player-not-a-pack");
+    fs::write(folder.join("Game.fpk"), "not a pack").unwrap();
+
+    // As a packaged game is started, and as its maker tries a pack.
+    for args in [["--pack", "Game.fpk"], ["run", "Game.fpk"]] {
+        let output = fossps(&folder, &args);
+
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let said = stderr(&output);
+        assert!(
+            said.contains("is not a FOSSPS game pack"),
+            "{args:?}: {said}"
+        );
+    }
+}
+
+#[test]
+fn a_player_shows_help_under_the_games_own_options() {
+    let folder = scratch("player-help");
+
+    let output = fossps(&folder, &["--pack", "Game.fpk", "--help"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(
+        said.contains("Plays the game packed with this program."),
+        "{said}"
+    );
+    assert!(said.contains("--pack <FILE>"), "{said}");
+    // None of the `fossps` command's own commands are offered.
+    assert!(!said.contains("serve"), "{said}");
+}
