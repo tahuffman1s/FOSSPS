@@ -138,10 +138,10 @@ enum Command {
     )]
     Bench {
         /// How many frames to time
-        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..))]
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
         frames: u32,
         /// How many frames to draw first without timing them
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u32).range(..=1_000_000))]
         warmup: u32,
         /// The size of the picture, in pixels
         #[arg(long, default_value = "1280x720", value_name = "WIDTHxHEIGHT", value_parser = cli::picture_size)]

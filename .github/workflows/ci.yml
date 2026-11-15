@@ -63,7 +63,7 @@ jobs:
       - name: Benchmark
         run: |
           set -o pipefail
-          ./target/release/fossps bench --budget-ms 400 --json bench.json | tee bench.txt
+          ./target/release/fossps bench --budget-ms 300 --json bench.json | tee bench.txt
       - name: Show the numbers
         if: always()
         run: |
