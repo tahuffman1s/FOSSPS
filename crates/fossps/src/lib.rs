@@ -31,6 +31,7 @@ pub mod bench;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod cli;
+pub mod controls;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;

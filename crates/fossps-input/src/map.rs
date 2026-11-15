@@ -3,7 +3,8 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::binding::{ActionKind, Binding};
+use crate::binding::{ActionKind, Binding, Button};
+use crate::devices::{Stick, StickAxis};
 use crate::names::{UnknownName, unknown};
 use crate::shaping::Deadzone;
 
@@ -290,6 +291,130 @@ impl ActionMap {
             .unwrap_or_default()
     }
 
+    /// Replaces everything bound to the action.
+    ///
+    /// An empty list leaves the action with nothing bound, which is how a
+    /// player turns one off. Ids stay valid. An id from a different map is
+    /// ignored.
+    ///
+    /// # Errors
+    ///
+    /// Fails, changing nothing, if a binding does not match the action's kind.
+    pub fn set_bindings<I>(&mut self, action: ActionId, bindings: I) -> Result<(), MapError>
+    where
+        I: IntoIterator<Item = Binding>,
+    {
+        let Some(target) = self.actions.get(action.0) else {
+            return Ok(());
+        };
+        let new: Vec<Binding> = bindings.into_iter().collect();
+        if let Some(binding) = new.iter().find(|binding| binding.kind() != target.kind) {
+            return Err(MapError::WrongKind {
+                action: target.name.to_string(),
+                kind: target.kind,
+                binding: *binding,
+            });
+        }
+        let old = target.bindings.clone();
+        let end = old.start + new.len();
+        self.bindings.splice(old.clone(), new);
+        // Every action stored after this one moves by the change in length.
+        for (index, other) in self.actions.iter_mut().enumerate() {
+            if index == action.0 {
+                other.bindings = old.start..end;
+            } else if other.bindings.start >= old.end {
+                let length = other.bindings.len();
+                let start = other.bindings.start - old.end + end;
+                other.bindings = start..start + length;
+            }
+        }
+        Ok(())
+    }
+
+    /// Swaps one key or button of the action for another, wherever the action
+    /// uses it: alone, or as one of the keys in a group such as `"WASD"`.
+    ///
+    /// If the action already uses `to` somewhere, the two trade places, so a
+    /// group never ends up with one key pulling two ways.
+    ///
+    /// Returns whether anything changed. This is what a controls screen calls
+    /// once the player has pressed the new key; [`Input::start_rebind`]
+    /// does the listening.
+    ///
+    /// [`Input::start_rebind`]: crate::Input::start_rebind
+    pub fn replace_button(&mut self, action: ActionId, from: Button, to: Button) -> bool {
+        let Some(bindings) = self
+            .actions
+            .get(action.0)
+            .and_then(|a| self.bindings.get_mut(a.bindings.clone()))
+        else {
+            return false;
+        };
+        let mut changed = false;
+        let mut swap = |button: &mut Button| {
+            if from == to {
+                return;
+            }
+            if *button == from {
+                *button = to;
+                changed = true;
+            } else if *button == to {
+                *button = from;
+            }
+        };
+        for binding in bindings {
+            match binding {
+                Binding::Button(button) => swap(button),
+                Binding::Axis { negative, positive } => {
+                    swap(negative);
+                    swap(positive);
+                }
+                Binding::Directions {
+                    up,
+                    down,
+                    left,
+                    right,
+                } => {
+                    swap(up);
+                    swap(down);
+                    swap(left);
+                    swap(right);
+                }
+                Binding::StickAxis(..) | Binding::Stick(_) | Binding::MouseMotion => {}
+            }
+        }
+        changed
+    }
+
+    /// Lists every key, button or stick that two different actions both use.
+    ///
+    /// Sharing is allowed, and sometimes wanted, so this never stops anything:
+    /// each [`Conflict`] prints as a sentence to show the player. An empty
+    /// list means no input does two things.
+    #[must_use]
+    pub fn conflicts(&self) -> Vec<Conflict> {
+        let mut found: Vec<Conflict> = Vec::new();
+        for (index, first) in self.actions.iter().enumerate() {
+            for second in &self.actions[index + 1..] {
+                for ours in &self.bindings[first.bindings.clone()] {
+                    for theirs in &self.bindings[second.bindings.clone()] {
+                        for input in shared(*ours, *theirs) {
+                            let conflict = Conflict {
+                                input,
+                                first: first.name.to_string(),
+                                second: second.name.to_string(),
+                            };
+                            if !found.contains(&conflict) {
+                                found.push(conflict);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// Sets how sticks bound to this action respond to tilt.
     ///
     /// 1 is linear, the default. Higher values give finer control near the
@@ -348,6 +473,105 @@ impl ActionMap {
     /// The actions and flat binding list, for the tick loop.
     pub(crate) fn parts(&self) -> (&[Action], &[Binding]) {
         (&self.actions, &self.bindings)
+    }
+}
+
+/// One physical thing a binding reads: what two actions can collide on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Button(Button),
+    StickAxis(Stick, StickAxis),
+    Mouse,
+}
+
+impl Source {
+    /// Everything `binding` reads; at most four things.
+    const fn of(binding: Binding) -> [Option<Self>; 4] {
+        match binding {
+            Binding::Button(button) => [Some(Self::Button(button)), None, None, None],
+            Binding::Axis { negative, positive } => [
+                Some(Self::Button(negative)),
+                Some(Self::Button(positive)),
+                None,
+                None,
+            ],
+            Binding::Directions {
+                up,
+                down,
+                left,
+                right,
+            } => [
+                Some(Self::Button(up)),
+                Some(Self::Button(down)),
+                Some(Self::Button(left)),
+                Some(Self::Button(right)),
+            ],
+            Binding::StickAxis(stick, axis) => {
+                [Some(Self::StickAxis(stick, axis)), None, None, None]
+            }
+            Binding::Stick(stick) => [
+                Some(Self::StickAxis(stick, StickAxis::X)),
+                Some(Self::StickAxis(stick, StickAxis::Y)),
+                None,
+                None,
+            ],
+            Binding::MouseMotion => [Some(Self::Mouse), None, None, None],
+        }
+    }
+
+    /// The name a player knows it by. Both axes of a stick go by the stick's name.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Button(button) => button.name(),
+            Self::StickAxis(stick, _) => stick.name(),
+            Self::Mouse => "MouseMotion",
+        }
+    }
+}
+
+/// The names of what two bindings both read.
+///
+/// When one binding is wholly inside the other, that is one clash under the
+/// smaller binding's own name (`"WASD"`, not four keys); otherwise each
+/// shared key is named.
+fn shared(ours: Binding, theirs: Binding) -> Vec<String> {
+    let (ours_reads, theirs_reads) = (Source::of(ours), Source::of(theirs));
+    let both: Vec<Source> = (ours_reads.into_iter().flatten())
+        .filter(|input| theirs_reads.contains(&Some(*input)))
+        .collect();
+    let count = |reads: [Option<Source>; 4]| reads.into_iter().flatten().count();
+    if both.is_empty() {
+        Vec::new()
+    } else if both.len() == count(ours_reads) {
+        vec![ours.to_string()]
+    } else if both.len() == count(theirs_reads) {
+        vec![theirs.to_string()]
+    } else {
+        both.into_iter()
+            .map(|input| input.name().to_owned())
+            .collect()
+    }
+}
+
+/// A key, button or stick that two actions both use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// The shared input's name, for example `"F"`, `"WASD"` or `"LeftStick"`.
+    pub input: String,
+    /// The action that comes first in the map.
+    pub first: String,
+    /// The other action.
+    pub second: String,
+}
+
+impl fmt::Display for Conflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "\"{}\" is bound to both \"{}\" and \"{}\", so it does both at once. \
+             Bind one of them to something else, unless that is what you want.",
+            self.input, self.first, self.second
+        )
     }
 }
 
@@ -572,5 +796,124 @@ mod tests {
         assert_eq!(map.name(foreign), "");
         assert_eq!(map.kind(foreign), None);
         assert!(map.bindings(foreign).is_empty());
+    }
+
+    #[test]
+    fn bindings_can_be_replaced_without_disturbing_other_actions() {
+        let mut map = ActionMap::default_fps();
+        let before = map.clone();
+        let jump = map.action("jump").unwrap();
+        let wide: Vec<Binding> = ["F", "Enter", "GamepadNorth"]
+            .iter()
+            .map(|name| name.parse().unwrap())
+            .collect();
+
+        map.set_bindings(jump, wide.clone()).unwrap();
+        assert_eq!(map.bindings(jump), wide);
+        map.set_bindings(jump, []).unwrap();
+        assert!(map.bindings(jump).is_empty());
+        for action in map.actions().filter(|action| *action != jump) {
+            assert_eq!(map.bindings(action), before.bindings(action));
+        }
+
+        map.set_bindings(jump, before.bindings(jump).to_vec())
+            .unwrap();
+        for action in map.actions() {
+            assert_eq!(map.bindings(action), before.bindings(action));
+        }
+    }
+
+    #[test]
+    fn bindings_of_the_wrong_kind_are_refused_and_change_nothing() {
+        let mut map = ActionMap::default_fps();
+        let before = map.clone();
+        let jump = map.action("jump").unwrap();
+        let error = map
+            .set_bindings(jump, [Binding::Stick(Stick::LeftStick)])
+            .unwrap_err();
+        assert!(matches!(error, MapError::WrongKind { .. }));
+        assert_eq!(map, before);
+        assert_eq!(map.set_bindings(ActionId(99), []), Ok(()));
+        assert_eq!(map, before);
+    }
+
+    #[test]
+    fn one_button_can_be_swapped_alone_or_inside_a_group() {
+        let mut map = ActionMap::default_fps();
+        let jump = map.action("jump").unwrap();
+        let movement = map.action("move").unwrap();
+
+        assert!(map.replace_button(jump, Key::Space.into(), Key::F.into()));
+        assert_eq!(map.bindings(jump)[0], Binding::Button(Key::F.into()));
+        assert!(!map.replace_button(jump, Key::Space.into(), Key::G.into()));
+        assert!(!map.replace_button(jump, Key::F.into(), Key::F.into()));
+
+        assert!(map.replace_button(movement, Key::W.into(), Key::ArrowUp.into()));
+        assert_eq!(
+            map.bindings(movement)[0],
+            Binding::directions(Key::ArrowUp, Key::S, Key::A, Key::D)
+        );
+        assert!(!map.replace_button(ActionId(99), Key::W.into(), Key::E.into()));
+    }
+
+    #[test]
+    fn shared_inputs_are_found_and_explained() {
+        let mut map = ActionMap::default_fps();
+        assert_eq!(map.conflicts(), Vec::new());
+
+        let jump = map.action("jump").unwrap();
+        map.replace_button(jump, Key::Space.into(), Key::W.into());
+        let look = map.action("look").unwrap();
+        map.set_bindings(
+            look,
+            [Binding::MouseMotion, Binding::Stick(Stick::LeftStick)],
+        )
+        .unwrap();
+
+        let said: Vec<String> = map.conflicts().iter().map(ToString::to_string).collect();
+        assert_eq!(
+            said,
+            [
+                "\"LeftStick\" is bound to both \"move\" and \"look\", so it does both at \
+                 once. Bind one of them to something else, unless that is what you want.",
+                "\"W\" is bound to both \"move\" and \"jump\", so it does both at once. \
+                 Bind one of them to something else, unless that is what you want.",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_two_axes_of_a_stick_do_not_collide() {
+        let mut map = ActionMap::new();
+        map.axis1d("lean", ["LeftStickX"]).unwrap();
+        map.axis1d("zoom", ["LeftStickY"]).unwrap();
+        assert_eq!(map.conflicts(), Vec::new());
+        map.axis2d("move", ["LeftStick"]).unwrap();
+        let inputs: Vec<String> = map.conflicts().into_iter().map(|c| c.input).collect();
+        assert_eq!(inputs, ["LeftStickX", "LeftStickY"]);
+    }
+
+    #[test]
+    fn a_whole_group_shared_is_one_clash_and_part_of_one_names_the_keys() {
+        let mut map = ActionMap::new();
+        map.axis2d("move", ["WASD"]).unwrap();
+        map.axis2d("look", ["WASD"]).unwrap();
+        map.axis2d("menu", ["W/S/ArrowLeft/ArrowRight"]).unwrap();
+        let found: Vec<(String, String, String)> = (map.conflicts().into_iter())
+            .map(|c| (c.input, c.first, c.second))
+            .collect();
+        let clash = |input: &str, first: &str, second: &str| {
+            (input.to_owned(), first.to_owned(), second.to_owned())
+        };
+        assert_eq!(
+            found,
+            [
+                clash("WASD", "move", "look"),
+                clash("W", "move", "menu"),
+                clash("S", "move", "menu"),
+                clash("W", "look", "menu"),
+                clash("S", "look", "menu"),
+            ]
+        );
     }
 }

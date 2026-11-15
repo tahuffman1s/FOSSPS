@@ -23,8 +23,88 @@ fn fossps(folder: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fossps"))
         .args(args)
         .current_dir(folder)
+        // Never the controls of whoever runs the tests.
+        .env("FOSSPS_BINDINGS", folder.join("bindings.toml"))
         .output()
         .unwrap()
+}
+
+#[test]
+fn controls_makes_the_file_then_shows_what_the_player_changed_in_it() {
+    let folder = scratch("controls");
+    let file = folder.join("bindings.toml");
+
+    let output = fossps(&folder, &["controls"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(said.starts_with("Your controls:\n"), "{said}");
+    assert!(
+        said.contains("\n  jump             Space, GamepadSouth\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "\nThey are kept in {}, made just now.\n",
+            file.display()
+        )),
+        "{said}"
+    );
+    assert_eq!(stderr(&output), "");
+    let written = fs::read_to_string(&file).unwrap();
+    assert!(
+        written.contains("\n# jump = [\"Space\", \"GamepadSouth\"]\n"),
+        "{written}"
+    );
+
+    // The player takes the # away, as the file says to, and picks keys.
+    let edited = written
+        .replace(
+            "# jump = [\"Space\", \"GamepadSouth\"]",
+            "jump = [\"F\", \"GamepadSouth\"]",
+        )
+        .replace(
+            "# reload = [\"R\", \"GamepadWest\"]",
+            "reload = [\"F\", \"GamepadWset\"]",
+        )
+        .replace("# melee = [\"V\", \"RightStickPress\"]", "melee = []");
+    fs::write(&file, &edited).unwrap();
+
+    let output = fossps(&folder, &["controls"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(
+        said.contains("\n  jump             F, GamepadSouth  (changed by you)\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains("\n  melee            nothing  (changed by you)\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains("\n  reload           R, GamepadWest\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("\nThey are kept in {}.\n", file.display())),
+        "{said}"
+    );
+    let warned = stderr(&output);
+    assert!(
+        warned.contains(&format!(
+            "{}: Line 20: \"GamepadWset\" is not a known binding. Did you mean \
+             \"GamepadWest\"? Action \"reload\" keeps the game's own controls.",
+            file.display()
+        )),
+        "{warned}"
+    );
+    assert_eq!(warned.lines().count(), 1, "{warned}");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        edited,
+        "left as written"
+    );
 }
 
 fn stdout(output: &Output) -> String {

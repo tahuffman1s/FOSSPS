@@ -6,7 +6,7 @@ A free, open-source engine for multiplayer first-person shooters.
 
 [![CI](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml/badge.svg)](https://github.com/tahuffman1s/FOSSPS/actions/workflows/ci.yml)
 
-**Status:** just started. Nothing is playable yet. So far: a Vulkan 1.3 window that draws meshes with a depth buffer from the player's eyes (a test floor and blocks, in flat colours, until games load levels), a fixed-rate main loop, keyboard, mouse and gamepad input through one action map, and Luau scripts that reload when you save them.
+**Status:** just started. Nothing is playable yet. So far: a Vulkan 1.3 window that draws meshes with a depth buffer from the player's eyes (a test floor and blocks, in flat colours, until games load levels), a fixed-rate main loop, keyboard, mouse and gamepad input through one action map with controls the player can change in a text file, and Luau scripts that reload when you save them.
 
 ## Goals
 
@@ -52,6 +52,8 @@ Running it needs a graphics driver with Vulkan 1.3; building does not need the V
 `fossps package`, run in a game's folder on Linux, writes `dist/<game>-linux-x86_64.tar.gz`: one folder holding the game's program, its files in one game pack (`<game>.fpk`), its icon if the folder has an `icon.png`, and a `.desktop` file. A player unpacks it and runs the program; nothing is compiled, and the program is a copy of the `fossps` that made the package, which plays the pack beside it when it has one. `fossps run <game>.fpk` plays a pack too. So far the pack stores files as they are, everything in the folder goes in except hidden files and the ones `fossps new` made for the game's maker, and only Linux is packaged for: Windows, macOS, an AppImage, a dedicated server, smaller packs and packaging for another system than your own are still being built (#77 to #85, #121).
 
 `fossps bench` draws a built-in scene (1,600 blocks seen from a camera walking a circle) with no window and says how long a usual frame, a slow frame (99 of 100 are faster) and the slowest took, and how much of that was the engine's own work. Every run draws the same frames. `--size`, `--upscaling` and `--frames` change what is drawn, `--json bench.json` saves the numbers, and `--budget-ms 16.6` makes it fail when a slow frame took longer. The engine's own checks run it on every change with a budget, on a software renderer, so that budget only catches drawing getting much slower; it says nothing about how fast a real graphics card is.
+
+`fossps controls` shows which key and button does what, and makes the text file that changes it: `bindings.toml` in the `fossps` folder of your settings (`~/.config` on Linux, `%APPDATA%` on Windows, `~/Library/Application Support` on macOS). Every action is listed there as a comment; take the `#` away from a line, edit it (`jump = ["F", "GamepadSouth"]`) and save, and every game played with FOSSPS uses it from its next start. A line with a mistake is skipped with a message saying which line and why, and the game still starts; a key that ends up doing two things gets a warning. There is no controls screen inside a game yet (#112).
 
 ## Scripting
 

@@ -31,6 +31,7 @@
 
 mod binding;
 mod devices;
+mod file;
 mod frame;
 mod input;
 mod map;
@@ -39,8 +40,9 @@ mod shaping;
 
 pub use binding::{ActionKind, Binding, Button};
 pub use devices::{GamepadButton, Key, MouseButton, MouseWheel, Stick, StickAxis};
+pub use file::{BindingsError, BindingsProblem, ProblemKind};
 pub use frame::{ActionState, InputFrame};
-pub use input::Input;
-pub use map::{ActionId, ActionMap, Device, MapError, ParityGap};
+pub use input::{Input, RebindError, Rebound};
+pub use map::{ActionId, ActionMap, Conflict, Device, MapError, ParityGap};
 pub use names::UnknownName;
 pub use shaping::Deadzone;
