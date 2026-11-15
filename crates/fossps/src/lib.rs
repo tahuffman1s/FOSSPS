@@ -36,6 +36,8 @@ pub mod online;
 pub mod scaffold;
 mod script_game;
 pub mod server;
+#[cfg(feature = "window")]
+mod standin;
 mod tick;
 #[cfg(feature = "window")]
 mod translate;

@@ -544,7 +544,10 @@ impl Game for JoinedGame {
     fn frame(&mut self, frame: &mut Frame) {
         if self.closed.is_some() {
             frame.close();
-        } else if !self.title.is_empty() && self.ticks >= TITLE_EVERY {
+            return;
+        }
+        frame.look_from(self.eye_position(), self.yaw, self.pitch);
+        if !self.title.is_empty() && self.ticks >= TITLE_EVERY {
             self.ticks = 0;
             let [x, y, z] = self.client.view_position();
             frame.set_title(format!(

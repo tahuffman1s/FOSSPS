@@ -35,6 +35,16 @@ pub struct Frame {
     alpha: f32,
     title: Option<String>,
     close: bool,
+    view: Option<View>,
+}
+
+/// Where the world is seen from: the eye's position, then which way it
+/// faces, as [`Frame::look_from`] takes them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct View {
+    pub(crate) position: [f32; 3],
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
 }
 
 impl Frame {
@@ -45,6 +55,7 @@ impl Frame {
             alpha,
             title: None,
             close: false,
+            view: None,
         }
     }
 
@@ -62,6 +73,21 @@ impl Frame {
         self.title = Some(title.into());
     }
 
+    /// Draws the world as seen from `position`, in metres, from this frame
+    /// until it is called again.
+    ///
+    /// `yaw` is which way the eye faces, in radians: 0 looks along -Z and it
+    /// turns left as the number grows. `pitch` is how far it looks up
+    /// (positive) or down. These are the angles the player physics uses. A
+    /// game on a server has no window, so nothing happens there.
+    pub fn look_from(&mut self, position: [f32; 3], yaw: f32, pitch: f32) {
+        self.view = Some(View {
+            position,
+            yaw,
+            pitch,
+        });
+    }
+
     /// Closes the window and ends the game after this frame, as if the
     /// player had closed it. A game on a server has no window, so nothing
     /// happens there.
@@ -73,6 +99,12 @@ impl Frame {
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn closing(&self) -> bool {
         self.close
+    }
+
+    /// Where the game asked the world to be seen from this frame, if it did.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn view(&self) -> Option<View> {
+        self.view
     }
 
     /// The title requested this frame, if any.

@@ -4,14 +4,16 @@ use std::any::Any;
 use std::sync::Arc;
 
 use ash::vk;
+use fossps_assets::Scene;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::camera::Camera;
 use crate::error::RenderError;
 use crate::gpu::Gpu;
+use crate::mesh::{MeshPipeline, Meshes};
 use crate::scene::SceneTarget;
 use crate::swapchain::Swapchain;
 use crate::tonemap::{Then, TonemapPipeline, exposure_scale};
-use crate::triangle::TrianglePipeline;
 
 /// How many frames can be in progress on the graphics card at once.
 ///
@@ -127,7 +129,11 @@ pub struct Renderer {
     /// Which of `frames` the next frame uses.
     next: usize,
     tonemap: Option<TonemapPipeline>,
-    triangle: Option<TrianglePipeline>,
+    mesh: Option<MeshPipeline>,
+    /// The level's meshes on the graphics card; `None` until a scene is set.
+    meshes: Option<Meshes>,
+    /// Where the scene is seen from.
+    camera: Camera,
     /// What the scene is drawn into; the size of the swapchain's images.
     scene: Option<SceneTarget>,
     /// What the scene's light is multiplied by before tone mapping.
@@ -185,7 +191,9 @@ impl Renderer {
             frames,
             next: 0,
             tonemap: None,
-            triangle: None,
+            mesh: None,
+            meshes: None,
+            camera: Camera::default(),
             scene: None,
             exposure: 1.0,
             swapchain: None,
@@ -205,6 +213,42 @@ impl Renderer {
     #[must_use]
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// Draws the meshes of `scene` from now on, in place of any scene set before.
+    ///
+    /// Each mesh is drawn in its material's base colour, with nearer
+    /// surfaces in front of farther ones and the backs of surfaces left out
+    /// unless the material is double-sided. Textures and lights are not
+    /// drawn yet. The meshes are copied to the graphics card here, so call
+    /// this when a level loads, not every frame.
+    ///
+    /// ```no_run
+    /// # fn show(renderer: &mut fossps_render::Renderer) -> Result<(), Box<dyn std::error::Error>> {
+    /// let level = fossps_assets::Scene::load("level.glb")?;
+    /// renderer.set_scene(&level)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails if the graphics card runs out of memory or its driver reports a
+    /// failure. The scene set before is no longer drawn.
+    pub fn set_scene(&mut self, scene: &Scene) -> Result<(), RenderError> {
+        // Frames still being drawn use the old meshes.
+        // SAFETY: the device is alive for as long as `self.gpu` is.
+        unsafe { self.gpu.device().device_wait_idle() }
+            .map_err(RenderError::driver("waiting for the graphics card"))?;
+        // Dropped first, so the old and new meshes are never both held.
+        self.meshes = None;
+        self.meshes = Some(Meshes::new(&self.gpu, scene)?);
+        Ok(())
+    }
+
+    /// Sets where the scene is seen from, from the next frame on.
+    pub fn set_camera(&mut self, camera: Camera) {
+        self.camera = camera;
     }
 
     /// Makes the whole picture brighter or darker, in camera stops.
@@ -278,8 +322,8 @@ impl Renderer {
         // replaced before anything else can fail, because a swapchain that
         // has been replaced once must not be offered for replacement again.
         self.swapchain = Some(swapchain);
-        if self.triangle.is_none() {
-            self.triangle = Some(TrianglePipeline::new(&self.gpu, SceneTarget::FORMAT)?);
+        if self.mesh.is_none() {
+            self.mesh = Some(MeshPipeline::new(&self.gpu)?);
         }
         if self
             .tonemap
@@ -301,7 +345,7 @@ impl Renderer {
             if let Some(tonemap) = &self.tonemap {
                 // SAFETY: the view is the new scene's, which is stored next to
                 // the pipeline and replaced only here; the card is idle.
-                unsafe { tonemap.read_from(scene.view) };
+                unsafe { tonemap.read_from(scene.colour.view) };
             }
             self.scene = Some(scene);
         }
@@ -315,8 +359,8 @@ impl Renderer {
             // `rebuild` found no area to draw into.
             return Ok(Drawn::No);
         }
-        let (Some(swapchain), Some(triangle), Some(tonemap), Some(scene)) =
-            (&self.swapchain, &self.triangle, &self.tonemap, &self.scene)
+        let (Some(swapchain), Some(mesh), Some(tonemap), Some(scene)) =
+            (&self.swapchain, &self.mesh, &self.tonemap, &self.scene)
         else {
             return Ok(Drawn::No);
         };
@@ -367,7 +411,10 @@ impl Renderer {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .map_err(RenderError::driver("recording a frame"))?;
-            triangle.record(slot.commands, scene.image, scene.view, scene.extent);
+            let clip_from_world = self
+                .camera
+                .clip_from_world(scene.extent.width, scene.extent.height);
+            mesh.record(slot.commands, scene, &clip_from_world, self.meshes.as_ref());
             tonemap.record(
                 slot.commands,
                 target.image,

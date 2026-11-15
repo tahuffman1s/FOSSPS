@@ -731,6 +731,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "ctrlc",
+ "fossps-assets",
  "fossps-input",
  "fossps-net",
  "fossps-physics",
@@ -803,6 +804,7 @@ version = "0.0.0"
 dependencies = [
  "ash",
  "ash-window",
+ "fossps-assets",
  "log",
  "naga",
  "raw-window-handle",
