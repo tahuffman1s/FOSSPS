@@ -12,6 +12,7 @@
 //!   Game.fpk        the game's files
 //!   Game.png        the game's icon, if the game folder has an icon.png
 //!   Game.desktop    for adding the game to the applications menu
+//!   licenses/       the licence of the font the program draws text in
 //! ```
 
 use std::fmt;
@@ -26,6 +27,12 @@ use fossps_pack::{EXTENSION, PackError, Source};
 use fossps_script::ENTRY_SCRIPT;
 
 use crate::scaffold::TYPES_FILE;
+
+/// The font the program draws HUD and menu text in is built into it, and its
+/// licence asks to travel with every copy. The licences of the rest of what
+/// is built in are still to come (#200).
+const FONT_LICENSE: &str = include_str!("../../fossps-render/fonts/OFL.txt");
+const FONT_LICENSE_FILE: &str = "licenses/AtkinsonHyperlegibleNext-OFL.txt";
 
 /// The folder inside a game's folder that packages are written to.
 pub const OUT_FOLDER: &str = "dist";
@@ -433,6 +440,22 @@ fn write_archive(out: &Path, parts: &LinuxParts<'_>) -> Result<(), PackageError>
     )
     .map_err(&writing)?;
 
+    let mut header = entry_header(tar::EntryType::Directory, 0, 0o755, time);
+    tar.append_data(&mut header, format!("{folder}/licenses/"), io::empty())
+        .map_err(&writing)?;
+    let mut header = entry_header(
+        tar::EntryType::Regular,
+        FONT_LICENSE.len() as u64,
+        0o644,
+        time,
+    );
+    tar.append_data(
+        &mut header,
+        format!("{folder}/{FONT_LICENSE_FILE}"),
+        FONT_LICENSE.as_bytes(),
+    )
+    .map_err(&writing)?;
+
     tar.into_inner()
         .and_then(GzEncoder::finish)
         .and_then(|mut file| file.flush())
@@ -642,7 +665,14 @@ mod tests {
                 "Zombie-Night/Zombie-Night",
                 "Zombie-Night/Zombie-Night.desktop",
                 "Zombie-Night/Zombie-Night.fpk",
+                "Zombie-Night/licenses/",
+                "Zombie-Night/licenses/AtkinsonHyperlegibleNext-OFL.txt",
             ]
+        );
+        let (_, license) = &entries["Zombie-Night/licenses/AtkinsonHyperlegibleNext-OFL.txt"];
+        assert!(
+            String::from_utf8_lossy(license).contains("SIL OPEN FONT LICENSE Version 1.1"),
+            "the font's licence travels with the program it is built into"
         );
         let (mode, program) = &entries["Zombie-Night/Zombie-Night"];
         assert_eq!(*mode, 0o755, "the program can be run as unpacked");

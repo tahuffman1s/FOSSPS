@@ -5,13 +5,17 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 use fossps_assets::Scene;
+use fossps_ui::DrawList;
 
 use crate::camera::Camera;
 use crate::error::RenderError;
+use crate::font::Font;
 use crate::gpu::Gpu;
 use crate::mesh::{MeshPipeline, Meshes};
+use crate::overlay::Overlay;
 use crate::swapchain::COLOUR;
-use crate::tonemap::{Then, TonemapPipeline};
+use crate::tonemap::{Canvas, Then, TonemapPipeline};
+use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
 
@@ -60,6 +64,9 @@ impl FrameTime {
 pub struct Headless {
     // Dropped top to bottom after `drop` has destroyed the raw handles: the
     // tone mapping before the picture it reads, the graphics card last.
+    ui: UiPass,
+    /// The HUD and menus drawn over each frame.
+    overlay: Overlay,
     tonemap: TonemapPipeline,
     mesh: MeshPipeline,
     meshes: Option<Meshes>,
@@ -122,6 +129,7 @@ impl Headless {
         let view = SceneView::new(&gpu, extent, upscaling)?;
         let mesh = MeshPipeline::new(&gpu, 1)?;
         let tonemap = TonemapPipeline::new(&gpu, FORMAT)?;
+        let ui = UiPass::new(&gpu, FORMAT, 1)?;
         // SAFETY: the picture is `view`'s, which lives as long as `tonemap`
         // does, and nothing is being drawn yet.
         unsafe { tonemap.read_from(view.picture()) };
@@ -149,6 +157,8 @@ impl Headless {
             finished,
         } = raw;
         Ok(Self {
+            ui,
+            overlay: Overlay::new(Font::bundled()),
             tonemap,
             mesh,
             meshes: None,
@@ -192,6 +202,12 @@ impl Headless {
         Ok(())
     }
 
+    /// Draws `list` over every frame from now on, as
+    /// [`Renderer::set_ui`](crate::Renderer::set_ui) does.
+    pub fn set_ui(&mut self, list: DrawList<'_>) {
+        self.overlay.set(list);
+    }
+
     /// Draws one frame as `camera` sees it, waits until the graphics card
     /// has finished it, and says how long each half took.
     ///
@@ -224,12 +240,16 @@ impl Headless {
                 camera,
                 FRAME_SECONDS,
             )?;
+            self.ui.prepare(self.commands, 0, &mut self.overlay)?;
             self.tonemap.record(
                 self.commands,
-                self.image,
-                self.image_view,
-                self.extent,
+                Canvas {
+                    image: self.image,
+                    view: self.image_view,
+                    extent: self.extent,
+                },
                 1.0,
+                Some(&self.ui),
                 Then::Copy,
             );
             device
@@ -388,7 +408,21 @@ mod tests {
         // With nothing to draw, and then with a scene.
         headless.render(&Camera::default()).unwrap();
         headless.set_scene(&Scene::default()).unwrap();
+        // From the second of these frames on, a HUD is drawn over them, and
+        // on the last a menu with letters the graphics card has not seen.
+        let mut ui = fossps_ui::Ui::default();
+        ui.hud_text(fossps_ui::Anchor::BottomRight, [0.0, 0.0], 32.0, "30 / 90");
+        let menu = ui.add_screen("Paused", |screen| {
+            screen.button("Resume");
+        });
         for step in 0..4_u8 {
+            if step == 3 {
+                ui.open(menu.clone().unwrap()).unwrap();
+            }
+            if step > 0 {
+                ui.update(&fossps_ui::UiInput::default(), 1.0 / 60.0, [96, 64]);
+                headless.set_ui(ui.draw());
+            }
             let camera = Camera {
                 yaw: f32::from(step) * 0.1,
                 ..Camera::default()

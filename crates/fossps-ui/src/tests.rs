@@ -1140,3 +1140,28 @@ fn ids_from_a_refused_screen_never_name_a_later_widget() {
     ui.set_toggle(stale.unwrap(), true).unwrap();
     assert_eq!(ui.value(fresh.unwrap()), Some(Value::Toggle(false)));
 }
+
+#[test]
+fn a_buffer_holds_several_lists_in_order_with_their_own_words() {
+    let mut hud = Ui::default();
+    hud.hud_text(Anchor::BottomRight, [0.0, 0.0], 32.0, "30 / 90");
+    idle(&mut hud);
+    let (mut menu, _) = buttons(&["Resume", "Quit"]);
+    idle(&mut menu);
+
+    let mut buffer = crate::DrawBuffer::default();
+    buffer.add(hud.draw());
+    buffer.add(menu.draw());
+    let expected: Vec<Draw<'_>> = hud.draw().iter().chain(menu.draw().iter()).collect();
+    assert_eq!(buffer.draw().iter().collect::<Vec<_>>(), expected);
+    assert!(
+        expected
+            .iter()
+            .any(|draw| matches!(draw, Draw::Text { text: "Quit", .. }))
+    );
+
+    buffer.clear();
+    assert!(buffer.draw().is_empty());
+    buffer.add(menu.draw());
+    assert_eq!(buffer.draw().len(), menu.draw().len());
+}

@@ -76,7 +76,7 @@ mod theme;
 mod ui;
 
 pub use build::ScreenBuilder;
-pub use draw::{Draw, DrawIter, DrawList};
+pub use draw::{Draw, DrawBuffer, DrawIter, DrawList};
 pub use error::UiError;
 pub use input::{Direction, InputMode, UiInput};
 pub use node::{Anchor, ScreenId, WidgetId};

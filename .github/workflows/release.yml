@@ -119,6 +119,7 @@ jobs:
           sed "s/@VERSION@/$VERSION/g" .github/release/README.txt > "dist/$folder/README.txt"
           cp LICENSE-MIT LICENSE-APACHE "dist/$folder/"
           cp crates/fossps-fsr/vendor/FidelityFX-SDK/LICENSE.txt "dist/$folder/licenses/FidelityFX-SDK.txt"
+          cp crates/fossps-render/fonts/OFL.txt "dist/$folder/licenses/AtkinsonHyperlegibleNext-OFL.txt"
           cd dist
           if [ "$ARCHIVE" = zip ]; then
             7z a -tzip "fossps-$SYSTEM.zip" "$folder"

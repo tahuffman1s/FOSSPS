@@ -194,6 +194,7 @@ pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
         scroll: 0.0,
         last_frame: Instant::now(),
         last_view: None,
+        ui: fossps_ui::DrawBuffer::default(),
         error: None,
     };
     event_loop.run_app(&mut app).map_err(AppError::EventLoop)?;
@@ -225,6 +226,9 @@ struct App<G> {
     last_frame: Instant,
     /// Where the game was last seen from, to notice the view jumping.
     last_view: Option<[f32; 3]>,
+    /// The HUD and menus the game asked for this frame. Kept from frame to
+    /// frame so that gathering them stops asking for memory.
+    ui: fossps_ui::DrawBuffer,
     /// A failure from inside the event loop, reported once it exits.
     error: Option<AppError>,
 }
@@ -349,8 +353,17 @@ impl<G: Game> App<G> {
             self.game.tick(self.input.tick(), step);
         }
 
-        let mut frame = Frame::new(self.clock.alpha());
+        let screen = self.window.as_ref().map(|window| {
+            let size = window.inner_size();
+            [size.width, size.height]
+        });
+        let mut frame =
+            Frame::new(self.clock.alpha()).for_window(screen, std::mem::take(&mut self.ui));
         self.game.frame(&mut frame);
+        self.ui = frame.take_ui();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_ui(self.ui.draw());
+        }
         if let (Some(view), Some(renderer)) = (frame.view(), &mut self.renderer) {
             let camera = Camera {
                 position: view.position,

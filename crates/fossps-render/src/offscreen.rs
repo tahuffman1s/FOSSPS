@@ -9,13 +9,17 @@ use std::sync::Arc;
 
 use ash::vk;
 use fossps_assets::{Instance, Material, Mesh, MeshPart, Scene, Transform};
+use fossps_ui::{Anchor, Color, Draw, DrawList, Theme, Ui, UiInput};
 
 use crate::camera::Camera;
 use crate::error::RenderError;
+use crate::font::Font;
 use crate::gpu::{Gpu, validation_errors};
 use crate::mesh::{MeshPipeline, Meshes};
+use crate::overlay::Overlay;
 use crate::swapchain::COLOUR;
-use crate::tonemap::{Then, TonemapPipeline, exposure_scale};
+use crate::tonemap::{Canvas, Then, TonemapPipeline, exposure_scale};
+use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
 
@@ -222,10 +226,13 @@ fn frames(
                 .unwrap();
             tonemap.record(
                 commands,
-                image,
-                view,
-                extent,
+                Canvas {
+                    image,
+                    view,
+                    extent,
+                },
                 exposure_scale(stops),
+                None,
                 Then::Copy,
             );
             device.cmd_copy_image_to_buffer(
@@ -798,5 +805,370 @@ fn a_scene_drawn_small_is_upscaled_to_a_sharp_full_size_picture() {
         "smoothing the edges should be closer to ideal than leaving them jagged"
     );
 
+    finish(gpu);
+}
+
+/// The size of the pictures the HUD and menus are drawn over in these
+/// tests: a quarter of 1920 by 1080, so a UI size of 4 is one pixel.
+const WIDE: u32 = 480;
+const HIGH: u32 = 270;
+
+/// Draws an empty scene once for each of `lists`, one frame after another,
+/// into `WIDE` by `HIGH` images of `format` with that list drawn over it,
+/// and returns each frame's RGBA pixels.
+fn overlaid(gpu: &Arc<Gpu>, format: vk::Format, lists: &[DrawList<'_>]) -> Vec<Vec<u8>> {
+    let device = gpu.device();
+    let extent = vk::Extent2D {
+        width: WIDE,
+        height: HIGH,
+    };
+    let bytes = u64::from(WIDE * HIGH * 4);
+    let mut scene_view = SceneView::new(gpu, extent, Upscaling::Off).unwrap();
+    let mesh = MeshPipeline::new(gpu, 1).unwrap();
+    let tonemap = TonemapPipeline::new(gpu, format).unwrap();
+    let mut ui = UiPass::new(gpu, format, 1).unwrap();
+    let mut overlay = Overlay::new(Font::bundled());
+    let whole = vk::ImageSubresourceLayers {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        mip_level: 0,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    let mut shots = Vec::new();
+
+    // SAFETY: every object is created on the live device from valid settings,
+    // used only by the submissions below, each of which is waited for, and
+    // destroyed once the last has finished.
+    unsafe {
+        let mut picture = crate::scene::Picture::null();
+        picture
+            .create(
+                gpu,
+                extent,
+                format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                COLOUR,
+            )
+            .unwrap();
+        let (buffer, buffer_memory) = readback(gpu, bytes);
+        let pool = device
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default().queue_family_index(gpu.queue_family()),
+                None,
+            )
+            .unwrap();
+        let commands = device
+            .allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .command_buffer_count(1),
+            )
+            .unwrap()[0];
+        let fence = device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .unwrap();
+        tonemap.read_from(scene_view.picture());
+
+        for list in lists {
+            overlay.set(*list);
+            device
+                .reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
+                .unwrap();
+            device
+                .begin_command_buffer(commands, &vk::CommandBufferBeginInfo::default())
+                .unwrap();
+            scene_view
+                .record(commands, 0, &mesh, None, &Camera::default(), 1.0 / 60.0)
+                .unwrap();
+            ui.prepare(commands, 0, &mut overlay).unwrap();
+            tonemap.record(
+                commands,
+                Canvas {
+                    image: picture.image,
+                    view: picture.view,
+                    extent,
+                },
+                1.0,
+                Some(&ui),
+                Then::Copy,
+            );
+            device.cmd_copy_image_to_buffer(
+                commands,
+                picture.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[vk::BufferImageCopy::default()
+                    .image_subresource(whole)
+                    .image_extent(extent.into())],
+            );
+            device.end_command_buffer(commands).unwrap();
+            device.reset_fences(&[fence]).unwrap();
+            let buffers = [vk::CommandBufferSubmitInfo::default().command_buffer(commands)];
+            device
+                .queue_submit2(
+                    gpu.queue(),
+                    &[vk::SubmitInfo2::default().command_buffer_infos(&buffers)],
+                    fence,
+                )
+                .unwrap();
+            device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
+            shots.push(read(gpu, buffer_memory, bytes));
+        }
+
+        device.destroy_fence(fence, None);
+        device.destroy_command_pool(pool, None);
+        device.destroy_buffer(buffer, None);
+        device.free_memory(buffer_memory, None);
+        picture.destroy(gpu);
+    }
+    shots
+}
+
+/// The red, green and blue of the pixel at `x`, `y` of an `overlaid` picture.
+fn wide_pixel(pixels: &[u8], x: f32, y: f32) -> [u8; 3] {
+    let start = ((y as u32 * WIDE + x as u32) * 4) as usize;
+    [pixels[start], pixels[start + 1], pixels[start + 2]]
+}
+
+/// Whether two colours are the same to within what rounding can do.
+fn close(one: [u8; 3], other: [u8; 3]) -> bool {
+    one.iter()
+        .zip(other)
+        .all(|(one, other)| one.abs_diff(other) <= 2)
+}
+
+/// A colour as the bytes a picture stores it in.
+fn bytes(color: Color) -> [u8; 3] {
+    [color.r, color.g, color.b].map(|part| (part * 255.0).round() as u8)
+}
+
+/// A UI updated for a `WIDE` by `HIGH` picture.
+fn updated(mut ui: Ui) -> Ui {
+    ui.set_text_measure(Box::new(Font::bundled()));
+    ui.update(&UiInput::default(), 1.0 / 60.0, [WIDE, HIGH]);
+    ui
+}
+
+/// The place and size of the first box in `ui` drawn in `color`.
+fn box_of(ui: &Ui, color: Color) -> ([f32; 2], [f32; 2]) {
+    ui.draw()
+        .iter()
+        .find_map(|draw| match draw {
+            Draw::Rect {
+                position,
+                size,
+                color: found,
+                ..
+            } if found == color => Some((position, size)),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// The place and height of the line of `words` in `ui`.
+fn line_of(ui: &Ui, words: &str) -> ([f32; 2], f32) {
+    ui.draw()
+        .iter()
+        .find_map(|draw| match draw {
+            Draw::Text {
+                position,
+                size,
+                text,
+                ..
+            } if text == words => Some((position, size)),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// How many pixels of the box at `position` of `size` are nearly `color`.
+fn count_of(pixels: &[u8], position: [f32; 2], size: [f32; 2], color: [u8; 3]) -> usize {
+    let (left, top) = (position[0].floor() as u32, position[1].floor() as u32);
+    let (right, bottom) = (
+        ((position[0] + size[0]).ceil() as u32).min(WIDE),
+        ((position[1] + size[1]).ceil() as u32).min(HIGH),
+    );
+    (top..bottom)
+        .flat_map(|y| (left..right).map(move |x| (x, y)))
+        .filter(|&(x, y)| close(wide_pixel(pixels, x as f32, y as f32), color))
+        .count()
+}
+
+/// The formats a window's images come in: with the sRGB curve built in,
+/// which is what the renderer asks a window for, and without.
+const WINDOW_FORMATS: [vk::Format; 2] = [vk::Format::R8G8B8A8_SRGB, vk::Format::R8G8B8A8_UNORM];
+
+#[test]
+fn the_hud_is_drawn_over_the_picture_in_the_colours_it_asked_for() {
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let orange = Color::rgb(1.0, 0.5, 0.0);
+    let glass = Color::rgba(1.0, 1.0, 1.0, 0.5);
+    let ink = Color::rgb(0.2, 0.9, 0.4);
+
+    let mut hud = Ui::default();
+    hud.hud_rect(Anchor::TopLeft, [0.0, 0.0], [400.0, 200.0], orange);
+    hud.hud_rect(Anchor::TopRight, [0.0, 0.0], [400.0, 200.0], glass);
+    let words = hud.hud_text(Anchor::BottomLeft, [0.0, 0.0], 200.0, "HUD 100");
+    hud.set_color(words, ink).unwrap();
+    let hud = updated(hud);
+
+    for format in WINDOW_FORMATS {
+        let shots = overlaid(&gpu, format, &[Ui::default().draw(), hud.draw()]);
+        // With nothing to draw over it, the picture is the scene's alone.
+        assert!(
+            shots[0]
+                .chunks(4)
+                .all(|rgba| is_background([rgba[0], rgba[1], rgba[2]])),
+            "{format:?}"
+        );
+        let shot = &shots[1];
+
+        // A solid box is exactly its colour, whichever way the image stores
+        // colours, and exactly where the UI put it: a quarter of the sizes
+        // asked for, inside the safe area.
+        let (at, size) = box_of(&hud, orange);
+        assert_eq!(size, [100.0, 50.0]);
+        let middle = wide_pixel(shot, at[0] + 50.0, at[1] + 25.0);
+        assert!(close(middle, [255, 128, 0]), "{format:?}: {middle:?}");
+        assert_eq!(
+            count_of(shot, at, size, [255, 128, 0]),
+            100 * 50,
+            "{format:?}"
+        );
+        for (x, y) in [
+            (at[0] - 2.0, at[1] + 25.0),
+            (at[0] + 102.0, at[1] + 25.0),
+            (at[0] + 50.0, at[1] - 2.0),
+            (at[0] + 50.0, at[1] + 52.0),
+        ] {
+            let outside = wide_pixel(shot, x, y);
+            assert!(is_background(outside), "{format:?}: {x},{y} is {outside:?}");
+        }
+
+        // A see-through box lets the dark scene through: grey, not white.
+        let (at, _) = box_of(&hud, glass);
+        let [red, green, blue] = wide_pixel(shot, at[0] + 50.0, at[1] + 25.0);
+        assert!(
+            (100..=200).contains(&red) && red.abs_diff(green) < 12 && blue >= red,
+            "{format:?}: {red},{green},{blue}"
+        );
+
+        // Text is letters in its colour on the scene, inside its line: some
+        // of the line is ink, most is not, and none of it strays.
+        let (at, height) = line_of(&hud, "HUD 100");
+        assert_eq!(height, 50.0);
+        let width = fossps_ui::TextMeasure::width(&Font::bundled(), "HUD 100", height);
+        let inked = count_of(shot, at, [width, height], bytes(ink));
+        let area = (width * height) as usize;
+        assert!(
+            inked > area / 12 && inked < area / 2,
+            "{format:?}: {inked} of {area} pixels are ink"
+        );
+        let everywhere = count_of(shot, [0.0, 0.0], [WIDE as f32, HIGH as f32], bytes(ink));
+        assert_eq!(everywhere, inked, "{format:?}: ink outside the line");
+        // The left edge of the "H" is a straight stem at the start of the line.
+        let stem = (0..12).any(|step| {
+            close(
+                wide_pixel(shot, at[0] + step as f32, at[1] + height / 2.0),
+                bytes(ink),
+            )
+        });
+        assert!(stem, "{format:?}: no letter at the start of the line");
+    }
+    finish(gpu);
+}
+
+#[test]
+fn a_menu_has_round_corners_and_new_letters_reach_the_graphics_card() {
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    // Corners a twelfth of the picture's height, so they can be seen.
+    let theme = Theme {
+        corner: 88.0,
+        // Wide enough that the label is clear of the corners.
+        button_width: 1200.0,
+        row_height: 240.0,
+        text_size: 120.0,
+        ..Theme::default()
+    };
+    let mut hud = Ui::new(theme.clone());
+    hud.hud_text(Anchor::BottomLeft, [0.0, 0.0], 100.0, "abc");
+    let hud = updated(hud);
+    let mut menu = Ui::new(theme.clone());
+    let screen = menu
+        .add_screen("", |screen| {
+            screen.button("Quit");
+        })
+        .unwrap();
+    menu.open(screen).unwrap();
+    let menu = updated(menu);
+
+    for format in WINDOW_FORMATS {
+        // The second frame draws letters the first did not have.
+        let shots = overlaid(&gpu, format, &[hud.draw(), menu.draw()]);
+        let shot = &shots[1];
+        let button = bytes(theme.widget_selected);
+        let (at, size) = box_of(&menu, theme.widget_selected);
+        let radius = 22.0;
+        assert!(size[0] > 3.0 * radius && size[1] > 2.0 * radius, "{size:?}");
+
+        // The middle of each side is the button, right up to the edge.
+        for (x, y) in [
+            (at[0] + size[0] / 2.0, at[1] + 1.0),
+            (at[0] + size[0] / 2.0, at[1] + size[1] - 2.0),
+            (at[0] + 1.0, at[1] + size[1] / 2.0),
+            (at[0] + size[0] - 2.0, at[1] + size[1] / 2.0),
+        ] {
+            let side = wide_pixel(shot, x, y);
+            assert!(close(side, button), "{format:?}: {x},{y} is {side:?}");
+        }
+        // Each corner of its box is not: the corner is cut round. Where the
+        // round corner ends, it is the button again.
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let corner = [
+                at[0] + 2.0 + x * (size[0] - 5.0),
+                at[1] + 2.0 + y * (size[1] - 5.0),
+            ];
+            let cut = wide_pixel(shot, corner[0], corner[1]);
+            assert!(!close(cut, button), "{format:?}: corner {x},{y} is square");
+            let inside = [
+                at[0] + radius + x * (size[0] - 2.0 * radius - 1.0),
+                at[1] + radius + y * (size[1] - 2.0 * radius - 1.0),
+            ];
+            let filled = wide_pixel(shot, inside[0], inside[1]);
+            assert!(
+                close(filled, button),
+                "{format:?}: {inside:?} is {filled:?}"
+            );
+        }
+        // The edge of the round corner is soft: between the button's colour
+        // and what is behind it there are in-between pixels.
+        let corner_box = ([at[0], at[1]], [radius, radius]);
+        let solid = count_of(shot, corner_box.0, corner_box.1, button);
+        assert!(
+            solid > 250 && solid < 22 * 22 - 60,
+            "{format:?}: {solid} solid pixels in a round corner"
+        );
+
+        // "Quit" was not in the first frame's letters, and is drawn.
+        let (at, height) = line_of(&menu, "Quit");
+        let width = fossps_ui::TextMeasure::width(&Font::bundled(), "Quit", height);
+        let inked = count_of(shot, at, [width, height], bytes(theme.text_selected));
+        let area = (width * height) as usize;
+        assert!(
+            inked > area / 12 && inked < area / 2,
+            "{format:?}: {inked} of {area} pixels of \"Quit\" are ink"
+        );
+        // And it is in the middle of its button, as the real widths say.
+        let centre = at[0] + width / 2.0;
+        let (button_at, button_size) = box_of(&menu, theme.widget_selected);
+        assert!(
+            (centre - (button_at[0] + button_size[0] / 2.0)).abs() < 1.5,
+            "{format:?}: the label is off centre"
+        );
+    }
     finish(gpu);
 }

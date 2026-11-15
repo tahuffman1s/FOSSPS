@@ -15,6 +15,10 @@ raw-window-handle = { version = "0.6", features = ["std"] }
 log = "0.4"
 # The scenes the renderer draws. Without its image decoders until textures are drawn.
 fossps-assets = { path = "../fossps-assets", default-features = false }
+# The list of boxes and text the HUD and menus ask for, and the trait text is measured through.
+fossps-ui = { path = "../fossps-ui" }
+# Turns the font's outlines into pixels for HUD and menu text. Pure Rust.
+fontdue = { version = "0.9", default-features = false, features = ["std"] }
 # FSR 3.1 upscaling, built from source.
 fossps-fsr = { path = "../fossps-fsr" }
 

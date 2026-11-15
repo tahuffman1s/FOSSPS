@@ -106,6 +106,74 @@ impl<'a> IntoIterator for DrawList<'a> {
     }
 }
 
+/// Draw lists gathered for one frame, in the order they were added.
+///
+/// A game may have more than one [`Ui`](crate::Ui): a HUD, a menu, a
+/// scoreboard. Each gives its own [`DrawList`]; a buffer holds copies of
+/// them one after the other, so the later ones are drawn on top.
+///
+/// ```
+/// use fossps_ui::{Anchor, DrawBuffer, Ui, UiInput};
+///
+/// let mut hud = Ui::default();
+/// hud.hud_text(Anchor::BottomRight, [0.0, 0.0], 32.0, "30 / 90");
+/// hud.update(&UiInput::default(), 1.0 / 60.0, [1920, 1080]);
+///
+/// let mut frame = DrawBuffer::default();
+/// frame.add(hud.draw());
+/// assert_eq!(frame.draw().len(), hud.draw().len());
+///
+/// // The next frame starts empty, and keeps the memory it has.
+/// frame.clear();
+/// assert!(frame.draw().is_empty());
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct DrawBuffer {
+    commands: Vec<Command>,
+    text: String,
+}
+
+impl DrawBuffer {
+    /// Forgets everything added. The memory is kept, so a buffer that is
+    /// cleared and filled every frame stops asking for more.
+    pub fn clear(&mut self) {
+        self.commands.clear();
+        self.text.clear();
+    }
+
+    /// Adds a copy of `list`, to be drawn on top of what was added before.
+    pub fn add(&mut self, list: DrawList<'_>) {
+        let shift = self.text.len();
+        self.text.push_str(list.text);
+        self.commands
+            .extend(list.commands.iter().map(|command| match *command {
+                Command::Text {
+                    position,
+                    size,
+                    color,
+                    start,
+                    end,
+                } => Command::Text {
+                    position,
+                    size,
+                    color,
+                    start: start + shift,
+                    end: end + shift,
+                },
+                rect @ Command::Rect { .. } => rect,
+            }));
+    }
+
+    /// Everything added since the last [`clear`](Self::clear), back to front.
+    #[must_use]
+    pub fn draw(&self) -> DrawList<'_> {
+        DrawList {
+            commands: &self.commands,
+            text: &self.text,
+        }
+    }
+}
+
 /// Walks a [`DrawList`] back to front.
 #[derive(Debug, Clone)]
 pub struct DrawIter<'a> {
