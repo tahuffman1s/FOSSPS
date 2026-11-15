@@ -120,6 +120,16 @@ struct PlayerRef(PlayerId);
 #[derive(Clone, Copy)]
 struct TeamRef(TeamId);
 
+/// The player a script value stands for, if it is a player.
+pub(crate) fn player_id(value: &AnyUserData) -> Option<PlayerId> {
+    value.borrow::<PlayerRef>().ok().map(|player| player.0)
+}
+
+/// Whether a script value is a team.
+pub(crate) fn is_team(value: &AnyUserData) -> bool {
+    value.is::<TeamRef>()
+}
+
 fn shared_of(lua: &Lua) -> mlua::Result<Rc<Shared>> {
     lua.app_data_ref::<Rc<Shared>>()
         .map(|shared| Rc::clone(&shared))

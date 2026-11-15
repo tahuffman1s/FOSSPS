@@ -81,6 +81,7 @@
     <tbody>
       <tr><td><code>game.mode { … }</code></td><td>Sets up the match: teams, the score to win, the time limit, how long the dead wait.</td></tr>
       <tr><td><code>game.onStart</code>, <code>game.onTick</code>, <code>game.onReload</code></td><td>Run your code when the game starts, 60 times a second, and when the script is saved.</td></tr>
+      <tr><td><code>game.keep("saved", { best = 0 })</code></td><td>Gives a table that keeps what you put in it when the script is saved and reloads; everything else in the file starts over. It holds numbers, text, true and false, players, and tables of those, until the game is closed.</td></tr>
       <tr><td><code>game.onPlayerJoin</code>, <code>game.onPlayerLeave</code>, <code>game.onSpawn</code>, <code>game.onKill</code></td><td>Run your code when something happens to a player.</td></tr>
       <tr><td><code>game.onRoundStart</code>, <code>game.onRoundEnd</code></td><td>Run your code when a round starts and when it is won.</td></tr>
       <tr><td><code>game.players()</code>, <code>game.teams()</code>, <code>game.team("Red")</code></td><td>Who is in the match. A team has a <code>name</code> and a <code>score</code>, and <code>team:addScore(1)</code> changes it.</td></tr>

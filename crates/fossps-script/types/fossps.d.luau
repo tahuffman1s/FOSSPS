@@ -78,9 +78,34 @@ declare game: {
     onTick: (handler: (step: number) -> ()) -> (),
 
     --- Calls `handler` each time this file is saved and loaded again while
-    --- the game is running. Variables in the file start over on a reload.
+    --- the game is running. Variables in the file start over on a reload;
+    --- what is in a `game.keep` table does not.
     --- Example: game.onReload(function() print("New version loaded") end)
     onReload: (handler: () -> ()) -> (),
+
+    --- Gives a table that keeps what you put in it when the script is saved
+    --- and loaded again. Everything else in the file starts over on a
+    --- reload. `name` is how the table is found again, so use the same name
+    --- on every save. `start` is what the table holds the first time; leave
+    --- it out for an empty table. Call it at the top of the file.
+    ---
+    --- Change what is inside the table. `saved = {}` would swap in a new
+    --- table that is not kept (to empty it, write `table.clear(saved)`), and
+    --- `local best = saved.best` copies the number, so write `saved.best`
+    --- where you change it.
+    ---
+    --- A kept table can hold numbers, text, true and false, players, and
+    --- tables of those. A player can be a key: `streaks[player] = 3`.
+    --- Players who left are taken out. Functions and teams are not kept
+    --- (keep `team.name`).
+    ---
+    --- What `start` has and the kept table lacks is added on the next save,
+    --- also something you set to nil; what it already holds is not changed.
+    --- To start a table over, give it a new name or start the game again.
+    --- Nothing is written to a file: kept tables last until the game is
+    --- closed.
+    --- Example: local saved = game.keep("saved", { best = 0 })
+    keep: (<T>(name: string, start: T) -> T) & ((name: string) -> { [any]: any }),
 
     --- Sets up the match: its teams and its numbers. Call it once, near the
     --- top of the file. Every setting can be left out. The script runs on the

@@ -13,6 +13,8 @@ use fossps_script::{ENTRY_SCRIPT, OpenError, ScriptHost};
 thread_local! {
     /// What scripts on this test's thread printed.
     static PRINTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// The errors the engine logged on this test's thread.
+    static ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Collects `print` output per thread, so tests can run side by side.
@@ -26,6 +28,8 @@ impl log::Log for Capture {
     fn log(&self, record: &log::Record<'_>) {
         if record.target() == "script" {
             PRINTED.with_borrow_mut(|lines| lines.push(record.args().to_string()));
+        } else if record.level() == log::Level::Error {
+            ERRORS.with_borrow_mut(|lines| lines.push(record.args().to_string()));
         }
     }
 
@@ -34,6 +38,10 @@ impl log::Log for Capture {
 
 fn printed() -> Vec<String> {
     PRINTED.with_borrow_mut(std::mem::take)
+}
+
+fn errors() -> Vec<String> {
+    ERRORS.with_borrow_mut(std::mem::take)
 }
 
 /// A game folder that is deleted when the test ends.
@@ -915,4 +923,277 @@ fn scripts_given_as_text_require_each_other() {
         error.message.contains("no script called main.luau"),
         "{error}"
     );
+}
+
+#[test]
+fn a_kept_table_is_still_there_after_a_reload() {
+    let script = r#"
+        local saved = game.keep("saved", { jumps = 0, name = "none", list = {}, on = false })
+        local plain = 0
+        game.onTick(function()
+            saved.jumps += 1
+            saved.name = "Ann"
+            saved.on = true
+            saved.half = 0.5
+            table.insert(saved.list, { at = saved.jumps })
+            plain += 1
+            print(saved.jumps, plain, saved.name, saved.on, saved.half, #saved.list,
+                saved.list[#saved.list].at)
+        end)
+        "#;
+    let game = GameFolder::new(script);
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["1 1 Ann true 0.5 1 1", "2 2 Ann true 0.5 2 2"]);
+
+    host.reload().unwrap();
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["3 1 Ann true 0.5 3 3"]);
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+    assert_eq!(errors(), [] as [&str; 0]);
+}
+
+#[test]
+fn a_kept_table_gains_what_the_script_now_starts_with() {
+    let game = GameFolder::new(
+        r#"
+        local saved = game.keep("saved", { best = 1, gone = 5 })
+        saved.best = 7
+        saved.gone = nil
+        "#,
+    );
+    let mut host = game.open();
+    game.write(
+        r#"
+        local saved = game.keep("saved", { best = 0, lives = 3, gone = 5 })
+        print(saved.best, saved.lives, saved.gone)
+        "#,
+    );
+    host.reload().unwrap();
+    assert_eq!(printed(), ["7 3 5"]);
+}
+
+#[test]
+fn a_kept_table_can_be_asked_for_with_no_start_and_from_two_files() {
+    let game = GameFolder::new(
+        r#"
+        local mine = game.keep("counts")
+        local theirs = require("./other")
+        mine.total = (mine.total or 0) + 1
+        print(mine == theirs, theirs.total)
+        "#,
+    );
+    game.write_file(
+        "other.luau",
+        "return game.keep(\"counts\", { extra = true })",
+    );
+    let mut host = game.open();
+    host.reload().unwrap();
+    assert_eq!(printed(), ["true 1", "true 2"]);
+}
+
+#[test]
+fn players_are_kept_as_keys_and_values_while_they_are_in_the_match() {
+    let game = GameFolder::new(
+        r#"
+        local streaks = game.keep("streaks")
+        local saved = game.keep("saved", { last = false })
+        game.onPlayerJoin(function(player)
+            streaks[player] = #player.name
+            saved.last = player
+        end)
+        game.onReload(function()
+            local names = {}
+            for player, streak in streaks do
+                table.insert(names, player.name .. "=" .. streak)
+            end
+            table.sort(names)
+            print(table.concat(names, " "), saved.last and saved.last.name)
+            for _, player in game.players() do
+                print(player.name, streaks[player])
+            end
+        end)
+        "#,
+    );
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    let ann = host.player_joined("Ann");
+    host.player_joined("Bob");
+    host.reload().unwrap();
+    assert_eq!(printed(), ["Ann=3 Bob=3 Bob", "Ann 3", "Bob 3"]);
+
+    // A player who left is not handed back as a key that cannot be read.
+    let cy = host.player_joined("Cyril");
+    host.player_left(ann);
+    host.reload().unwrap();
+    assert_eq!(printed(), ["Bob=3 Cyril=5 Cyril", "Bob 3", "Cyril 5"]);
+    host.player_left(cy);
+    host.reload().unwrap();
+    assert_eq!(printed(), ["Bob=3 false", "Bob 3"]);
+    assert_eq!(errors(), [] as [&str; 0]);
+}
+
+#[test]
+fn what_cannot_be_kept_is_left_out_and_named() {
+    let game = GameFolder::new(
+        r#"
+        game.mode { teams = { "Red", "Blue" } }
+        local saved = game.keep("saved", { best = 4 })
+        game.onStart(function()
+            saved.inner = { call = function() end, fine = 1 }
+            saved.team = game.team("Red")
+            saved["odd key"] = print
+            saved[{}] = 2
+            saved.loop = {}
+            saved.loop.again = saved.loop
+        end)
+        "#,
+    );
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+    host.reload().unwrap();
+    let mut problems = errors();
+    problems.sort();
+    let all = problems.join("\n");
+    assert_eq!(problems.len(), 5, "{all}");
+    assert!(
+        all.contains(
+            "`inner.call` in game.keep(\"saved\") was not kept across the reload: it is a \
+             function. A kept table can hold numbers, text, true and false, players, and \
+             tables of those. Take this out of the table, or keep a name or a number in \
+             its place."
+        ),
+        "{all}"
+    );
+    assert!(
+        all.contains("`team` in game.keep(\"saved\") was not kept across the reload: it is a team. Keep the team's name instead: team.name."),
+        "{all}"
+    );
+    assert!(all.contains("`[\"odd key\"]` in game.keep"), "{all}");
+    assert!(all.contains("its key is a table"), "{all}");
+    assert!(
+        all.contains("A table that holds itself goes on for ever"),
+        "{all}"
+    );
+    assert!(host.last_error().is_none(), "{:?}", host.last_error());
+
+    game.write(
+        r#"
+        local saved = game.keep("saved")
+        local keys = {}
+        for key in saved do table.insert(keys, key) end
+        table.sort(keys)
+        print(table.concat(keys, " "), saved.inner.fine, next(saved.inner, "fine"))
+        "#,
+    );
+    host.reload().unwrap();
+    assert_eq!(printed(), ["best inner loop 1 nil"]);
+    assert_eq!(errors(), [] as [&str; 0]);
+}
+
+#[test]
+fn a_wrong_keep_says_how_to_write_it() {
+    for (script, expected) in [
+        (
+            "local jumps = game.keep(\"jumps\", 0)",
+            "game.keep keeps a table, but it was given a number. A number or text on its \
+             own is copied each time it is used, so a kept one could never change. Put it in \
+             a table and keep the table: local saved = game.keep(\"saved\", { count = 0 }), \
+             then saved.count += 1",
+        ),
+        (
+            "local saved = game.keep({ best = 0 })",
+            "game.keep needs a name in quotes first, but it was given a table.",
+        ),
+        (
+            "for i = 1, 1000 do game.keep(\"table\" .. i) end",
+            "game.keep has been given 256 different names already.",
+        ),
+    ] {
+        let game = GameFolder::new(script);
+        let host = game.open();
+        let error = host
+            .last_error()
+            .unwrap_or_else(|| panic!("`{script}` should fail"));
+        assert_eq!(error.line, Some(1));
+        assert!(error.message.contains(expected), "`{script}`: {error}");
+    }
+}
+
+#[test]
+fn a_save_with_a_mistake_does_not_lose_what_was_kept() {
+    let script = r#"
+        local saved = game.keep("saved", { ticks = 0 })
+        game.onTick(function() saved.ticks += 1; print(saved.ticks) end)
+        "#;
+    let game = GameFolder::new(script);
+    let mut host = game.open();
+    host.tick(&idle(), STEP);
+
+    game.write("local saved = game.keep(\"saved\", { ticks = 0 })\nsaved.ticks = 100\noops()");
+    assert!(host.reload().is_err());
+    host.tick(&idle(), STEP);
+
+    game.write(script);
+    host.reload().unwrap();
+    host.tick(&idle(), STEP);
+    assert_eq!(printed(), ["1", "2", "3"]);
+}
+
+#[test]
+fn a_table_the_script_stops_asking_for_starts_over() {
+    let script = "local saved = game.keep(\"saved\", { n = 0 })\nsaved.n += 1\nprint(saved.n)";
+    let game = GameFolder::new(script);
+    let mut host = game.open();
+    host.reload().unwrap();
+    game.write("print(\"not kept\")");
+    host.reload().unwrap();
+    game.write(script);
+    host.reload().unwrap();
+    assert_eq!(printed(), ["1", "2", "not kept", "1"]);
+}
+
+#[test]
+fn keeping_too_much_is_cut_short_and_said_once() {
+    let game = GameFolder::new(
+        r#"
+        local big = game.keep("big")
+        for i = 1, 150000 do big[i] = i end
+        print(#big)
+        "#,
+    );
+    let mut host = game.open();
+    game.write("local big = game.keep(\"big\")\nprint(#big > 1000, #big < 100000)");
+    host.reload().unwrap();
+    assert_eq!(printed(), ["150000", "true true"]);
+    let problems = errors();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("game.keep ran out of room at the reload"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_kept_table_cannot_carry_anything_but_plain_values_into_the_new_version() {
+    // Whatever a script hangs on a kept table stays behind in the old VM.
+    let game = GameFolder::new(
+        r#"
+        local saved = game.keep("saved", { n = 1 })
+        setmetatable(saved, { __index = function() return "sneaky" end, __iter = error })
+        saved.text = "a\0b\255"
+        "#,
+    );
+    let mut host = game.open();
+    game.write(
+        r#"
+        local saved = game.keep("saved")
+        print(saved.n, getmetatable(saved), saved.other, #saved.text, saved.text == "a\0b\255")
+        "#,
+    );
+    host.reload().unwrap();
+    assert_eq!(printed(), ["1 nil nil 4 true"]);
+    assert_eq!(errors(), [] as [&str; 0]);
 }

@@ -149,26 +149,26 @@ Then open main.luau in an editor, change something and save: the running game up
   <h2 id="change"><span class="n mono">4</span>Change it while it runs</h2>
   <p>Open <code>first-match/main.luau</code> in any text editor: Notepad and Text Editor are fine. Find this line:</p>
   <div class="code">
-    <pre data-finds="main.luau" tabindex="0"><code>        print("Jump number " .. jumps)</code></pre>
+    <pre data-finds="main.luau" tabindex="0"><code>        print("Jump number " .. saved.jumps)</code></pre>
   </div>
   <p>Change the words inside the quotes, and save the file:</p>
   <div class="code">
-    <pre tabindex="0"><code>        print("Boing! That is jump " .. jumps)</code></pre>
+    <pre tabindex="0"><code>        print("Boing! That is jump " .. saved.jumps)</code></pre>
   </div>
   <div class="see">
     <p>You should see</p>
-    <p>The terminal says the game took the new version, without restarting:</p>
+    <p>The terminal says the game took the new version, without restarting. If you had jumped twice:</p>
     <div class="code">
       <pre class="out" tabindex="0"><code>[INFO] Reloaded main.luau.
-[INFO] main.luau was saved and loaded again, so the jump count starts from 0.</code></pre>
+[INFO] main.luau was saved and loaded again. Jumps so far: 2</code></pre>
     </div>
-    <p>Jump in the game, and the terminal now says <code>Boing! That is jump 1</code>.</p>
+    <p>Jump in the game, and the terminal carries on counting: <code>Boing! That is jump 3</code>. The count was not lost because the script keeps it in a <code>game.keep</code> table; everything else in the file starts over on a save.</p>
   </div>
   <p>Now break it on purpose. Change <code>game.onTick</code> to <code>game.onTik</code> and save:</p>
   <div class="code">
-    <pre class="out" data-says="mistake" tabindex="0"><code>[ERROR] Script error in main.luau, line 20:
+    <pre class="out" data-says="mistake" tabindex="0"><code>[ERROR] Script error in main.luau, line 22:
 
-    20 | game.onTik(function(step)
+    22 | game.onTik(function(step)
 
   game.onTik does not exist. Did you mean game.onTick?
   The game keeps running the last version that worked. Fix this and save the file: it reloads by itself.</code></pre>
