@@ -95,11 +95,24 @@ pub struct Config {
     pub upscaling: Upscaling,
     /// The actions the game reads and what they are bound to.
     pub actions: ActionMap,
+    /// The level the game is played in. [`level::load`](crate::level::load)
+    /// reads the `level.glb` in a game's folder. With `None`, the engine's
+    /// stand-in is shown: a chequered floor with a few blocks on it.
+    ///
+    /// ```no_run
+    /// let config = fossps::Config {
+    ///     level: fossps::level::load("my-game".as_ref())?,
+    ///     ..fossps::Config::default()
+    /// };
+    /// # Ok::<(), fossps::level::LevelError>(())
+    /// ```
+    pub level: Option<fossps_assets::Scene>,
 }
 
 impl Default for Config {
     /// A 1280x720 window, 60 ticks per second, vsync on, at most 400 frames
-    /// per second, FSR upscaling at Quality and the standard FPS controls.
+    /// per second, FSR upscaling at Quality, the standard FPS controls and
+    /// no level.
     fn default() -> Self {
         Self {
             title: "FOSSPS".to_owned(),
@@ -110,6 +123,7 @@ impl Default for Config {
             max_fps: 400,
             upscaling: Upscaling::default(),
             actions: ActionMap::default_fps(),
+            level: None,
         }
     }
 }
@@ -437,8 +451,11 @@ impl<G: Game> ApplicationHandler for App<G> {
                 };
                 let renderer = Renderer::new(Rc::clone(&window), size.width, size.height, config)
                     .and_then(|mut renderer| {
-                        // Until levels are loaded from files (#60).
-                        renderer.set_scene(&crate::standin::scene())?;
+                        // The graphics card has its own copy from here on.
+                        match self.config.level.take() {
+                            Some(level) => renderer.set_scene(&level)?,
+                            None => renderer.set_scene(&crate::standin::scene())?,
+                        }
                         renderer.set_grid(self.editing);
                         renderer.set_camera(Camera {
                             position: [0.0, STANDING_EYE, 0.0],

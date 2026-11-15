@@ -13,6 +13,7 @@ use fossps_input::ActionMap;
 use fossps_pack::{EXTENSION, Pack, PackError};
 use fossps_script::ENTRY_SCRIPT;
 
+use crate::scaffold::LEVEL_FILE;
 use crate::script_game::ScriptGame;
 
 /// Where the pack for the program at `program` would be: beside it, with the
@@ -57,6 +58,8 @@ pub struct PackedGame {
     pub name: String,
     /// The game, running the pack's `main.luau`.
     pub game: ScriptGame,
+    /// The pack's `level.glb` as it was packed, if the game has a level.
+    pub level: Option<Vec<u8>>,
 }
 
 /// Why a packaged game could not be opened.
@@ -120,6 +123,9 @@ const SCRIPT_ENDING: &str = ".luau";
 /// Opens the game in the pack at `pack`. The script reads input through
 /// `actions`, which should be the same actions the engine is started with.
 ///
+/// The level is handed over as bytes and not read here, so a server can
+/// open a pack without any level-reading code.
+///
 /// # Errors
 ///
 /// Fails if the pack cannot be read, holds no `main.luau`, or its script has
@@ -150,9 +156,15 @@ pub fn open(pack: &Path, actions: &ActionMap) -> Result<PackedGame, PlayError> {
             file: error.file.clone(),
         });
     }
+    let level = if opened.contains(LEVEL_FILE) {
+        Some(opened.read(LEVEL_FILE)?)
+    } else {
+        None
+    };
     Ok(PackedGame {
         name: opened.name().to_owned(),
         game,
+        level,
     })
 }
 
@@ -246,6 +258,19 @@ mod tests {
         let mut input = fossps_input::Input::new(actions);
         packed.game.tick(input.tick(), 1.0 / 60.0);
         assert!(packed.game.host().last_error().is_none());
+    }
+
+    #[test]
+    fn a_packed_game_hands_over_its_level_as_it_was_packed() {
+        let folder = scratch("level");
+        let without = pack(&folder, &[("main.luau", "")]);
+        let packed = open(&without, &ActionMap::default()).unwrap();
+        assert_eq!(packed.level, None);
+
+        let with = pack(&folder, &[("main.luau", ""), ("level.glb", "the level")]);
+        let packed = open(&with, &ActionMap::default()).unwrap();
+        assert_eq!(packed.level.as_deref(), Some(b"the level".as_slice()));
+        let _ = fs::remove_dir_all(&folder);
     }
 
     #[test]

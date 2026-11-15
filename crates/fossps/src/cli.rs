@@ -68,6 +68,34 @@ pub fn find_game(folder: &Path, command: &str) -> Result<(), String> {
     }
 }
 
+/// Loads the level of the game in `folder`, its `level.glb`, and passes on
+/// what the file's maker should know about it. `None` if the game has no
+/// level of its own, which is said too.
+///
+/// # Errors
+///
+/// Fails with a message for the person if the level is there but cannot be
+/// loaded.
+#[cfg(feature = "window")]
+pub fn load_level(folder: &Path) -> Result<Option<fossps_assets::Scene>, String> {
+    use crate::level::LEVEL_FILE;
+
+    let level = crate::level::load(folder).map_err(|error| error.to_string())?;
+    match &level {
+        Some(level) => {
+            for warning in &level.warnings {
+                log::warn!("{LEVEL_FILE}: {warning}");
+            }
+        }
+        None => log::info!(
+            "This game has no {LEVEL_FILE}, so it is shown the engine's test floor. To give \
+             it a level, export one from Blender or another 3D tool as glTF Binary (.glb) \
+             and save it as {LEVEL_FILE} in the game's folder."
+        ),
+    }
+    Ok(level)
+}
+
 /// Checks that `folder` is a folder, or says what a command wants instead.
 fn is_folder(folder: &Path) -> Result<(), String> {
     if folder.is_file() {

@@ -1,11 +1,11 @@
 # {name}
 
-A multiplayer FPS game made with [FOSSPS](https://github.com/tahuffman1s/FOSSPS). The whole game is one Luau script, `main.luau`.
+A multiplayer FPS game made with [FOSSPS](https://github.com/tahuffman1s/FOSSPS). The game is a Luau script, `main.luau`, and a level, `level.glb`.
 
 ## Commands
 
 ```sh
-fossps check    # run main.luau without a window; exits non-zero and prints the error if it has a mistake
+fossps check    # run main.luau and load level.glb without a window; exits non-zero and prints the error if either has a mistake
 fossps run      # play the game in a window (a person has to look at it and close it)
 fossps package  # write a download for players to dist/ (Linux only so far); refuses a script with a mistake
 ```
@@ -29,6 +29,7 @@ Do not start `fossps run` yourself unless asked: it opens a window and does not 
 - `print()` goes to the terminal, not the window.
 - Variables at the top of the file start over every time the file is saved and reloaded. To keep values across a reload, put them in a table from `game.keep`: `local saved = game.keep("saved", { best = 0 })`, then `saved.best += 1`. Change what is inside the table; `saved = {}` would replace it with a table that is not kept (empty it with `table.clear(saved)`), and `local n = saved.n` copies the number, so change `saved.n` itself. Use the same name on every save. It holds numbers, text, true and false, players (also as keys) and tables of those, not functions or teams (keep `team.name`). It lasts until the game is closed, not after.
 - The script is sandboxed: no file access or network.
+- The level is `level.glb` in this folder: one glTF Binary file, exported from Blender or another 3D tool (File > Export > glTF 2.0, format glTF Binary), in metres with +Y up. It is a binary file, so do not edit it as text; the person exports it. `fossps check` loads it and says what to change in the export if it cannot be read. It is drawn in its materials' colours and is not solid yet: players stand on a flat floor at height 0. Without the file, the game is shown the engine's test floor.
 - The game starts from `main.luau`. Split a growing game into files: `local weapons = require("./weapons")` runs `weapons.luau`, the file beside the one that asks, once, and gives back what that file returns (end it with `return weapons`; a file that returns nothing gives nil, which suits one that only adds `game.on...` functions). Paths start with `./` (beside the file that asks) or `../` (the folder above), use `/` for folders (`"./weapons/rifle"`), leave `.luau` off, and cannot leave the game's folder. Files cannot require each other in a circle. Saving any file reloads the whole game.
 - A script error message names the file and the line and says what to try. Follow it before guessing.
 

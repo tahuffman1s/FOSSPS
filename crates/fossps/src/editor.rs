@@ -325,8 +325,9 @@ impl Game for Editor {
     }
 }
 
-/// Opens a window on the level of the game called `name` and lets the
-/// person fly around it until the window is closed.
+/// Opens a window on `level`, the level of the game called `name`, and lets
+/// the person fly around it until the window is closed. With no level, the
+/// engine's stand-in is shown.
 ///
 /// Call this from the main thread.
 ///
@@ -335,8 +336,9 @@ impl Game for Editor {
 /// Fails as [`run`](crate::run) does: if the window system cannot be
 /// reached, the window cannot be created, or no graphics card here can draw
 /// with Vulkan 1.3. The error's message says what to do about it.
-pub fn run(name: &str) -> Result<(), AppError> {
+pub fn run(name: &str, level: Option<fossps_assets::Scene>) -> Result<(), AppError> {
     let mut config = Config {
+        level,
         title: if name.is_empty() {
             "FOSSPS editor".to_owned()
         } else {
