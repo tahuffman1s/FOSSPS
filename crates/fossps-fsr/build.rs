@@ -74,6 +74,11 @@ const DEFINES: &[(&str, &str)] = &[
         "0",
     ),
     ("FFX_FSR3UPSCALER_OPTION_UPSAMPLE_USE_LANCZOS_TYPE", "2"),
+    // The last frames are resampled with the Lanczos curve worked out in the
+    // shader. AMD's other variant reads the curve from a small texture, on
+    // cards with 32- to 64-wide subgroups; built this way it made a still
+    // picture drift and blur on an RX 7800 XT (RADV), so it is not built.
+    ("FFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE", "0"),
     // Not AMD's choice: without this the two pyramid passes use subgroup
     // "quad" operations, which Vulkan does not promise in compute shaders.
     // The plain path reads four pixels itself and runs on every card.
@@ -152,11 +157,23 @@ impl IncludeHandler for Includes {
             .find(|path| path.is_file())
             .and_then(|path| {
                 Some(IncludeResult {
-                    data: fs::read_to_string(&path).ok()?,
+                    data: corrected(fs::read_to_string(&path).ok()?),
                     name: path.to_string_lossy().into_owned(),
                 })
             })
     }
+}
+
+/// AMD's GLSL says the luminance history image holds 8-bit numbers, but the
+/// SDK creates it with 16-bit floats (as the HLSL has it). Vulkan leaves
+/// writes through a mismatched declaration undefined, and the validation
+/// layer says so on every frame, so the declaration is put right here
+/// rather than in the vendored file.
+fn corrected(text: String) -> String {
+    text.replace(
+        "FSR3UPSCALER_BIND_UAV_LUMA_HISTORY, rgba8)",
+        "FSR3UPSCALER_BIND_UAV_LUMA_HISTORY, rgba16f)",
+    )
 }
 
 /// Compiles every shader and returns the C++ table `shim/blobs.cpp` includes.
@@ -175,24 +192,19 @@ fn shader_table(sdk: &Path) -> Result<String, Box<dyn Error>> {
         let text = fs::read_to_string(&path)
             .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
         let source = ShaderSource::from(text);
-        for lanczos_lookup in [false, true] {
-            for sharpen in [false, true] {
-                let words = compile(compiler, &source, &folders, lanczos_lookup, sharpen)
-                    .map_err(|error| format!("Could not compile {}: {error}", path.display()))?;
-                let next = stored.len();
-                let index = if let Some(index) = stored.get(&words) {
-                    *index
-                } else {
-                    write_blob(&mut code, next, &words)
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                    stored.insert(words, next);
-                    next
-                };
-                writeln!(
-                    table,
-                    "    {{ {pass}, {lanczos_lookup}, {sharpen}, &g_blob{index} }},"
-                )?;
-            }
+        for sharpen in [false, true] {
+            let words = compile(compiler, &source, &folders, sharpen)
+                .map_err(|error| format!("Could not compile {}: {error}", path.display()))?;
+            let next = stored.len();
+            let index = if let Some(index) = stored.get(&words) {
+                *index
+            } else {
+                write_blob(&mut code, next, &words)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                stored.insert(words, next);
+                next
+            };
+            writeln!(table, "    {{ {pass}, {sharpen}, &g_blob{index} }},")?;
         }
     }
     write!(
@@ -207,7 +219,6 @@ fn compile(
     compiler: &Compiler,
     source: &ShaderSource,
     folders: &[PathBuf],
-    lanczos_lookup: bool,
     sharpen: bool,
 ) -> Result<Vec<u32>, Box<dyn Error>> {
     let flag = |on: bool| Some(if on { "1" } else { "0" });
@@ -215,10 +226,6 @@ fn compile(
         .iter()
         .map(|(name, value)| (*name, Some(*value)))
         .collect();
-    defines.push((
-        "FFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE",
-        flag(lanczos_lookup),
-    ));
     defines.push(("FFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING", flag(sharpen)));
 
     let mut includes = Includes {

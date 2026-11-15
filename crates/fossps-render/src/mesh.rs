@@ -8,7 +8,7 @@ use ash::vk;
 use fossps_assets::{Material, MeshPart, Scene};
 
 use crate::buffer::Buffer;
-use crate::camera::{Mat4, multiply, normal_matrix};
+use crate::camera::{Mat4, normal_matrix};
 use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::scene::{DEPTH, SceneTarget};
@@ -28,6 +28,37 @@ const VERTEX_BYTES: usize = 40;
 /// matrix padded to three columns of four, and a colour. Vulkan promises
 /// room for exactly this much.
 const DRAW_BYTES: usize = 128;
+
+/// The size in bytes of the shader's `View`: three 4 by 4 matrices.
+const VIEW_BYTES: usize = 192;
+
+/// How the scene is seen in one frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct View {
+    /// Takes a point in the world to where it is drawn, including the
+    /// part-of-a-pixel shift the upscaler asks for.
+    pub(crate) clip: Mat4,
+    /// The same without the shift.
+    pub(crate) steady: Mat4,
+    /// `steady` as it was in the last frame.
+    pub(crate) before: Mat4,
+}
+
+impl View {
+    fn bytes(&self) -> [u8; VIEW_BYTES] {
+        let numbers = [self.clip, self.steady, self.before];
+        let mut bytes = [0_u8; VIEW_BYTES];
+        for (slot, number) in bytes
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(numbers.iter().flatten().flatten())
+        {
+            *slot = number.to_ne_bytes();
+        }
+        bytes
+    }
+}
 
 /// One mesh part placed in the world.
 struct Draw {
@@ -174,15 +205,30 @@ fn append(part: &MeshPart, vertices: &mut Vec<u8>, indices: &mut Vec<u8>) -> Pla
 /// Draws meshes into a [`SceneTarget`].
 pub(crate) struct MeshPipeline {
     gpu: Arc<Gpu>,
+    set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    pool: vk::DescriptorPool,
+    /// The [`View`] of each frame that can be in progress at once, with the
+    /// set that points the shader at it.
+    views: Vec<(Buffer, vk::DescriptorSet)>,
 }
 
 impl MeshPipeline {
-    /// Builds the pipeline.
-    pub(crate) fn new(gpu: &Arc<Gpu>) -> Result<Self, RenderError> {
+    /// Builds the pipeline, for up to `frames` frames in progress at once.
+    pub(crate) fn new(gpu: &Arc<Gpu>, frames: usize) -> Result<Self, RenderError> {
         let doing = "preparing the shaders";
         let device = gpu.device();
+        let mut mesh = Self {
+            gpu: Arc::clone(gpu),
+            set_layout: vk::DescriptorSetLayout::null(),
+            layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
+            pool: vk::DescriptorPool::null(),
+            views: Vec::with_capacity(frames),
+        };
+        // Dropping `mesh` cleans up whatever was created; destroying a null handle is allowed.
+        let count = u32::try_from(frames.max(1)).unwrap_or(1);
         let code = ash::util::read_spv(&mut Cursor::new(SHADER)).map_err(|_| {
             // Only possible if the build script wrote a broken file.
             RenderError::Driver {
@@ -191,30 +237,80 @@ impl MeshPipeline {
             }
         })?;
 
+        let bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)];
+        let sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(count)];
+        let ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .size(DRAW_BYTES as u32)];
+        // SAFETY: the device is alive, and each object is created from valid
+        // settings that live until the call returns, and stored in `mesh`
+        // straight away.
+        unsafe {
+            mesh.set_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                    None,
+                )
+                .map_err(RenderError::driver(doing))?;
+            let set_layouts = [mesh.set_layout];
+            mesh.layout = device
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .set_layouts(&set_layouts)
+                        .push_constant_ranges(&ranges),
+                    None,
+                )
+                .map_err(RenderError::driver(doing))?;
+            mesh.pool = device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(count)
+                        .pool_sizes(&sizes),
+                    None,
+                )
+                .map_err(RenderError::driver(doing))?;
+            for _ in 0..count {
+                let buffer = Buffer::writable(
+                    gpu,
+                    VIEW_BYTES as u64,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    doing,
+                )?;
+                let set = device
+                    .allocate_descriptor_sets(
+                        &vk::DescriptorSetAllocateInfo::default()
+                            .descriptor_pool(mesh.pool)
+                            .set_layouts(&set_layouts),
+                    )
+                    .map_err(RenderError::driver(doing))?
+                    .first()
+                    .copied()
+                    .unwrap_or_default();
+                let buffers = [vk::DescriptorBufferInfo::default()
+                    .buffer(buffer.handle)
+                    .range(VIEW_BYTES as u64)];
+                let writes = [vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&buffers)];
+                device.update_descriptor_sets(&writes, &[]);
+                mesh.views.push((buffer, set));
+            }
+        }
+        let layout = mesh.layout;
+
         // SAFETY: `code` is SPIR-V produced and validated by naga at build time.
         let module = unsafe {
             device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
         }
         .map_err(RenderError::driver(doing))?;
-
-        let ranges = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .size(DRAW_BYTES as u32)];
-        // SAFETY: the layout's settings are valid and alive for the call.
-        let layout = unsafe {
-            device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges),
-                None,
-            )
-        };
-        let layout = match layout {
-            Ok(layout) => layout,
-            Err(code) => {
-                // SAFETY: the module was created above and nothing uses it yet.
-                unsafe { device.destroy_shader_module(module, None) };
-                return Err(RenderError::driver(doing)(code));
-            }
-        };
 
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -265,8 +361,9 @@ impl MeshPipeline {
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::GREATER);
+        // The colour, then how far the pixel moved.
         let attachments = [vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+            .color_write_mask(vk::ColorComponentFlags::RGBA); 2];
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
@@ -275,7 +372,7 @@ impl MeshPipeline {
             vk::DynamicState::FRONT_FACE,
         ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [SceneTarget::FORMAT];
+        let formats = [SceneTarget::FORMAT, SceneTarget::MOTION_FORMAT];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&formats)
             .depth_attachment_format(SceneTarget::DEPTH_FORMAT);
@@ -305,14 +402,11 @@ impl MeshPipeline {
             created
         };
         match created {
-            Ok(pipelines) if !pipelines.is_empty() => Ok(Self {
-                gpu: Arc::clone(gpu),
-                layout,
-                pipeline: pipelines[0],
-            }),
+            Ok(pipelines) if !pipelines.is_empty() => {
+                mesh.pipeline = pipelines[0];
+                Ok(mesh)
+            }
             failed => {
-                // SAFETY: no pipeline was created, so nothing uses the layout.
-                unsafe { device.destroy_pipeline_layout(layout, None) };
                 let code = failed.map_or_else(|(_, code)| code, |_| vk::Result::ERROR_UNKNOWN);
                 Err(RenderError::driver(doing)(code))
             }
@@ -320,25 +414,40 @@ impl MeshPipeline {
     }
 
     /// Records clearing `target` and drawing `meshes` into it as seen
-    /// through `clip_from_world`.
+    /// through `view`.
     ///
-    /// The target's previous contents are discarded, and its colour image is
-    /// left ready for shaders to read.
+    /// The target's previous contents are discarded, and its three images
+    /// are left ready for shaders to read.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the graphics driver refuses to take the view.
     ///
     /// # Safety
     ///
     /// `commands` must be a command buffer of this pipeline's device that is
     /// being recorded. `target` and `meshes` must belong to the same device,
     /// stay alive until the commands have run, and the target must only be
-    /// in use by earlier commands on the same queue.
+    /// in use by earlier commands on the same queue. `frame` picks which of
+    /// the pipeline's frames this is, and the commands last recorded with
+    /// the same `frame` must have finished.
     pub(crate) unsafe fn record(
         &self,
         commands: vk::CommandBuffer,
+        frame: usize,
         target: &SceneTarget,
-        clip_from_world: &Mat4,
+        view: &View,
         meshes: Option<&Meshes>,
-    ) {
+    ) -> Result<(), RenderError> {
         let device = self.gpu.device();
+        let Some((view_buffer, view_set)) = self.views.get(frame % self.views.len().max(1)) else {
+            return Ok(());
+        };
+        // SAFETY: the buffer was made writable and `VIEW_BYTES` long, and the
+        // caller guarantees the commands that read it last have finished.
+        unsafe { view_buffer.write(&view.bytes()) }?;
+        let readers =
+            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER;
         let area = vk::Rect2D {
             offset: vk::Offset2D::default(),
             extent: target.extent,
@@ -346,21 +455,37 @@ impl MeshPipeline {
         let depth_stages = vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
             | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS;
 
-        let to_draw = [
+        // The last frame's upscaling or tone mapping may still be reading the images.
+        let colour_to_draw = |image: vk::Image| {
             vk::ImageMemoryBarrier2::default()
-                // The last frame's tone mapping may still be reading the image.
-                .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .src_stage_mask(readers)
                 .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                 .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(target.colour.image)
-                .subresource_range(COLOUR),
+                .image(image)
+                .subresource_range(COLOUR)
+        };
+        let colour_to_read = |image: vk::Image| {
             vk::ImageMemoryBarrier2::default()
-                // The last frame may still be testing against the depth.
-                .src_stage_mask(depth_stages)
+                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .dst_stage_mask(readers)
+                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(COLOUR)
+        };
+        let to_draw = [
+            colour_to_draw(target.colour.image),
+            colour_to_draw(target.motion.image),
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(depth_stages | readers)
                 .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
                 .dst_stage_mask(depth_stages)
                 .dst_access_mask(
@@ -374,28 +499,37 @@ impl MeshPipeline {
                 .image(target.depth.image)
                 .subresource_range(DEPTH),
         ];
-        let to_finish = [vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(target.colour.image)
-            .subresource_range(COLOUR)];
+        let to_finish = [
+            colour_to_read(target.colour.image),
+            colour_to_read(target.motion.image),
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(depth_stages)
+                .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_stage_mask(readers)
+                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(target.depth.image)
+                .subresource_range(DEPTH),
+        ];
 
-        let attachments = [vk::RenderingAttachmentInfo::default()
-            .image_view(target.colour.view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: BACKGROUND,
-                },
-            })];
+        let attachment = |view: vk::ImageView, clear: [f32; 4]| {
+            vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue { float32: clear },
+                })
+        };
+        // The background is one flat colour, so it has not visibly moved.
+        let attachments = [
+            attachment(target.colour.view, BACKGROUND),
+            attachment(target.motion.view, [0.0; 4]),
+        ];
         let depth = vk::RenderingAttachmentInfo::default()
             .image_view(target.depth.view)
             .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
@@ -439,6 +573,14 @@ impl MeshPipeline {
             }) = meshes
             {
                 device.cmd_bind_pipeline(commands, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                device.cmd_bind_descriptor_sets(
+                    commands,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.layout,
+                    0,
+                    &[*view_set],
+                    &[],
+                );
                 device.cmd_set_viewport(commands, 0, &[viewport]);
                 device.cmd_set_scissor(commands, 0, &[area]);
                 device.cmd_bind_vertex_buffers(commands, 0, &[vertices.handle], &[0]);
@@ -467,7 +609,7 @@ impl MeshPipeline {
                         self.layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         0,
-                        &draw_bytes(clip_from_world, draw),
+                        &draw_bytes(draw),
                     );
                     device.cmd_draw_indexed(
                         commands,
@@ -485,13 +627,14 @@ impl MeshPipeline {
                 &vk::DependencyInfo::default().image_memory_barriers(&to_finish),
             );
         }
+        Ok(())
     }
 }
 
-/// The shader's `Draw` for one mesh part seen through `clip_from_world`.
-fn draw_bytes(clip_from_world: &Mat4, draw: &Draw) -> [u8; DRAW_BYTES] {
-    let clip = multiply(clip_from_world, &draw.world);
-    let numbers = clip
+/// The shader's `Draw` for one mesh part.
+fn draw_bytes(draw: &Draw) -> [u8; DRAW_BYTES] {
+    let numbers = draw
+        .world
         .iter()
         .chain(&draw.normal)
         .flatten()
@@ -506,10 +649,14 @@ fn draw_bytes(clip_from_world: &Mat4, draw: &Draw) -> [u8; DRAW_BYTES] {
 impl Drop for MeshPipeline {
     fn drop(&mut self) {
         // SAFETY: the owner waits for the graphics card to go idle before
-        // dropping the pipeline, so it is not in use.
+        // dropping the pipeline, so it is not in use. Destroying the pool
+        // frees its sets.
         unsafe {
-            self.gpu.device().destroy_pipeline(self.pipeline, None);
-            self.gpu.device().destroy_pipeline_layout(self.layout, None);
+            let device = self.gpu.device();
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_descriptor_set_layout(self.set_layout, None);
         }
     }
 }
@@ -592,7 +739,7 @@ mod tests {
             mirrored: false,
             double_sided: false,
         };
-        let bytes = draw_bytes(&world, &draw);
+        let bytes = draw_bytes(&draw);
         let number = |at: usize| f32::from_ne_bytes([0, 1, 2, 3].map(|byte| bytes[at * 4 + byte]));
         assert_eq!(number(0), 1.0, "the matrix comes first");
         assert_eq!(number(16), 1.0, "then the surface directions");

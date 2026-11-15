@@ -49,6 +49,8 @@ pub use fossps_render as render;
 
 #[cfg(feature = "window")]
 pub use app::{AppError, Config, run};
+#[cfg(feature = "window")]
+pub use fossps_render::Upscaling;
 pub use fossps_script as script;
 pub use game::{Frame, Game};
 pub use script_game::ScriptGame;

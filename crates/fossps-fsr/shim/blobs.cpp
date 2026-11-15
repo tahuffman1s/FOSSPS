@@ -16,7 +16,6 @@
 struct FosspsFsrShader
 {
     FfxFsr3UpscalerPass  pass;
-    bool                 lanczosLookup;
     bool                 sharpen;
     const FfxShaderBlob* blob;
 };
@@ -36,14 +35,14 @@ FfxErrorCode ffxGetPermutationBlobByIndex(FfxEffect effectId, FfxPass passId, Ff
     if (effectId != FFX_EFFECT_FSR3UPSCALER || (permutationOptions & FIXED_OPTIONS) != FIXED_VALUES)
         return FFX_ERROR_INVALID_ARGUMENT;
 
-    // The half-precision and 64-wide variants are not built. The plain
-    // shaders run on every card, so asking for those gets the plain ones.
-    const bool lanczosLookup = FFX_CONTAINS_FLAG(permutationOptions, FSR3UPSCALER_SHADER_PERMUTATION_USE_LANCZOS_TYPE);
+    // The half-precision, 64-wide and Lanczos-lookup variants are not built.
+    // The plain shaders run on every card, so asking for those gets the
+    // plain ones.
     const bool sharpen       = FFX_CONTAINS_FLAG(permutationOptions, FSR3UPSCALER_SHADER_PERMUTATION_ENABLE_SHARPENING);
     for (size_t index = 0; index < sizeof(g_shaders) / sizeof(g_shaders[0]); ++index)
     {
         const FosspsFsrShader& shader = g_shaders[index];
-        if (shader.pass == static_cast<FfxFsr3UpscalerPass>(passId) && shader.lanczosLookup == lanczosLookup && shader.sharpen == sharpen)
+        if (shader.pass == static_cast<FfxFsr3UpscalerPass>(passId) && shader.sharpen == sharpen)
         {
             memcpy(outBlob, shader.blob, sizeof(FfxShaderBlob));
             return FFX_OK;

@@ -35,6 +35,8 @@ pub enum RenderError {
         /// The code the driver returned.
         code: vk::Result,
     },
+    /// FSR could not upscale a frame.
+    Upscaler(fossps_fsr::FsrError),
 }
 
 /// A Vulkan version, such as 1.3.280.
@@ -132,6 +134,11 @@ impl fmt::Display for RenderError {
                  Update your graphics driver; if that does not help, report this message at \
                  https://github.com/tahuffman1s/FOSSPS/issues."
             ),
+            Self::Upscaler(error) => write!(
+                f,
+                "FSR upscaling failed: {error} Start the game with upscaling off \
+                 (`Upscaling::Off`) to play without it."
+            ),
         }
     }
 }
@@ -141,6 +148,7 @@ impl std::error::Error for RenderError {
         match self {
             Self::NoVulkan(error) => Some(error),
             Self::Window(error) => Some(error),
+            Self::Upscaler(error) => Some(error),
             _ => None,
         }
     }
