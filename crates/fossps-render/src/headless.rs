@@ -15,7 +15,7 @@ use crate::gpu::Gpu;
 use crate::mesh::{Contents, MeshPipeline, Meshes};
 use crate::overlay::Overlay;
 use crate::swapchain::COLOUR;
-use crate::tonemap::{Canvas, Then, TonemapPipeline};
+use crate::tonemap::{Canvas, Over, Then, TonemapPipeline};
 use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
@@ -68,6 +68,9 @@ pub struct Headless {
     ui: UiPass,
     /// The HUD and menus drawn over each frame.
     overlay: Overlay,
+    /// The editor's panels, drawn over those.
+    #[cfg(feature = "panels")]
+    panels: crate::panels::PanelHost,
     tonemap: TonemapPipeline,
     mesh: MeshPipeline,
     meshes: Option<Meshes>,
@@ -162,6 +165,8 @@ impl Headless {
         Ok(Self {
             ui,
             overlay: Overlay::new(Font::bundled()),
+            #[cfg(feature = "panels")]
+            panels: crate::panels::PanelHost::default(),
             tonemap,
             mesh,
             meshes: None,
@@ -218,6 +223,13 @@ impl Headless {
         self.overlay.set(list);
     }
 
+    /// Draws the editor's panels over every frame from now on, as
+    /// [`Renderer::set_panels`](crate::Renderer::set_panels) does.
+    #[cfg(feature = "panels")]
+    pub fn set_panels(&mut self, panels: crate::Panels) {
+        self.panels.set(panels);
+    }
+
     /// Draws one frame as `camera` sees it, waits until the graphics card
     /// has finished it, and says how long each half took.
     ///
@@ -226,6 +238,8 @@ impl Headless {
     /// Fails if the graphics driver or the upscaler reports a failure; this
     /// should not be used afterwards.
     pub fn render(&mut self, camera: &Camera) -> Result<FrameTime, RenderError> {
+        #[cfg(feature = "panels")]
+        self.panels.prepare(&self.gpu, FORMAT, 1)?;
         let device = self.gpu.device();
         let start = Instant::now();
         // SAFETY: every handle belongs to `self.gpu`'s device and is alive;
@@ -262,9 +276,13 @@ impl Headless {
                     extent: self.extent,
                 },
                 1.0,
-                Some(&self.ui),
+                Over {
+                    ui: Some(&self.ui),
+                    #[cfg(feature = "panels")]
+                    panels: Some(&mut self.panels),
+                },
                 Then::Copy,
-            );
+            )?;
             device
                 .end_command_buffer(self.commands)
                 .map_err(RenderError::driver("recording a frame"))?;

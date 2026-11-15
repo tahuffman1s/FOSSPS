@@ -21,6 +21,11 @@ fossps-ui = { path = "../fossps-ui" }
 fontdue = { version = "0.9", default-features = false, features = ["std"] }
 # FSR 3.1 upscaling, built from source.
 fossps-fsr = { path = "../fossps-fsr" }
+# The editor's panels (the `panels` feature). Without egui's own fonts: the
+# editor gives it the font the engine already carries.
+egui = { version = "0.36.2", default-features = false, optional = true }
+# Draws egui with raw `ash` handles, inside a pass of ours. MIT.
+egui-ash-renderer = { version = "0.13", default-features = false, optional = true }
 
 [build-dependencies]
 # Compiles the shaders in `shaders/` to SPIR-V, so no system shader compiler is needed.
@@ -28,3 +33,8 @@ naga = { version = "30", default-features = false, features = ["wgsl-in", "spv-o
 
 [lints]
 workspace = true
+
+[features]
+# Draws the editor's panels, made with egui, over the picture:
+# `Renderer::set_panels`. Off for games and servers.
+panels = ["dep:egui", "dep:egui-ash-renderer"]

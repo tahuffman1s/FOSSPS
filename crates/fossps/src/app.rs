@@ -223,6 +223,8 @@ fn start(config: Config, game: impl Game, editing: bool) -> Result<(), AppError>
         last_frame: Instant::now(),
         last_view: None,
         ui: fossps_ui::DrawBuffer::default(),
+        #[cfg(feature = "editor")]
+        panels: None,
         error: None,
     };
     event_loop.run_app(&mut app).map_err(AppError::EventLoop)?;
@@ -259,8 +261,31 @@ struct App<G> {
     /// The HUD and menus the game asked for this frame. Kept from frame to
     /// frame so that gathering them stops asking for memory.
     ui: fossps_ui::DrawBuffer,
+    /// What the editor's panels are made with; `None` in a game.
+    #[cfg(feature = "editor")]
+    panels: Option<PanelInput>,
     /// A failure from inside the event loop, reported once it exits.
     error: Option<AppError>,
+}
+
+/// What the editor's panels are made with, and what tells them about the
+/// mouse and keyboard.
+#[cfg(feature = "editor")]
+struct PanelInput {
+    context: egui::Context,
+    state: egui_winit::State,
+}
+
+/// Whether `event` is one the panels can keep from the camera: a press or
+/// the wheel. Letting go always reaches the camera, so nothing stays held.
+#[cfg(feature = "editor")]
+fn starts_something(event: &WindowEvent) -> bool {
+    match event {
+        WindowEvent::MouseWheel { .. } => true,
+        WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
+        WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
+        _ => false,
+    }
 }
 
 impl<G: Game> App<G> {
@@ -319,6 +344,65 @@ impl<G: Game> App<G> {
             window.set_cursor_visible(true);
         }
         self.captured = false;
+    }
+
+    /// Tells the editor's panels about `event`, and says whether it was
+    /// meant for them and not for the camera: a click or the wheel over a
+    /// panel, or a key while a text field is being typed in.
+    #[cfg(feature = "editor")]
+    fn offer_to_panels(&mut self, event: &WindowEvent) -> bool {
+        let (Some(panels), Some(window)) = (&mut self.panels, &self.window) else {
+            return false;
+        };
+        if self.captured {
+            // The mouse is looking around, and its hidden cursor must not
+            // brush over the panels. They still hear the button let go, and
+            // Shift let go or the window left, so nothing stays held there.
+            if matches!(
+                event,
+                WindowEvent::MouseInput { .. }
+                    | WindowEvent::ModifiersChanged(_)
+                    | WindowEvent::Focused(_)
+            ) {
+                let _ = panels.state.on_window_event(window, event);
+            }
+            return false;
+        }
+        let consumed = panels.state.on_window_event(window, event).consumed;
+        if matches!(event, WindowEvent::KeyboardInput { .. }) {
+            // A button that was clicked may keep the keyboard's attention;
+            // only typing takes the flying keys away.
+            panels.context.text_edit_focused()
+        } else {
+            consumed
+        }
+    }
+
+    /// Hands the panels made this frame to the renderer, and lets them
+    /// change the cursor.
+    #[cfg(feature = "editor")]
+    fn show_panels(&mut self, mut output: egui::FullOutput) {
+        let (Some(panels), Some(renderer)) = (&mut self.panels, &mut self.renderer) else {
+            // Nothing will draw these; `egui` asks to be told that its
+            // texture changes are thrown away on purpose.
+            output.textures_delta.clear();
+            return;
+        };
+        // While the mouse looks around, the cursor stays hidden.
+        if !self.captured
+            && let Some(window) = &self.window
+        {
+            panels
+                .state
+                .handle_platform_output(window, output.platform_output);
+        }
+        renderer.set_panels(fossps_render::Panels {
+            shapes: panels
+                .context
+                .tessellate(output.shapes, output.pixels_per_point),
+            textures: output.textures_delta,
+            pixels_per_point: output.pixels_per_point,
+        });
     }
 
     /// Feeds whole wheel notches into the input state.
@@ -389,7 +473,16 @@ impl<G: Game> App<G> {
         });
         let mut frame =
             Frame::new(self.clock.alpha()).for_window(screen, std::mem::take(&mut self.ui));
+        #[cfg(feature = "editor")]
+        if let (Some(panels), Some(window)) = (&mut self.panels, &self.window) {
+            let input = panels.state.take_egui_input(window);
+            frame = frame.with_panels(panels.context.clone(), input);
+        }
         self.game.frame(&mut frame);
+        #[cfg(feature = "editor")]
+        if let Some(output) = frame.take_panels() {
+            self.show_panels(output);
+        }
         self.ui = frame.take_ui();
         if let Some(renderer) = &mut self.renderer {
             renderer.set_ui(self.ui.draw());
@@ -472,6 +565,22 @@ impl<G: Game> ApplicationHandler for App<G> {
                     }
                 }
                 window.request_redraw();
+                #[cfg(feature = "editor")]
+                if self.editing {
+                    let context = crate::editor::panel_context();
+                    // Text is drawn as large as the display's scaling asks.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let scale = window.scale_factor() as f32;
+                    let state = egui_winit::State::new(
+                        context.clone(),
+                        egui::ViewportId::ROOT,
+                        &*window,
+                        Some(scale),
+                        None,
+                        None,
+                    );
+                    self.panels = Some(PanelInput { context, state });
+                }
                 self.window = Some(window);
                 self.last_frame = Instant::now();
             }
@@ -483,6 +592,10 @@ impl<G: Game> ApplicationHandler for App<G> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        #[cfg(feature = "editor")]
+        if self.offer_to_panels(&event) && starts_something(&event) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.draw(event_loop),

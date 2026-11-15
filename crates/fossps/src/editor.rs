@@ -1,5 +1,6 @@
 //! Edit mode: `fossps edit` opens a game's level to fly around in, over a
-//! ground grid that shows scale.
+//! ground grid that shows scale, with a list of what is in the level on the
+//! left and what is known about the chosen thing on the right.
 //!
 //! The camera flies as the viewports of other editors do. Hold the right
 //! mouse button to look around; W, A, S and D fly where the camera faces, E
@@ -8,16 +9,19 @@
 //! down and up, pressing the left stick flies faster and the d-pad changes
 //! the speed.
 //!
-//! Until levels are loaded from files (#60), the level is the stand-in one
-//! every game is played in.
+//! The panels are for the mouse: a click chooses, a double click flies the
+//! camera there. A game with no level of its own is shown the stand-in one
+//! it is played on.
+
+mod panels;
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fmt::Write as _;
 
 use fossps_input::{ActionId, ActionMap, ActionSetId, InputFrame, MouseMode};
-use fossps_render::Font;
-use fossps_ui::{Anchor, Color, Ui, UiInput, WidgetId};
 
+use self::panels::LevelPanels;
+pub(crate) use self::panels::context as panel_context;
 use crate::app::{self, AppError, Config};
 use crate::game::{Frame, Game};
 use crate::online::{MOUSE_TURN, STICK_TURN};
@@ -31,6 +35,12 @@ const SPEED_RANGE: [f32; 2] = [0.5, 64.0];
 const SPEED_STEP: f32 = 1.25;
 /// How many times faster the camera flies while `fast` is held.
 const FAST: f32 = 4.0;
+/// Flying to something leaves the camera this far from its edge, in metres,
+/// never further than this from its middle (a floor can be huge), and
+/// looking down at least this steeply, in radians.
+const FLY_TO_NEAREST: f32 = 3.0;
+const FLY_TO_FURTHEST: f32 = 60.0;
+const FLY_TO_TILT: f32 = 0.35;
 /// The camera never looks quite straight up or down, where turning would
 /// spin the picture.
 const STEEPEST: f32 = FRAC_PI_2 - 0.01;
@@ -125,6 +135,21 @@ impl FlyCamera {
         }
     }
 
+    /// Moves the camera to where it sees all of something `reach` metres
+    /// across around `middle`, looking down at it a little if it was not
+    /// looking down already.
+    fn fly_to(&mut self, middle: [f32; 3], reach: f32) {
+        if !(middle.iter().all(|part| part.is_finite()) && reach.is_finite()) {
+            return;
+        }
+        self.pitch = self.pitch.min(-FLY_TO_TILT);
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        let forward = [-sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch];
+        let back = (reach * 2.0 + FLY_TO_NEAREST).min(FLY_TO_FURTHEST);
+        self.position = [0, 1, 2].map(|axis| middle[axis] - forward[axis] * back);
+    }
+
     /// The camera `alpha` of the way from `before` to this one.
     fn blended(&self, before: &Self, alpha: f32) -> Self {
         let blend = |from: f32, to: f32| from + (to - from) * alpha;
@@ -182,77 +207,6 @@ fn controls() -> Option<(ActionMap, Controls)> {
     Some((map, controls))
 }
 
-/// What the editor writes over the picture: how to fly, and how fast.
-const HELP: [[&str; 2]; 5] = [
-    ["Look", "hold the right mouse button, or the right stick"],
-    ["Fly", "W A S D, or the left stick"],
-    ["Up, down", "E and Q, or the triggers"],
-    ["Faster", "hold Shift, or press the left stick"],
-    ["Speed", "mouse wheel, or d-pad up and down"],
-];
-
-/// The size of the help text, and how far apart its lines and its two
-/// columns are, in pixels.
-const HELP_TEXT: f32 = 18.0;
-const HELP_LINE: f32 = 24.0;
-const HELP_COLUMN: f32 = 140.0;
-
-/// The words over the picture.
-struct Hud {
-    ui: Ui,
-    /// The line that says how fast the camera flies and where it is.
-    status: WidgetId,
-    /// What that line says now, to change it only when it differs.
-    shown: String,
-    /// Where the next status is written, to keep its memory.
-    next: String,
-}
-
-impl Hud {
-    fn new() -> Self {
-        let mut ui = Ui::default();
-        // Text is measured in the font it is drawn in.
-        ui.set_text_measure(Box::new(Font::bundled()));
-        // The level can be any colour, so the words get a dark panel.
-        // `HELP` has five lines; f32 holds that exactly.
-        #[allow(clippy::cast_precision_loss)]
-        let lines = HELP.len() as f32 + 1.0;
-        ui.hud_rect(
-            Anchor::TopLeft,
-            [-8.0, -8.0],
-            [760.0, lines * HELP_LINE + 16.0],
-            Color::rgba(0.03, 0.04, 0.06, 0.72),
-        );
-        let mut down = 0.0;
-        for [what, how] in HELP {
-            ui.hud_text(Anchor::TopLeft, [0.0, down], HELP_TEXT, what);
-            ui.hud_text(Anchor::TopLeft, [HELP_COLUMN, down], HELP_TEXT, how);
-            down += HELP_LINE;
-        }
-        let status = ui.hud_text(Anchor::TopLeft, [0.0, down], HELP_TEXT, "");
-        Self {
-            ui,
-            status,
-            shown: String::new(),
-            next: String::new(),
-        }
-    }
-
-    /// Says how fast `camera` flies and where it is.
-    fn show(&mut self, camera: &FlyCamera) {
-        let [x, y, z] = camera.position;
-        self.next.clear();
-        // Writing to a `String` cannot fail.
-        let _ = write_speed(&mut self.next, camera.speed);
-        let _ = write!(self.next, " m/s at {x:.1}, {y:.1}, {z:.1}");
-        if self.next != self.shown {
-            // The widget is this UI's own text, so setting it cannot fail.
-            let _ = self.ui.set_text(self.status, &self.next);
-            std::mem::swap(&mut self.shown, &mut self.next);
-        }
-    }
-}
-
 /// Writes `speed` as it is shown: whole metres a second from 10 up, and
 /// one place after the point below that.
 fn write_speed(words: &mut String, speed: f32) -> std::fmt::Result {
@@ -263,14 +217,17 @@ fn write_speed(words: &mut String, speed: f32) -> std::fmt::Result {
     }
 }
 
-/// A game's level opened for editing: a camera that flies around it.
+/// A game's level opened for editing: a camera that flies around it, and
+/// the panels that say what is in it.
 struct Editor {
     controls: Controls,
     /// The camera after the last tick, and after the one before it: frames
     /// are drawn between the two.
     camera: FlyCamera,
     before: FlyCamera,
-    hud: Hud,
+    panels: LevelPanels,
+    /// How fast the camera flies and where it is, as the panels say it.
+    status: String,
 }
 
 impl Editor {
@@ -278,16 +235,28 @@ impl Editor {
     ///
     /// `None` only if the editor's own bindings are misspelled, which a
     /// test rules out.
-    fn new() -> Option<(Self, ActionMap)> {
+    ///
+    /// The panels list `level`, which is the engine's stand-in if `stand_in`.
+    fn new(level: &fossps_assets::Scene, stand_in: bool) -> Option<(Self, ActionMap)> {
         let (map, controls) = controls()?;
         let camera = FlyCamera::default();
         let editor = Self {
             controls,
             camera,
             before: camera,
-            hud: Hud::new(),
+            panels: LevelPanels::new(level, stand_in),
+            status: String::new(),
         };
         Some((editor, map))
+    }
+
+    /// Flies the camera to one of the listed entities, at once.
+    fn fly_to(&mut self, index: usize) {
+        if let Some(entity) = self.panels.entities().get(index) {
+            self.camera.fly_to(entity.middle, entity.reach);
+            // No frame is drawn part of the way there.
+            self.before = self.camera;
+        }
     }
 
     /// What the person at the controls asks for this tick.
@@ -315,13 +284,21 @@ impl Game for Editor {
 
     fn frame(&mut self, frame: &mut Frame) {
         frame.use_action_set(self.controls.set);
+        let [x, y, z] = self.camera.position;
+        self.status.clear();
+        // Writing to a `String` cannot fail.
+        let _ = write_speed(&mut self.status, self.camera.speed);
+        let _ = write!(self.status, " m/s at {x:.1}, {y:.1}, {z:.1}");
+        let (panels, status) = (&mut self.panels, self.status.as_str());
+        let mut asked = panels::Asked::default();
+        frame.panels(|ui| asked = panels.show(ui, status));
+        if let Some(index) = asked.fly_to {
+            self.fly_to(index);
+        }
+        // After flying somewhere this is where the camera now is: there is
+        // nothing to blend from.
         let seen = self.camera.blended(&self.before, frame.alpha());
         frame.look_from(seen.position, seen.yaw, seen.pitch);
-        self.hud.show(&self.camera);
-        self.hud
-            .ui
-            .update(&UiInput::default(), 0.0, frame.screen_size());
-        frame.draw_ui(&self.hud.ui);
     }
 }
 
@@ -346,7 +323,11 @@ pub fn run(name: &str, level: Option<fossps_assets::Scene>) -> Result<(), AppErr
         },
         ..Config::default()
     };
-    let Some((editor, actions)) = Editor::new() else {
+    let made = match &config.level {
+        Some(level) => Editor::new(level, false),
+        None => Editor::new(&crate::standin::scene(), true),
+    };
+    let Some((editor, actions)) = made else {
         // Not reachable: the bindings are fixed and covered by a test.
         return Ok(());
     };
@@ -356,8 +337,8 @@ pub fn run(name: &str, level: Option<fossps_assets::Scene>) -> Result<(), AppErr
 
 #[cfg(test)]
 mod tests {
+    use fossps_assets::{Instance, Light, LightKind, Marker, Mesh, MeshPart, Scene};
     use fossps_input::{GamepadButton, Input, Key, MouseWheel, Stick, StickAxis};
-    use fossps_ui::Draw;
 
     use super::*;
 
@@ -366,7 +347,12 @@ mod tests {
     /// An editor and the input it is played with, with its action set live
     /// as the window makes it after the first frame.
     fn editor() -> (Editor, Input) {
-        let (editor, map) = Editor::new().unwrap();
+        editor_of(&crate::standin::scene())
+    }
+
+    /// The same, for `level`.
+    fn editor_of(level: &Scene) -> (Editor, Input) {
+        let (editor, map) = Editor::new(level, true).unwrap();
         let mut input = Input::new(map);
         input.set_active_set(editor.controls.set);
         (editor, input)
@@ -607,38 +593,312 @@ mod tests {
         assert!(close(after.blended(&before, 0.0).yaw.rem_euclid(TAU), 0.1));
     }
 
-    #[test]
-    fn the_frame_shows_the_view_the_help_and_the_speed() {
-        let (mut editor, mut input) = editor();
-        editor.tick(input.tick(), STEP);
-        let mut frame = Frame::new(1.0);
+    /// A crate placed twice (once named, once turned a quarter to the
+    /// left), a spawn marker and a sun.
+    fn small_level() -> Scene {
+        let mut level = Scene::default();
+        level.materials.push(fossps_assets::Material {
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            ..fossps_assets::Material::default()
+        });
+        level.meshes.push(Mesh {
+            name: Some("Crate".to_owned()),
+            parts: vec![MeshPart {
+                indices: vec![0; 36],
+                bounds: fossps_assets::Bounds {
+                    min: [-1.0, 0.0, -2.0],
+                    max: [1.0, 2.0, 2.0],
+                },
+                ..MeshPart::default()
+            }],
+        });
+        let mut there = crate::standin::scene().instances[0].transform;
+        there = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [10.0, 0.0, -4.0, there[3][3]],
+        ];
+        level.instances.push(Instance {
+            mesh: 0,
+            transform: there,
+            mirrored: false,
+            name: Some("Crate A".to_owned()),
+            extras: None,
+        });
+        level.instances.push(Instance {
+            mesh: 0,
+            // A quarter turn to the left about the upright axis.
+            transform: [
+                [0.0, 0.0, -1.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            mirrored: false,
+            name: None,
+            extras: None,
+        });
+        level.markers.push(Marker {
+            name: Some("Spawn red".to_owned()),
+            transform: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [3.0, 0.0, 5.0, 1.0],
+            ],
+            extras: Some(r#"{"team":"red"}"#.to_owned()),
+        });
+        level.lights.push(Light {
+            name: Some("Sun".to_owned()),
+            kind: LightKind::Sun,
+            color: [1.0, 1.0, 1.0],
+            intensity: 100_000.0,
+            range: None,
+            position: [0.0; 3],
+            direction: [0.0, -1.0, 0.0],
+        });
+        level
+    }
+
+    const SCREEN: [u32; 2] = [1280, 720];
+
+    /// One frame of the editor in a window `SCREEN` in size, in which the
+    /// mouse did `events` at `time` seconds.
+    fn panel_frame(
+        editor: &mut Editor,
+        context: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (Frame, egui::FullOutput) {
+        #[allow(clippy::cast_precision_loss)]
+        let size = egui::vec2(SCREEN[0] as f32, SCREEN[1] as f32);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            time: Some(time),
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut frame = Frame::new(1.0)
+            .for_window(Some(SCREEN), fossps_ui::DrawBuffer::default())
+            .with_panels(context.clone(), input);
         editor.frame(&mut frame);
+        let mut output = frame.take_panels().unwrap();
+        // Nothing is drawn with these; `egui` asks to be told so.
+        output.textures_delta.clear();
+        (frame, output)
+    }
+
+    /// The left mouse button going down or up at `at`.
+    fn button(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Every word drawn in `output`, in one string.
+    fn words(output: &egui::FullOutput) -> String {
+        fn gather(shape: &egui::Shape, into: &mut String) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    into.push_str(text.galley.text());
+                    into.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| gather(shape, into)),
+                _ => {}
+            }
+        }
+        let mut all = String::new();
+        for clipped in &output.shapes {
+            gather(&clipped.shape, &mut all);
+        }
+        all
+    }
+
+    #[test]
+    fn the_list_names_everything_in_the_level_by_sort() {
+        let level = small_level();
+        let listed = panels::entities(&level);
+        let names: Vec<(&str, panels::Kind)> = listed
+            .iter()
+            .map(|entity| (entity.name.as_str(), entity.kind))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Crate A", panels::Kind::Object),
+                ("Crate", panels::Kind::Object),
+                ("Spawn red", panels::Kind::Marker),
+                ("Sun", panels::Kind::Light),
+            ]
+        );
+        // The crate is 2 by 2 by 4 m, standing on its origin at 10, 0, -4.
+        assert_eq!(listed[0].middle, [10.0, 1.0, -4.0]);
+        assert!(close(listed[0].reach, 24.0_f32.sqrt() / 2.0));
+        // Turned a quarter, its long side lies along X.
+        assert_eq!(listed[1].middle, [0.0, 1.0, 0.0]);
+        assert_eq!(listed[2].middle, [3.0, 0.0, 5.0]);
+
+        // With no name of its own or of its shape, it is numbered.
+        let mut nameless = level.clone();
+        nameless.meshes[0].name = None;
+        assert_eq!(panels::entities(&nameless)[1].name, "Unnamed object 2");
+
+        // An empty level lists nothing and says so.
+        let (mut editor, _) = editor_of(&Scene::default());
+        let context = panel_context();
+        let (_, output) = panel_frame(&mut editor, &context, 0.0, Vec::new());
+        assert!(editor.panels.entities().is_empty());
+        assert!(words(&output).contains("Nothing in it yet"));
+    }
+
+    #[test]
+    fn the_panels_show_the_list_the_inspector_and_how_to_fly() {
+        let (mut editor, mut input) = editor_of(&small_level());
+        editor.tick(input.tick(), STEP);
+        let context = panel_context();
+        // Panels find their sizes in the first frame.
+        let _ = panel_frame(&mut editor, &context, 0.0, Vec::new());
+        let (frame, output) = panel_frame(&mut editor, &context, 0.1, Vec::new());
 
         assert_eq!(frame.action_set(), Some(editor.controls.set));
-        let view = frame.view().unwrap();
-        assert_eq!(view.position, editor.camera.position);
-        let drawn = frame.take_ui();
-        let words: Vec<&str> = drawn
-            .draw()
-            .iter()
-            .filter_map(|draw| match draw {
-                Draw::Text { text, .. } => Some(text),
-                Draw::Rect { .. } => None,
-            })
-            .collect();
-        assert!(words.contains(&"hold the right mouse button, or the right stick"));
-        assert!(words.contains(&"8.0 m/s at 0.0, 5.0, 22.0"), "{words:?}");
+        assert_eq!(frame.view().unwrap().position, editor.camera.position);
+        let shown = words(&output);
+        for expected in [
+            "Stand-in level",
+            "2 objects, 1 marker, 1 light",
+            "Crate A",
+            "Spawn red",
+            "Sun",
+            "Nothing chosen",
+            "Click a name in the list on the left to see it here.",
+            "hold the right mouse button",
+            "Gamepad: the sticks fly and look",
+            "8.0 m/s at 0.0, 5.0, 22.0",
+        ] {
+            assert!(shown.contains(expected), "no {expected:?} in:\n{shown}");
+        }
         let mut speeds = String::new();
         write_speed(&mut speeds, 0.5).unwrap();
         write_speed(&mut speeds, 64.0).unwrap();
         assert_eq!(speeds, "0.564");
+
+        // Without a window there is nothing to make panels with, and the
+        // frame still says where to look from.
+        let mut frame = Frame::new(1.0);
+        editor.frame(&mut frame);
+        assert!(frame.take_panels().is_none());
+        assert!(frame.view().is_some());
     }
 
     #[test]
-    fn the_level_is_drawn_under_a_grid_with_the_help_in_the_corner() {
-        use fossps_render::{Camera, Headless, RenderError, Upscaling};
+    fn a_click_chooses_and_the_inspector_says_what_is_known() {
+        let (mut editor, _) = editor_of(&small_level());
+        let context = panel_context();
+        let _ = panel_frame(&mut editor, &context, 0.0, Vec::new());
+        assert_eq!(editor.panels.selected(), None);
+        let rows = editor.panels.rows.clone();
+        assert_eq!(rows.len(), 4);
+        // Rows are as wide as the panel, so a click anywhere on one counts.
+        assert!(rows[0].1.width() > 200.0, "{:?}", rows[0].1);
 
-        const SCREEN: [u32; 2] = [1280, 720];
+        let click = |editor: &mut Editor, at: egui::Pos2, time: f64| {
+            let down = vec![egui::Event::PointerMoved(at), button(at, true)];
+            let _ = panel_frame(editor, &context, time, down);
+            panel_frame(editor, &context, time + 0.05, vec![button(at, false)])
+        };
+        let camera = editor.camera;
+        let (_, _) = click(&mut editor, rows[1].1.center(), 1.0);
+        assert_eq!(editor.panels.selected(), Some(1));
+        let (_, output) = panel_frame(&mut editor, &context, 1.2, Vec::new());
+        let shown = words(&output);
+        for expected in [
+            "0.00, 0.00, 0.00 m",
+            "4.00 wide, 2.00 high, 2.00 deep (m)",
+            "90° to the left",
+            "Crate, 12 triangles",
+            "Fly to it",
+            "cannot be changed here yet",
+        ] {
+            assert!(shown.contains(expected), "no {expected:?} in:\n{shown}");
+        }
+        assert!(!shown.contains("Nothing chosen"));
+        assert_eq!(editor.camera, camera, "one click does not move the camera");
+
+        // The marker shows what was written on it in the 3D tool.
+        let _ = click(&mut editor, rows[2].1.center(), 3.0);
+        assert_eq!(editor.panels.selected(), Some(2));
+        let (_, output) = panel_frame(&mut editor, &context, 3.2, Vec::new());
+        let shown = words(&output);
+        assert!(shown.contains("3.00, 0.00, 5.00 m"), "{shown}");
+        assert!(shown.contains(r#"{"team":"red"}"#), "{shown}");
+        assert!(shown.contains("0° to the left"), "{shown}");
+
+        // The sun has no place, only a direction and a brightness.
+        let _ = click(&mut editor, rows[3].1.center(), 5.0);
+        let (_, output) = panel_frame(&mut editor, &context, 5.2, Vec::new());
+        let shown = words(&output);
+        assert!(shown.contains("100000 lux"), "{shown}");
+        assert!(shown.contains("0.00, -1.00, 0.00"), "{shown}");
+        assert!(!shown.contains("Position"), "{shown}");
+
+        // A click on the picture, between the panels, chooses nothing else.
+        let _ = click(&mut editor, egui::pos2(640.0, 300.0), 7.0);
+        assert_eq!(editor.panels.selected(), Some(3));
+    }
+
+    #[test]
+    fn a_double_click_flies_the_camera_to_what_was_clicked() {
+        let (mut editor, _) = editor_of(&small_level());
+        let context = panel_context();
+        let _ = panel_frame(&mut editor, &context, 0.0, Vec::new());
+        let at = editor.panels.rows[0].1.center();
+        let mut time = 1.0;
+        let mut view = None;
+        for pressed in [true, false, true, false] {
+            let mut events = vec![button(at, pressed)];
+            if view.is_none() {
+                events.insert(0, egui::Event::PointerMoved(at));
+            }
+            let (frame, _) = panel_frame(&mut editor, &context, time, events);
+            view = frame.view();
+            time += 0.05;
+        }
+        assert_eq!(editor.panels.selected(), Some(0));
+        // The crate's middle is 10, 1, -4 and the camera looks at it.
+        let camera = editor.camera;
+        assert_eq!(camera, editor.before, "it is there at once");
+        assert_eq!(view.unwrap().position, camera.position);
+        let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
+        let forward = [-sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch];
+        let away = [0, 1, 2].map(|axis| [10.0, 1.0, -4.0][axis] - camera.position[axis]);
+        let distance = away.iter().map(|part| part * part).sum::<f32>().sqrt();
+        assert!((5.0..12.0).contains(&distance), "{distance} m away");
+        for axis in 0..3 {
+            assert!(close(away[axis] / distance, forward[axis]), "{away:?}");
+        }
+        assert!(camera.pitch <= -FLY_TO_TILT, "it looks down at it");
+
+        // Something huge is not flown a kilometre away from, and numbers
+        // that are not numbers move nothing.
+        let mut camera = FlyCamera::default();
+        camera.fly_to([0.0; 3], 700.0);
+        let far = camera.position.iter().map(|part| part * part).sum::<f32>();
+        assert!(close(far.sqrt(), FLY_TO_FURTHEST));
+        let before = camera;
+        camera.fly_to([f32::NAN, 0.0, 0.0], 1.0);
+        camera.fly_to([0.0; 3], f32::INFINITY);
+        assert_eq!(camera, before);
+    }
+
+    #[test]
+    fn the_level_is_drawn_under_a_grid_between_the_panels() {
+        use fossps_render::{Camera, Headless, Panels, RenderError, Upscaling};
+
         let mut headless = match Headless::new(SCREEN[0], SCREEN[1], Upscaling::Off) {
             Ok(headless) => headless,
             Err(
@@ -659,9 +919,12 @@ mod tests {
         // What the window does: a tick, then the editor's frame.
         let (mut editor, mut input) = editor();
         editor.tick(input.tick(), STEP);
-        let mut frame = Frame::new(1.0).for_window(Some(SCREEN), fossps_ui::DrawBuffer::default());
-        editor.frame(&mut frame);
-        let view = frame.view().unwrap();
+        let context = panel_context();
+        let view = {
+            let mut frame = Frame::new(1.0);
+            editor.frame(&mut frame);
+            frame.view().unwrap()
+        };
         let camera = Camera {
             position: view.position,
             yaw: view.yaw,
@@ -671,18 +934,43 @@ mod tests {
         let level = headless.screenshot(&camera).unwrap();
         headless.set_grid(true);
         let with_grid = headless.screenshot(&camera).unwrap();
-        let ui = frame.take_ui();
-        headless.set_ui(ui.draw());
+        // Two frames, as panels find their sizes in the first. Each is
+        // handed over, as the window does, though only the second is drawn:
+        // the letters come with the first.
+        #[allow(clippy::cast_precision_loss)]
+        let size = egui::vec2(SCREEN[0] as f32, SCREEN[1] as f32);
+        for time in [0.0, 0.1] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(time),
+                ..egui::RawInput::default()
+            };
+            let mut frame = Frame::new(1.0)
+                .for_window(Some(SCREEN), fossps_ui::DrawBuffer::default())
+                .with_panels(context.clone(), input);
+            editor.frame(&mut frame);
+            let output = frame.take_panels().unwrap();
+            headless.set_panels(Panels {
+                shapes: context.tessellate(output.shapes, output.pixels_per_point),
+                textures: output.textures_delta,
+                pixels_per_point: output.pixels_per_point,
+            });
+        }
         let shown = headless.screenshot(&camera).unwrap();
+        // A second frame draws the same panels: the letters sent once stay.
+        assert_eq!(headless.screenshot(&camera).unwrap(), shown);
         // Set `FOSSPS_SAVE_PICTURES` to a folder to look at the picture:
         // 1280 by 720 pixels of four bytes each.
         if let Some(folder) = std::env::var_os("FOSSPS_SAVE_PICTURES") {
             std::fs::write(std::path::Path::new(&folder).join("editor.rgba"), &shown).unwrap();
         }
 
-        let light = |picture: &[u8], x: usize, y: usize| {
+        let pixel = |picture: &[u8], x: usize, y: usize| {
             let at = (y * SCREEN[0] as usize + x) * 4;
-            picture[at..at + 3]
+            [picture[at], picture[at + 1], picture[at + 2]]
+        };
+        let light = |picture: &[u8], x: usize, y: usize| {
+            pixel(picture, x, y)
                 .iter()
                 .map(|&part| u32::from(part))
                 .sum::<u32>()
@@ -698,19 +986,31 @@ mod tests {
         // The sky is left alone.
         assert_eq!(light(&with_grid, 640, 20), light(&level, 640, 20));
 
-        // The help is light text on a dark panel in the top-left corner.
-        let panel = (30..150).flat_map(|y| (30..480).map(move |x| (x, y)));
-        let (mut dark, mut bright) = (0, 0);
-        for (x, y) in panel {
-            match light(&shown, x, y) {
-                0..=120 => dark += 1,
-                600.. => bright += 1,
-                _ => {}
+        // Each side panel is its plain dark colour, exactly as egui's dark
+        // look has it, with light words on it; so is the bar along the
+        // bottom.
+        let fill = context.global_style().visuals.panel_fill;
+        let fill = [fill.r(), fill.g(), fill.b()];
+        let near = |a: [u8; 3], b: [u8; 3]| (0..3).all(|part| a[part].abs_diff(b[part]) <= 1);
+        for (name, columns, rows) in [
+            ("list", 4..240, 4..600),
+            ("inspector", 1000..1276, 4..600),
+            ("how to fly", 4..1276, 684..716),
+        ] {
+            let (mut plain, mut bright, mut all) = (0, 0, 0);
+            for y in rows.clone() {
+                for x in columns.clone() {
+                    all += 1;
+                    plain += u32::from(near(pixel(&shown, x, y), fill));
+                    bright += u32::from(light(&shown, x, y) > 330);
+                }
             }
+            assert!(plain * 10 > all * 7, "{name}: {plain} of {all} plain");
+            assert!(bright > 200, "{name}: {bright} bright pixels");
         }
-        assert!(dark > 30_000, "{dark} dark pixels in the panel");
-        assert!(bright > 500, "{bright} bright pixels in the panel");
-        // Outside the panel, the picture is the one without the help.
-        assert_eq!(light(&shown, 900, 400), light(&with_grid, 900, 400));
+        // Between the panels, the picture is the one without them.
+        for (x, y) in [(640, 300), (500, 600), (800, 100)] {
+            assert_eq!(pixel(&shown, x, y), pixel(&with_grid, x, y));
+        }
     }
 }

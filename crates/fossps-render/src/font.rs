@@ -68,6 +68,13 @@ pub(crate) struct Placed {
 }
 
 impl Font {
+    /// The bundled font as the bytes of its TrueType file, for a text
+    /// drawer that reads fonts itself (the editor's panels do).
+    #[must_use]
+    pub fn bundled_file() -> &'static [u8] {
+        BUNDLED
+    }
+
     /// The font that comes with the engine: Atkinson Hyperlegible Next.
     ///
     /// It covers the Latin alphabet with its accents, digits and common

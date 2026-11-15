@@ -23,6 +23,8 @@ mod mesh;
 #[cfg(test)]
 mod offscreen;
 mod overlay;
+#[cfg(feature = "panels")]
+mod panels;
 mod renderer;
 mod scene;
 mod swapchain;
@@ -36,5 +38,7 @@ pub use error::{RenderError, Version};
 pub use font::Font;
 pub use gpu::{Gpu, validation_errors};
 pub use headless::{FrameTime, Headless};
+#[cfg(feature = "panels")]
+pub use panels::Panels;
 pub use renderer::{RenderConfig, Renderer};
 pub use upscale::Upscaling;
