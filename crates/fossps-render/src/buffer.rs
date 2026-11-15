@@ -119,6 +119,28 @@ impl Buffer {
         Ok(())
     }
 
+    /// The first `length` bytes of the buffer.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must come from [`writable`](Self::writable) and be at
+    /// least `length` bytes long, and the graphics card must not be writing
+    /// it: commands that use it must have finished.
+    pub(crate) unsafe fn read(&self, length: usize) -> Result<Vec<u8>, RenderError> {
+        let device = self.gpu.device();
+        // SAFETY: the caller guarantees the memory can be mapped, is at least
+        // `length` long and is not in use; the bytes are copied out before
+        // it is unmapped straight after.
+        unsafe {
+            let mapped = device
+                .map_memory(self.memory, 0, length as u64, vk::MemoryMapFlags::empty())
+                .map_err(RenderError::driver("reading a picture back"))?;
+            let bytes = std::slice::from_raw_parts(mapped.cast::<u8>(), length).to_vec();
+            device.unmap_memory(self.memory);
+            Ok(bytes)
+        }
+    }
+
     /// Makes a buffer for `usage` that holds `bytes`, which must not be empty.
     ///
     /// Waits for the graphics card to finish the copy, so this is for
