@@ -28,6 +28,10 @@ changed place is marked `FOSSPS:` in the source.
 2. `src/backends/vk/ffx_vk.cpp`, `findMemoryTypeIndex`: falls back to memory
    the CPU can see when the device has no other kind. Without it every
    allocation fails on software renderers such as lavapipe.
+3. `src/backends/vk/ffx_vk.cpp`, `EffectContext`: no longer `alignas(32)`.
+   The SDK puts these in its scratch buffer at an offset rounded up to 4
+   bytes, so the alignment was never kept, and a build with GCC at `-O2` or
+   above (every release build) crashed on the first write to one.
 
 Everything else that AMD's Windows-only build does differently is handled
 outside the vendored files, in `../shim/` and `../build.rs`.

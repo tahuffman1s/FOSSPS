@@ -200,7 +200,10 @@ typedef struct BackendContext_VK {
     VkPipelineStageFlags    srcStageMask = 0;
     VkPipelineStageFlags    dstStageMask = 0;
 
-    typedef struct alignas(32) EffectContext {
+    // FOSSPS: was `alignas(32)`. The array of these sits in the scratch
+    // buffer at an offset rounded up to 4 bytes only, so the promise was
+    // not kept, and GCC at -O2 crashed writing to it with aligned moves.
+    typedef struct EffectContext {
 
         // Effect identifier -- used for various resource callbacks to application
         FfxEffect           effectId;

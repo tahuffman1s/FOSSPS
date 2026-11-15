@@ -16,6 +16,7 @@ mod buffer;
 mod camera;
 mod error;
 mod gpu;
+mod headless;
 mod mesh;
 #[cfg(test)]
 mod offscreen;
@@ -29,5 +30,6 @@ mod view;
 pub use camera::Camera;
 pub use error::{RenderError, Version};
 pub use gpu::{Gpu, validation_errors};
+pub use headless::{FrameTime, Headless};
 pub use renderer::{RenderConfig, Renderer};
 pub use upscale::Upscaling;

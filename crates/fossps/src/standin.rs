@@ -99,7 +99,7 @@ pub(crate) fn scene() -> Scene {
 
 /// The transform that puts a shape at `position`, `size` times as large
 /// along each axis.
-fn at([x, y, z]: [f32; 3], [wide, high, deep]: [f32; 3]) -> Transform {
+pub(crate) fn at([x, y, z]: [f32; 3], [wide, high, deep]: [f32; 3]) -> Transform {
     [
         [wide, 0.0, 0.0, 0.0],
         [0.0, high, 0.0, 0.0],
@@ -121,7 +121,7 @@ fn face(part: &mut MeshPart, corners: [[f32; 3]; 4], normal: [f32; 3]) {
 }
 
 /// Adds a flat rectangle facing up, at height `y`, to `part`.
-fn tile(part: &mut MeshPart, [west, east]: [f32; 2], y: f32, [north, south]: [f32; 2]) {
+pub(crate) fn tile(part: &mut MeshPart, [west, east]: [f32; 2], y: f32, [north, south]: [f32; 2]) {
     face(
         part,
         [
@@ -135,7 +135,7 @@ fn tile(part: &mut MeshPart, [west, east]: [f32; 2], y: f32, [north, south]: [f3
 }
 
 /// A block one metre along each side, standing on the origin.
-fn block() -> MeshPart {
+pub(crate) fn block() -> MeshPart {
     let mut part = MeshPart::default();
     let (l, r, b, t, n, s) = (-0.5, 0.5, 0.0, 1.0, -0.5, 0.5);
     face(

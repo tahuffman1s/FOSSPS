@@ -1,6 +1,7 @@
 //! The `fossps` command: `fossps new` creates a game, `fossps run` plays it,
-//! `fossps serve` hosts it, `fossps join` joins a hosted one and
-//! `fossps servers` lists the ones on this network.
+//! `fossps serve` hosts it, `fossps join` joins a hosted one,
+//! `fossps servers` lists the ones on this network and `fossps bench`
+//! measures how fast this computer draws.
 
 mod demo;
 
@@ -9,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use fossps::Upscaling;
+use fossps::bench::Bench;
 use fossps::cli::{self, quoted};
 use fossps::online::{DEFAULT_PORT, FoundServer, JoinedGame, LocalGame, SEARCH_TIME, find_servers};
 use fossps::scaffold::{self, NewGame};
@@ -119,6 +122,41 @@ enum Command {
     },
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
+    /// Measure how fast this computer draws a built-in test scene
+    #[command(
+        after_help = "Examples:\n  fossps bench                       Draw the test scene and say how \
+                            long its frames took\n  \
+                            fossps bench --size 1920x1080      Draw a bigger picture\n  \
+                            fossps bench --upscaling off       Draw every pixel, with no FSR\n  \
+                            fossps bench --budget-ms 16.6      Fail if a slow frame took longer \
+                            than 16.6 ms\n  \
+                            fossps bench --json bench.json     Also save the numbers for a program \
+                            to read\n\n\
+                      No window opens. The same frames are drawn on every run, so two runs \
+                      differ only in how\nfast the computer drew them. Close other programs \
+                      first for steadier numbers."
+    )]
+    Bench {
+        /// How many frames to time
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..))]
+        frames: u32,
+        /// How many frames to draw first without timing them
+        #[arg(long, default_value_t = 120)]
+        warmup: u32,
+        /// The size of the picture, in pixels
+        #[arg(long, default_value = "1280x720", value_name = "WIDTHxHEIGHT", value_parser = cli::picture_size)]
+        size: (u32, u32),
+        /// How much smaller the scene is drawn before FSR makes it full size:
+        /// off, native, quality, balanced, performance or ultra-performance
+        #[arg(long, default_value = "quality", value_name = "NAME", value_parser = cli::upscaling)]
+        upscaling: Upscaling,
+        /// Fail if a slow frame (99 of 100 are faster) took longer than this many milliseconds
+        #[arg(long, value_name = "MS", value_parser = cli::budget)]
+        budget_ms: Option<f64>,
+        /// Also write the numbers to this file as JSON
+        #[arg(long, value_name = "FILE")]
+        json: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -141,6 +179,24 @@ fn main() -> ExitCode {
         },
         Some(Command::Servers { port }) => servers(port),
         Some(Command::Demo) => demo(),
+        Some(Command::Bench {
+            frames,
+            warmup,
+            size: (width, height),
+            upscaling,
+            budget_ms,
+            json,
+        }) => cli::bench(
+            &Bench {
+                frames,
+                warmup,
+                width,
+                height,
+                upscaling,
+            },
+            budget_ms,
+            json.as_deref(),
+        ),
         // Asking for nothing is not a mistake: show what there is to ask for.
         None => Cli::command()
             .print_help()
