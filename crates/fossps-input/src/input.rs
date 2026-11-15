@@ -5,7 +5,7 @@ use std::fmt;
 use crate::binding::{ActionKind, Binding, Button};
 use crate::devices::{GamepadButton, Key, Stick, StickAxis};
 use crate::frame::{ActionState, InputFrame};
-use crate::map::{ActionId, ActionMap, Conflict};
+use crate::map::{ActionId, ActionMap, ActionSetId, Conflict};
 use crate::shaping::{PRESS_AT, RELEASE_AT, clamp_length, length, sanitize};
 
 /// The live state of every device, resolved through an [`ActionMap`].
@@ -42,6 +42,11 @@ pub struct Input {
     rebound: Option<Rebound>,
     /// Buttons pressed while listening; each is ignored until it comes back up.
     swallowed: [bool; Button::COUNT],
+    /// The action set whose actions are live.
+    active: ActionSetId,
+    /// Buttons that were down when the set last changed. Until each comes
+    /// back up it presses no button action: it was pressed for the old set.
+    stale: [bool; Button::COUNT],
 }
 
 /// A finished rebind: what [`Input::start_rebind`] heard and did.
@@ -111,7 +116,66 @@ impl Input {
             listening: None,
             rebound: None,
             swallowed: [false; Button::COUNT],
+            active: ActionMap::GAMEPLAY,
+            stale: [false; Button::COUNT],
         }
+    }
+
+    /// The action set whose actions are live. It starts as
+    /// [`ActionMap::GAMEPLAY`].
+    #[must_use]
+    pub fn active_set(&self) -> ActionSetId {
+        self.active
+    }
+
+    /// Makes `set` the live action set, for example when a menu opens.
+    ///
+    /// Actions in every other set read as not pressed; one that was held
+    /// reports `just_released` on the next tick.
+    ///
+    /// A key or button that is down at this moment was pressed for the old
+    /// set, so it presses no button action in the new one until it is let go
+    /// and pressed again. Without this, the Escape that opens a menu would
+    /// close it again on the same press, and the click on "Resume" would fire
+    /// a shot. Sticks and held direction keys carry over, so a player who
+    /// holds W while closing a menu is walking as soon as it is closed.
+    /// Presses that no tick has seen yet are dropped.
+    ///
+    /// Switching to the set that is already live does nothing, so this can be
+    /// called every frame. A set from a different map is ignored.
+    ///
+    /// ```
+    /// use fossps_input::{ActionMap, Input, Key, MouseMode};
+    ///
+    /// let mut map = ActionMap::new();
+    /// let pause = map.button("pause", ["Escape", "GamepadStart"])?;
+    /// let menu = map.add_set("menu", MouseMode::Pointer)?;
+    /// let resume = map.button("resume", ["Escape", "GamepadStart"])?;
+    /// let mut input = Input::new(map);
+    ///
+    /// input.press(Key::Escape);
+    /// assert!(input.tick().just_pressed(pause));
+    ///
+    /// input.set_active_set(menu);
+    /// assert!(!input.tick().pressed(resume)); // still the same press
+    ///
+    /// input.release(Key::Escape);
+    /// input.press(Key::Escape);
+    /// assert!(input.tick().just_pressed(resume));
+    /// # Ok::<(), fossps_input::MapError>(())
+    /// ```
+    pub fn set_active_set(&mut self, set: ActionSetId) {
+        if set == self.active || self.map.mouse_mode(set).is_none() {
+            return;
+        }
+        self.switch_to(set);
+    }
+
+    /// Makes `set` live; what is down now belongs to the set before it.
+    fn switch_to(&mut self, set: ActionSetId) {
+        self.active = set;
+        self.stale = self.held;
+        self.latched = [false; Button::COUNT];
     }
 
     /// The action map in use.
@@ -121,7 +185,13 @@ impl Input {
     }
 
     /// Replaces the action map. Ids from the old map must be looked up again.
+    ///
+    /// The live action set stays the one in the same position, or becomes
+    /// [`ActionMap::GAMEPLAY`] if the new map has fewer sets.
     pub fn set_map(&mut self, map: ActionMap) {
+        if map.mouse_mode(self.active).is_none() {
+            self.switch_to(ActionMap::GAMEPLAY);
+        }
         let tick = self.frame.tick;
         self.frame = InputFrame::idle(map.len());
         self.frame.tick = tick;
@@ -278,6 +348,7 @@ impl Input {
     pub fn release(&mut self, button: impl Into<Button>) {
         let button = button.into();
         self.swallowed[button.index()] = false;
+        self.stale[button.index()] = false;
         self.held[button.index()] = false;
         if let Button::Gamepad(pad) = button {
             self.amount[pad.index()] = 0.0;
@@ -304,6 +375,7 @@ impl Input {
         if self.held[index] {
             if amount < RELEASE_AT {
                 self.held[index] = false;
+                self.stale[index] = false;
             }
         } else if amount >= PRESS_AT {
             self.held[index] = true;
@@ -337,6 +409,7 @@ impl Input {
     pub fn release_all(&mut self) {
         self.listening = None;
         self.swallowed = [false; Button::COUNT];
+        self.stale = [false; Button::COUNT];
         self.held = [false; Button::COUNT];
         self.latched = [false; Button::COUNT];
         self.mouse = [0.0; 2];
@@ -350,6 +423,7 @@ impl Input {
             self.held[index] = false;
             self.latched[index] = false;
             self.swallowed[index] = false;
+            self.stale[index] = false;
         }
         self.amount = [0.0; GamepadButton::COUNT];
         self.sticks = [[0.0; 2]; Stick::COUNT];
@@ -370,6 +444,15 @@ impl Input {
         let (actions, bindings) = self.map.parts();
         let deadzone = self.map.deadzone();
         for (action, state) in actions.iter().zip(&mut self.frame.actions) {
+            if action.set != self.active {
+                *state = ActionState {
+                    just_released: state.pressed,
+                    ..ActionState::default()
+                };
+                continue;
+            }
+            // A button held since before the set changed belongs to the old set.
+            let fresh = action.kind != ActionKind::Button;
             let bindings = bindings.get(action.bindings.clone()).unwrap_or_default();
             let mut axis = [0.0_f32; 2];
             let mut delta = [0.0_f32; 2];
@@ -379,8 +462,12 @@ impl Input {
             for binding in bindings {
                 let candidate = match *binding {
                     Binding::Button(button) => {
-                        repressed |= self.repressed[button.index()];
-                        [amount(button), 0.0]
+                        if fresh || !self.stale[button.index()] {
+                            repressed |= self.repressed[button.index()];
+                            [amount(button), 0.0]
+                        } else {
+                            [0.0, 0.0]
+                        }
                     }
                     Binding::Axis { negative, positive } => {
                         [amount(positive) - amount(negative), 0.0]
@@ -451,6 +538,7 @@ fn button_amount(
 mod tests {
     use super::*;
     use crate::devices::{MouseButton, MouseWheel};
+    use crate::map::MouseMode;
 
     struct Rig {
         input: Input,
@@ -971,5 +1059,169 @@ mod tests {
         r.input.set_button_amount(GamepadButton::RightTrigger, 0.0);
         r.input.set_button_amount(GamepadButton::RightTrigger, 1.0);
         assert!(r.input.tick().just_pressed(r.fire), "let go, then pulled");
+    }
+
+    /// Gameplay with a menu set whose `back` shares Escape with `pause`.
+    struct Sets {
+        input: Input,
+        pause: ActionId,
+        fire: ActionId,
+        movement: ActionId,
+        menu: ActionSetId,
+        back: ActionId,
+        confirm: ActionId,
+        navigate: ActionId,
+    }
+
+    fn sets() -> Sets {
+        let mut map = ActionMap::new();
+        let pause = map.button("pause", ["Escape", "GamepadStart"]).unwrap();
+        let fire = map.button("fire", ["MouseLeft", "RightTrigger"]).unwrap();
+        let movement = map.axis2d("move", ["WASD", "LeftStick"]).unwrap();
+        let menu = map.add_set("menu", MouseMode::Pointer).unwrap();
+        let back = map.button("back", ["Escape", "GamepadStart"]).unwrap();
+        let confirm = map
+            .button("confirm", ["MouseLeft", "RightTrigger"])
+            .unwrap();
+        let navigate = map.axis2d("navigate", ["WASD", "LeftStick"]).unwrap();
+        Sets {
+            input: Input::new(map),
+            pause,
+            fire,
+            movement,
+            menu,
+            back,
+            confirm,
+            navigate,
+        }
+    }
+
+    #[test]
+    fn only_the_live_set_hears_a_key() {
+        let mut s = sets();
+        assert_eq!(s.input.active_set(), ActionMap::GAMEPLAY);
+        s.input.press(Key::Escape);
+        let frame = s.input.tick();
+        assert!(frame.just_pressed(s.pause) && !frame.pressed(s.back));
+        s.input.release(Key::Escape);
+        s.input.tick();
+
+        s.input.set_active_set(s.menu);
+        assert_eq!(s.input.active_set(), s.menu);
+        s.input.press(Key::Escape);
+        let frame = s.input.tick();
+        assert!(frame.just_pressed(s.back) && !frame.pressed(s.pause));
+    }
+
+    #[test]
+    fn the_press_that_switches_sets_does_nothing_in_the_new_one() {
+        let mut s = sets();
+        s.input.press(Key::Escape);
+        assert!(s.input.tick().just_pressed(s.pause));
+
+        s.input.set_active_set(s.menu);
+        let frame = s.input.tick();
+        assert!(frame.just_released(s.pause), "the old set lets go");
+        assert!(!frame.pressed(s.pause) && !frame.pressed(s.back));
+        // Key repeat of the same press changes nothing.
+        s.input.press(Key::Escape);
+        assert!(!s.input.tick().pressed(s.back));
+
+        s.input.release(Key::Escape);
+        s.input.press(Key::Escape);
+        assert!(s.input.tick().just_pressed(s.back), "let go, then pressed");
+
+        // And the same on the way back.
+        s.input.set_active_set(ActionMap::GAMEPLAY);
+        let frame = s.input.tick();
+        assert!(frame.just_released(s.back) && !frame.pressed(s.pause));
+        s.input.release(Key::Escape);
+        s.input.tick();
+        s.input.press(Key::Escape);
+        assert!(s.input.tick().just_pressed(s.pause));
+    }
+
+    #[test]
+    fn a_click_or_trigger_held_through_a_switch_does_not_fire() {
+        let mut s = sets();
+        s.input.set_active_set(s.menu);
+        s.input.press(MouseButton::MouseLeft);
+        s.input.set_button_amount(GamepadButton::RightTrigger, 1.0);
+        assert!(s.input.tick().just_pressed(s.confirm));
+
+        s.input.set_active_set(ActionMap::GAMEPLAY);
+        s.input.set_button_amount(GamepadButton::RightTrigger, 0.8);
+        assert!(!s.input.tick().pressed(s.fire));
+
+        s.input.release(MouseButton::MouseLeft);
+        s.input.set_button_amount(GamepadButton::RightTrigger, 0.0);
+        assert!(!s.input.tick().pressed(s.fire));
+        s.input.set_button_amount(GamepadButton::RightTrigger, 1.0);
+        assert!(s.input.tick().just_pressed(s.fire), "pulled again");
+    }
+
+    #[test]
+    fn a_tap_no_tick_saw_does_not_cross_a_switch() {
+        let mut s = sets();
+        s.input.press(Key::Escape);
+        s.input.release(Key::Escape);
+        s.input.set_active_set(s.menu);
+        let frame = s.input.tick();
+        assert!(!frame.pressed(s.back) && !frame.pressed(s.pause));
+    }
+
+    #[test]
+    fn held_directions_and_sticks_carry_over_a_switch() {
+        let mut s = sets();
+        s.input.set_active_set(s.menu);
+        s.input.press(Key::W);
+        assert_eq!(s.input.tick().axis2d(s.navigate), [0.0, 1.0]);
+
+        s.input.set_active_set(ActionMap::GAMEPLAY);
+        let frame = s.input.tick();
+        assert_eq!(frame.axis2d(s.movement), [0.0, 1.0], "still holding W");
+        assert_eq!(frame.axis2d(s.navigate), [0.0, 0.0]);
+
+        s.input.release(Key::W);
+        s.input.set_stick(Stick::LeftStick, StickAxis::X, 1.0);
+        s.input.set_active_set(s.menu);
+        assert!(s.input.tick().axis2d(s.navigate)[0] > 0.9);
+    }
+
+    #[test]
+    fn switching_to_the_live_set_or_an_unknown_one_changes_nothing() {
+        let mut s = sets();
+        s.input.press(Key::Escape);
+        s.input.set_active_set(ActionMap::GAMEPLAY);
+        assert!(s.input.tick().just_pressed(s.pause), "the press was kept");
+
+        let mut bigger = ActionMap::new();
+        bigger.add_set("a", MouseMode::Look).unwrap();
+        let stranger = bigger.add_set("b", MouseMode::Look).unwrap();
+        s.input.set_active_set(stranger);
+        assert_eq!(s.input.active_set(), ActionMap::GAMEPLAY);
+    }
+
+    #[test]
+    fn looking_away_forgets_what_was_held_through_a_switch() {
+        let mut s = sets();
+        s.input.press(Key::Escape);
+        s.input.tick();
+        s.input.set_active_set(s.menu);
+        // The window lost focus, so the release never arrives.
+        s.input.release_all();
+        s.input.tick();
+        s.input.press(Key::Escape);
+        assert!(s.input.tick().just_pressed(s.back));
+    }
+
+    #[test]
+    fn a_new_map_keeps_the_live_set_if_it_still_has_it() {
+        let mut s = sets();
+        s.input.set_active_set(s.menu);
+        s.input.set_map(s.input.map().clone());
+        assert_eq!(s.input.active_set(), s.menu);
+        s.input.set_map(ActionMap::default_fps());
+        assert_eq!(s.input.active_set(), ActionMap::GAMEPLAY);
     }
 }

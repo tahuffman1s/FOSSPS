@@ -49,7 +49,7 @@ mod tick;
 mod translate;
 
 pub use fossps_input as input;
-pub use fossps_input::{ActionId, ActionMap, InputFrame};
+pub use fossps_input::{ActionId, ActionMap, ActionSetId, InputFrame, MouseMode};
 #[cfg(feature = "window")]
 pub use fossps_render as render;
 

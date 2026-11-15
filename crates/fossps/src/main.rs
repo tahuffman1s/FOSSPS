@@ -711,10 +711,12 @@ fn player_config() -> Config {
 fn demo() -> Result<(), String> {
     log::info!(
         "This is the input demo. Click the window to capture the mouse, then use \
-         keyboard, mouse or a gamepad. Escape frees the mouse."
+         keyboard, mouse or a gamepad. Escape or Start pauses: the cursor comes back \
+         and the game hears nothing until you press it again."
     );
-    let config = player_config();
+    let mut config = player_config();
     let demo = InputDemo::new(config.actions.clone());
+    config.actions.clone_from(demo.actions());
     play(config, demo)
 }
 
