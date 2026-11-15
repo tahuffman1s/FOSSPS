@@ -40,7 +40,7 @@ An overview only. Progress is tracked in [GitHub issues](https://github.com/tahu
 ## M3 — Modern graphics and performance
 
 - HDR and tone mapping (#15), sun shadows (#182), clustered lighting (#183), temporal anti-aliasing (#184)
-- FSR 3.1 upscaling (first verify the SDK builds on Linux) (#16)
+- FSR 3.1 upscaling: built from source on Linux, Windows and macOS (#186), used by the renderer (#16), faster shader variants measured (#187)
 - Benchmark scene and frame-time budget checked in CI (#17)
 - Frame pacing: an accurate frame cap, a display-sync choice, low caps in menus and background (#75)
 - Lower input delay: late input reading, and AMD Anti-Lag 2 where the driver has it (#76)
