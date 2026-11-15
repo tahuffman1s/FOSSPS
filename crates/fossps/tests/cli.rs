@@ -458,3 +458,67 @@ fn servers_lists_a_running_serve_by_its_folder_name() {
         "{said}"
     );
 }
+
+#[test]
+fn bench_says_how_to_write_a_size_an_upscaling_and_a_budget() {
+    let folder = scratch("bench-wrong");
+    for (args, expected) in [
+        (["bench", "--size", "big"], "such as 1920x1080"),
+        (["bench", "--size", "0x720"], "such as 1920x1080"),
+        (["bench", "--upscaling", "best"], "ultra-performance"),
+        (["bench", "--budget-ms", "0"], "such as 16.6"),
+        (["bench", "--frames", "0"], "0 is not in"),
+    ] {
+        let output = fossps(&folder, &args);
+        assert!(!output.status.success(), "{args:?}");
+        let said = stderr(&output);
+        assert!(said.contains(expected), "{args:?}: {said}");
+    }
+}
+
+/// Draws for real where there is a graphics card or a software one, as on
+/// the Linux machines of the automated checks; elsewhere `fossps bench`
+/// must say why it cannot.
+#[test]
+fn bench_draws_and_reports_or_says_why_it_cannot() {
+    let folder = scratch("bench");
+    let args = [
+        "bench",
+        "--frames",
+        "4",
+        "--warmup",
+        "1",
+        "--size",
+        "96x64",
+        "--json",
+        "bench.json",
+    ];
+
+    let output = fossps(&folder, &args);
+
+    if !output.status.success() {
+        let said = stderr(&output);
+        assert!(said.contains("The benchmark could not be drawn"), "{said}");
+        let required = std::env::var("FOSSPS_REQUIRE_VULKAN").is_ok_and(|value| value != "0");
+        assert!(!required, "FOSSPS_REQUIRE_VULKAN is set, but: {said}");
+        return;
+    }
+    let said = stdout(&output);
+    assert!(said.contains("Drew 4 frames"), "{said}");
+    assert!(said.contains("Slow frame"), "{said}");
+    let json = fs::read_to_string(folder.join("bench.json")).unwrap();
+    assert!(json.contains("\"frames\": 4"), "{json}");
+    assert!(json.contains("\"within_budget\": true"), "{json}");
+
+    // No frame is drawn in a millionth of a millisecond.
+    let output = fossps(
+        &folder,
+        &[&args[..7], &["--budget-ms", "0.000001"]].concat(),
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("Over budget"),
+        "{}",
+        stderr(&output)
+    );
+}

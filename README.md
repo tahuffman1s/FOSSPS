@@ -36,6 +36,7 @@ cargo run -- check my-game    # tests its script without opening a window
 cargo run -- serve my-game    # runs it as a server, with no window (Ctrl-C stops it)
 cargo run -- join 192.168.1.20  # joins the server at that address (none: this computer)
 cargo run -- demo             # opens the input demo window
+cargo run --release -- bench  # times a built-in test scene, with no window
 ```
 
 `cargo run --` stands in for the `fossps` command until there are packaged builds; to get a real `fossps` command now, run `cargo install --path crates/fossps`.
@@ -43,6 +44,8 @@ cargo run -- demo             # opens the input demo window
 A machine that only hosts can use the separate `fossps-server` program, which does what `fossps serve` does and has no windowing, graphics, gamepad or sound code in it: `cargo build --release -p fossps-server`. It ticks the game 60 times a second, sleeps in between, logs a status line every minute and warns when it cannot keep up. Players on the same network join with just `fossps join`, which finds the server by itself (`fossps servers` lists what is there); from elsewhere they add the server's address, which it prints when it starts. It listens on UDP port 24680 unless `--port` says otherwise. `fossps run --open` plays a game and lets others on the network join it, with no separate server. A joined player walks with no wait for the server (`fossps-net`: commands, snapshots, prediction and correction), and `fossps run` plays through the same netcode on its own. What is drawn is a stand-in: a chequered floor and some blocks you walk through, seen from your own eyes, and the window's title says where you are. Other players are not drawn yet; everyone stands on a flat floor until games have levels, and other players are not yet smoothed between snapshots.
 
 Running it needs a graphics driver with Vulkan 1.3; building does not need the Vulkan SDK. If it says Vulkan is missing or too old, update your graphics driver (on Linux, also install your distribution's Vulkan loader package, for example `sudo dnf install vulkan-loader`). The input demo shows which actions are active in the window title. Click the window to capture the mouse, then try the keyboard, mouse or a gamepad; Escape frees the mouse.
+
+`fossps bench` draws a built-in scene (1,600 blocks seen from a camera walking a circle) with no window and says how long a usual frame, a slow frame (99 of 100 are faster) and the slowest took, and how much of that was the engine's own work. Every run draws the same frames. `--size`, `--upscaling` and `--frames` change what is drawn, `--json bench.json` saves the numbers, and `--budget-ms 16.6` makes it fail when a slow frame took longer. The engine's own checks run it on every change with a budget, on a software renderer, so that budget only catches drawing getting much slower; it says nothing about how fast a real graphics card is.
 
 ## Scripting
 

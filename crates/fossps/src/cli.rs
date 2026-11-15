@@ -252,6 +252,125 @@ pub fn chosen(line: &str, count: usize) -> Result<Option<usize>, String> {
     }
 }
 
+/// Reads a picture size typed as `1280x720`.
+///
+/// # Errors
+///
+/// Fails with what to type instead.
+#[cfg(feature = "window")]
+pub fn picture_size(text: &str) -> Result<(u32, u32), String> {
+    /// The largest picture every Vulkan 1.3 graphics card can draw.
+    const LARGEST: u32 = 4096;
+    let wrong = || {
+        format!(
+            "a size is a width and a height in pixels with an x between them, each from 1 \
+             to {LARGEST}, such as 1920x1080"
+        )
+    };
+    let (width, height) = text.split_once(['x', 'X']).ok_or_else(wrong)?;
+    let side = |side: &str| {
+        side.trim()
+            .parse()
+            .ok()
+            .filter(|pixels| (1..=LARGEST).contains(pixels))
+            .ok_or_else(wrong)
+    };
+    Ok((side(width)?, side(height)?))
+}
+
+/// Reads an upscaling setting typed by its name, such as `quality`.
+///
+/// # Errors
+///
+/// Fails with the names there are.
+#[cfg(feature = "window")]
+pub fn upscaling(text: &str) -> Result<fossps_render::Upscaling, String> {
+    use fossps_render::Upscaling;
+    const ALL: [Upscaling; 6] = [
+        Upscaling::Off,
+        Upscaling::Native,
+        Upscaling::Quality,
+        Upscaling::Balanced,
+        Upscaling::Performance,
+        Upscaling::UltraPerformance,
+    ];
+    let typed = text.trim().to_lowercase().replace('_', "-");
+    ALL.into_iter()
+        .find(|&upscaling| crate::bench::upscaling_name(upscaling) == typed)
+        .ok_or_else(|| {
+            let names: Vec<&str> = ALL.into_iter().map(crate::bench::upscaling_name).collect();
+            format!("the upscaling settings are {}", names.join(", "))
+        })
+}
+
+/// Reads a frame-time budget typed in milliseconds, such as `16.6`.
+///
+/// # Errors
+///
+/// Fails with what to type instead.
+#[cfg(feature = "window")]
+pub fn budget(text: &str) -> Result<f64, String> {
+    text.trim()
+        .parse()
+        .ok()
+        .filter(|budget: &f64| budget.is_finite() && *budget > 0.0)
+        .ok_or_else(|| {
+            "a budget is a number of milliseconds above 0, such as 16.6 (one frame at 60 \
+             frames a second)"
+                .to_owned()
+        })
+}
+
+/// `fossps bench`: draws the benchmark with no window, prints how long its
+/// frames took, and writes the numbers to `json` if a file is named.
+///
+/// # Errors
+///
+/// Fails with a message for the person if the frames could not be drawn,
+/// the file could not be written, or a slow frame took longer than
+/// `budget` milliseconds.
+#[cfg(feature = "window")]
+pub fn bench(
+    bench: &crate::bench::Bench,
+    budget: Option<f64>,
+    json: Option<&Path>,
+) -> Result<(), String> {
+    log::info!(
+        "Drawing {} frames with no window. This takes a few seconds on a graphics card \
+         and a few minutes without one.",
+        u64::from(bench.frames) + u64::from(bench.warmup)
+    );
+    let report = crate::bench::run(bench)
+        .map_err(|error| format!("The benchmark could not be drawn: {error}"))?;
+    print!("{}", report.text());
+    if let Some(file) = json {
+        std::fs::write(file, report.json(budget)).map_err(|error| {
+            format!(
+                "The numbers could not be written to {}: {error}\nName a file in a folder \
+                 that exists and that you may write to, such as `--json bench.json`.",
+                file.display()
+            )
+        })?;
+        println!("\nThe numbers are in {} as JSON.", file.display());
+    }
+    match budget {
+        None => Ok(()),
+        Some(budget) if report.within(Some(budget)) => {
+            println!(
+                "\nWithin budget: a slow frame took {:.2} ms and may take {budget} ms.",
+                report.frame.slow
+            );
+            Ok(())
+        }
+        Some(budget) => Err(format!(
+            "\nOver budget: a slow frame took {:.2} ms and may take {budget} ms.\nIf other \
+             programs were busy, close them and run it again. If it stays over, something \
+             made drawing slower: compare with the last version that was within budget.",
+            report.frame.slow
+        )),
+    }
+}
+
 /// `text` as one word for a command line: in quotes if it has a space.
 #[must_use]
 pub fn quoted(text: &str) -> String {

@@ -21,7 +21,6 @@ pub(crate) enum Then {
     /// It is shown in the window.
     Show,
     /// Its pixels are copied out.
-    #[cfg_attr(not(test), allow(dead_code))]
     Copy,
 }
 

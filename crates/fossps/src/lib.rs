@@ -26,6 +26,8 @@
 
 #[cfg(feature = "window")]
 mod app;
+#[cfg(feature = "window")]
+pub mod bench;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod cli;

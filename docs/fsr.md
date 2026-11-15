@@ -21,10 +21,11 @@ AMD's FidelityFX SDK 1.1.4 only builds on Windows. Checked on Fedora with GCC 16
 | Some functions are looked up under an extension's name (`…KHR`), assuming the game enabled the extension | the shim tries the plain Vulkan 1.1 name when that finds nothing |
 | It allocates from the last memory type that fits, which on AMD cards needs a feature the game has not enabled | the shim hides those memory types from the SDK |
 | It refuses memory the CPU can see, the only kind a software renderer has | patch to `findMemoryTypeIndex` |
+| A struct is declared 32-byte aligned but placed at any 4-byte offset, which crashes an optimised GCC build | patch: the alignment is dropped |
 | The GLSL declares the luminance history image as 8-bit while the SDK creates it as 16-bit floats, which Vulkan leaves undefined | `build.rs` corrects the declaration as it reads the shader |
 | When creating a context fails half-way it frees nothing | the shim notes when the backend was created and, on failure, asks the SDK to take down whatever exists |
 
-The vendored files and the two patches are listed in
+The vendored files and the three patches are listed in
 `crates/fossps-fsr/vendor/README.md`.
 
 ## Choices made once, at build time

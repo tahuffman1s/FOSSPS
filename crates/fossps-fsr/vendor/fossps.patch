@@ -13,7 +13,19 @@
  ///
 --- a/src/backends/vk/ffx_vk.cpp
 +++ b/src/backends/vk/ffx_vk.cpp
-@@ -402,13 +402,21 @@
+@@ -200,7 +200,10 @@
+     VkPipelineStageFlags    srcStageMask = 0;
+     VkPipelineStageFlags    dstStageMask = 0;
+ 
+-    typedef struct alignas(32) EffectContext {
++    // FOSSPS: was `alignas(32)`. The array of these sits in the scratch
++    // buffer at an offset rounded up to 4 bytes only, so the promise was
++    // not kept, and GCC at -O2 crashed writing to it with aligned moves.
++    typedef struct EffectContext {
+ 
+         // Effect identifier -- used for various resource callbacks to application
+         FfxEffect           effectId;
+@@ -402,13 +405,21 @@
      vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
  
      uint32_t bestCandidate = UINT32_MAX;
@@ -35,7 +47,7 @@
  
              bestCandidate = i;
              outProperties = memProperties.memoryTypes[i].propertyFlags;
-@@ -419,6 +427,13 @@
+@@ -419,6 +430,13 @@
          }
      }
  

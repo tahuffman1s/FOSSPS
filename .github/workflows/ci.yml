@@ -42,3 +42,39 @@ jobs:
       - run: cargo test -p fossps-audio --no-default-features --lib --tests
       # The dedicated server builds on its own, without the window feature.
       - run: cargo build -p fossps-server
+
+  # Draws the benchmark scene and fails if its frames have become much slower.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Install Linux build dependencies
+        # lavapipe draws on the processor: these machines have no graphics card.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libasound2-dev libvulkan1 mesa-vulkan-drivers
+      - run: cargo build --release -p fossps
+      # The budget is for a slow frame (99 of 100 are faster) on lavapipe on
+      # this kind of machine, with room for a busy one; see docs/decisions.md.
+      - name: Benchmark
+        run: |
+          set -o pipefail
+          ./target/release/fossps bench --budget-ms 300 --json bench.json | tee bench.txt
+      - name: Show the numbers
+        if: always()
+        run: |
+          {
+            echo '```'
+            cat bench.txt 2>/dev/null || echo 'The benchmark did not run.'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench
+          path: bench.json
+          if-no-files-found: ignore
