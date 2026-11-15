@@ -286,3 +286,108 @@ fn serve_in_a_folder_with_no_game_says_what_to_do() {
     assert!(said.contains("There is no game here"), "{said}");
     assert!(said.contains("`fossps serve my-game`"), "{said}");
 }
+
+/// A UDP port nothing is using right now.
+fn free_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn join_with_no_server_there_says_what_to_check() {
+    let address = format!("127.0.0.1:{}", free_port());
+
+    let output = fossps(&scratch("join-nobody"), &["join", &address]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(
+        said.contains(&format!("Could not join {address}: no server answered.")),
+        "{said}"
+    );
+    assert!(said.contains("`fossps serve`"), "{said}");
+    assert!(said.contains("UDP (not TCP)"), "{said}");
+}
+
+#[test]
+fn join_with_an_address_that_cannot_be_read_says_how_to_write_one() {
+    let output = fossps(&scratch("join-unreadable"), &["join", "localhost:port"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("Could not join"), "{said}");
+    assert!(said.contains("`localhost:port`"), "{said}");
+    assert!(said.contains("The port can be left out"), "{said}");
+}
+
+#[test]
+fn serve_on_a_port_that_is_taken_says_how_to_choose_another() {
+    let folder = scratch("serve-taken");
+    assert!(fossps(&folder, &["new", "."]).status.success());
+    let taken = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+
+    let output = fossps(&folder, &["serve", "--port", &port.to_string()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("The server could not start"), "{said}");
+    assert!(said.contains("`fossps serve --port "), "{said}");
+}
+
+#[test]
+fn a_player_joins_a_running_serve_and_walks() {
+    use fossps::Game;
+    use fossps::input::{ActionMap, Input, Key};
+    use fossps::online::JoinedGame;
+    use std::time::Duration;
+
+    /// Stops the server even when the test fails.
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let folder = scratch("serve-join");
+    assert!(fossps(&folder, &["new", "."]).status.success());
+    let port = free_port();
+    let _server = Running(
+        Command::new(env!("CARGO_BIN_EXE_fossps"))
+            .args(["serve", "--port", &port.to_string()])
+            .current_dir(&folder)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let actions = ActionMap::default_fps();
+    let address = format!("127.0.0.1:{port}");
+    // The server may still be starting: each try asks for five seconds.
+    let mut tries = 0;
+    let mut joined = loop {
+        let mut joined = JoinedGame::connect(&address, &actions, 60).unwrap();
+        match joined.wait_until_joined(|| {}) {
+            Ok(_) => break joined,
+            Err(error) if tries == 5 => panic!("{error}"),
+            Err(_) => tries += 1,
+        }
+    };
+
+    let mut input = Input::new(actions);
+    input.press(Key::W);
+    let step = Duration::from_secs_f32(1.0 / 60.0);
+    for _ in 0..90 {
+        joined.tick(input.tick(), step.as_secs_f32());
+        std::thread::sleep(step);
+    }
+
+    let here = joined.player().position;
+    assert!(here[2] < -2.0, "{here:?}");
+    assert!(joined.closed().is_none());
+}

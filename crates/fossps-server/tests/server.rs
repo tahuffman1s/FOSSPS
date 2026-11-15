@@ -32,8 +32,13 @@ fn help_shows_how_to_serve_and_how_to_stop() {
 
     assert!(output.status.success());
     let said = text(&output.stdout);
-    assert!(said.contains("Usage: fossps-server [FOLDER]"), "{said}");
+    assert!(
+        said.contains("Usage: fossps-server [OPTIONS] [FOLDER]"),
+        "{said}"
+    );
     assert!(said.contains("fossps-server my-game"), "{said}");
+    assert!(said.contains("--port <PORT>"), "{said}");
+    assert!(said.contains("[default: 24680]"), "{said}");
     assert!(said.contains("Press Ctrl-C to stop the server."), "{said}");
 }
 

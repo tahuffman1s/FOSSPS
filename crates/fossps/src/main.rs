@@ -1,4 +1,5 @@
-//! The `fossps` command: `fossps new` creates a game and `fossps run` plays it.
+//! The `fossps` command: `fossps new` creates a game, `fossps run` plays it,
+//! `fossps serve` hosts it and `fossps join` joins a hosted one.
 
 mod demo;
 
@@ -7,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use fossps::cli::{self, quoted};
+use fossps::online::{DEFAULT_PORT, JoinedGame, LocalGame};
 use fossps::scaffold::{self, NewGame};
 use fossps::script::ENTRY_SCRIPT;
 use fossps::script::mode::Phase;
@@ -67,8 +69,10 @@ enum Command {
     },
     /// Run a game as a server, with no window
     #[command(
-        after_help = "Examples:\n  fossps serve            Serve the game in this folder\n  \
-                            fossps serve my-game    Serve the game in the folder my-game\n\n\
+        after_help = "Examples:\n  fossps serve                Serve the game in this folder\n  \
+                            fossps serve my-game        Serve the game in the folder my-game\n  \
+                            fossps serve --port 7000    Take players on UDP port 7000\n\n\
+                      Players join with `fossps join` and this computer's address.\n\
                       Press Ctrl-C to stop the server. For a machine that only hosts, the \
                       separate\nfossps-server program does the same and needs no graphics \
                       card or desktop."
@@ -76,6 +80,19 @@ enum Command {
     Serve {
         /// The game's folder. Leave it out to serve the game in the folder you are in
         folder: Option<PathBuf>,
+        /// The UDP port players join through
+        #[arg(long, default_value_t = DEFAULT_PORT, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+    },
+    /// Join a game someone is serving
+    #[command(
+        after_help = "Examples:\n  fossps join                     Join the server on this computer\n  \
+                            fossps join 192.168.1.20        Join the server at that address\n  \
+                            fossps join example.com:7000    Join a server on another port than 24680"
+    )]
+    Join {
+        /// The server's address. Leave it out to join a server on this computer
+        address: Option<String>,
     },
     /// Open a test window that shows what your keyboard, mouse or gamepad is doing
     Demo,
@@ -88,9 +105,12 @@ fn main() -> ExitCode {
         Some(Command::New { folder }) => new(&folder),
         Some(Command::Run { folder }) => run(folder.as_deref().unwrap_or(Path::new("."))),
         Some(Command::Check { folder }) => check(folder.as_deref().unwrap_or(Path::new("."))),
-        Some(Command::Serve { folder }) => {
-            cli::serve_game(folder.as_deref().unwrap_or(Path::new(".")), "fossps serve")
-        }
+        Some(Command::Serve { folder, port }) => cli::serve_game(
+            folder.as_deref().unwrap_or(Path::new(".")),
+            "fossps serve",
+            port,
+        ),
+        Some(Command::Join { address }) => join(address.as_deref().unwrap_or("localhost")),
         Some(Command::Demo) => demo(),
         // Asking for nothing is not a mistake: show what there is to ask for.
         None => Cli::command()
@@ -232,7 +252,36 @@ fn run(folder: &Path) -> Result<(), String> {
     {
         config.title = format!("{} | FOSSPS", name.to_string_lossy());
     }
+    let game = LocalGame::start(game, &config.actions, config.tick_rate)
+        .map_err(|error| {
+            format!(
+                "The game could not start: {error}\nIt is played over this computer's own \
+                 network (127.0.0.1), which a firewall or security program may be blocking."
+            )
+        })?
+        .with_title(config.title.clone());
     play(config, game)
+}
+
+/// `fossps join`: plays on the server at `address` until the window is
+/// closed or the server lets go.
+fn join(address: &str) -> Result<(), String> {
+    let mut config = Config::default();
+    let mut game = JoinedGame::connect(address, &config.actions, config.tick_rate)
+        .map_err(|error| error.to_string())?;
+    log::info!("Joining {address}...");
+    let id = game
+        .wait_until_joined(|| {})
+        .map_err(|error| error.to_string())?;
+    log::info!(
+        "Joined as Player {}. Close the window to leave.",
+        u32::from(id) + 1
+    );
+    config.title = format!("{address} | FOSSPS");
+    let mut game = game.with_title(config.title.clone());
+    fossps::run(config, &mut game).map_err(|error| error.to_string())?;
+    // The window closing by itself needs a reason; the player closing it does not.
+    game.closed().map_or(Ok(()), |error| Err(error.to_string()))
 }
 
 /// `fossps demo`: shows live input in a window.
