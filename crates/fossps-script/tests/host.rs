@@ -787,15 +787,17 @@ fn a_require_that_fails_is_not_tried_again_every_tick() {
     }
     let said = printed();
     assert_eq!(said.last().unwrap(), "1101 true");
-    let game = GameFolder::new(
-        r#"local last
+    // From text, so that the disk's speed is not what the time limit sees.
+    let main = r#"local last
         for n = 1, 2000 do
             local ok, problem = pcall(require, "./made-up-" .. n)
             last = problem
         end
-        print(last)"#,
+        print(last)"#;
+    let _host = ScriptHost::from_sources(
+        [(ENTRY_SCRIPT.to_owned(), main.to_owned())],
+        ActionMap::default_fps(),
     );
-    let _host = game.open();
     assert!(printed().join("").contains("the most it can"));
 }
 
