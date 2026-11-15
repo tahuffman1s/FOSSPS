@@ -1,6 +1,6 @@
 //! The interface a game implements to be driven by the engine.
 
-use fossps_input::InputFrame;
+use fossps_input::{ActionSetId, InputFrame};
 
 /// A game the engine can run.
 pub trait Game {
@@ -36,6 +36,7 @@ pub struct Frame {
     title: Option<String>,
     close: bool,
     view: Option<View>,
+    action_set: Option<ActionSetId>,
 }
 
 /// Where the world is seen from: the eye's position, then which way it
@@ -56,6 +57,7 @@ impl Frame {
             title: None,
             close: false,
             view: None,
+            action_set: None,
         }
     }
 
@@ -88,6 +90,26 @@ impl Frame {
         });
     }
 
+    /// Makes `set` the live action set from the next tick on: call it with
+    /// the menu's set when a menu opens, and with
+    /// [`ActionMap::GAMEPLAY`](fossps_input::ActionMap::GAMEPLAY) when it
+    /// closes.
+    ///
+    /// Only the live set's actions hear the player. The set also says what
+    /// the mouse is for: one made with
+    /// [`MouseMode::Pointer`](fossps_input::MouseMode::Pointer) shows the
+    /// cursor and lets it go, and one made with `MouseMode::Look` hides it
+    /// and holds it in the window again. The key that was held to open the
+    /// menu does nothing in the menu until it is pressed again; see
+    /// [`Input::set_active_set`](fossps_input::Input::set_active_set).
+    ///
+    /// Asking for the set that is already live does nothing, so a game can
+    /// call this every frame. A game on a server has no player at the
+    /// keyboard, so nothing happens there.
+    pub fn use_action_set(&mut self, set: ActionSetId) {
+        self.action_set = Some(set);
+    }
+
     /// Closes the window and ends the game after this frame, as if the
     /// player had closed it. A game on a server has no window, so nothing
     /// happens there.
@@ -105,6 +127,12 @@ impl Frame {
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn view(&self) -> Option<View> {
         self.view
+    }
+
+    /// The action set requested this frame, if any.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn action_set(&self) -> Option<ActionSetId> {
+        self.action_set
     }
 
     /// The title requested this frame, if any.

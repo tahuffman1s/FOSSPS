@@ -4,7 +4,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use fossps_input::{ActionMap, Input, MouseWheel};
+use fossps_input::{ActionMap, ActionSetId, Input, MouseMode, MouseWheel};
 use fossps_render::{Camera, RenderConfig, RenderError, Renderer, Upscaling};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -137,9 +137,14 @@ impl std::error::Error for AppError {
 /// Opens a window and runs `game` until the window is closed.
 ///
 /// Keyboard, mouse and gamepad all feed `config.actions`, and
-/// [`Game::tick`] is called `config.tick_rate` times per second. Clicking the
-/// window captures the mouse for looking around; Escape or switching to
-/// another window lets it go.
+/// [`Game::tick`] is called `config.tick_rate` times per second.
+///
+/// The live action set decides what the mouse is for. While it is one the
+/// player looks around in (as the first set, `gameplay`, is), clicking the
+/// window captures the mouse; Escape or switching to another window always
+/// lets it go. When the game makes a menu's set live with
+/// [`Frame::use_action_set`], the cursor is shown and freed, and it is
+/// captured again when the game goes back.
 ///
 /// Call this from the main thread.
 ///
@@ -220,6 +225,33 @@ impl<G: Game> App<G> {
         }
         window.set_cursor_visible(false);
         self.captured = true;
+    }
+
+    /// What the mouse is for in the live action set.
+    fn mouse_mode(&self) -> MouseMode {
+        self.input
+            .map()
+            .mouse_mode(self.input.active_set())
+            .unwrap_or_default()
+    }
+
+    /// Makes `set` live and gives the mouse to it: freed for a set that
+    /// points, captured for one that looks around.
+    fn use_action_set(&mut self, set: ActionSetId) {
+        let before = self.input.active_set();
+        self.input.set_active_set(set);
+        // Asking again for the live set, or for one this map does not have,
+        // must not take back a mouse the player freed with Escape.
+        if self.input.active_set() == before {
+            return;
+        }
+        match self.mouse_mode() {
+            MouseMode::Pointer => self.release_mouse(),
+            // The player is already in the game, so no click is asked for.
+            // After Escape or a switch of windows, a click still is.
+            MouseMode::Look if self.focused && !self.captured => self.capture_mouse(),
+            MouseMode::Look => {}
+        }
     }
 
     /// Gives the cursor back to the desktop.
@@ -319,6 +351,9 @@ impl<G: Game> App<G> {
             }
             self.last_view = Some(view.position);
         }
+        if let Some(set) = frame.action_set() {
+            self.use_action_set(set);
+        }
         if let (Some(title), Some(window)) = (frame.take_title(), &self.window) {
             window.set_title(&title);
         }
@@ -404,9 +439,12 @@ impl<G: Game> ApplicationHandler for App<G> {
                     return;
                 };
                 let pressed = event.state == ElementState::Pressed;
-                // Escape always frees the mouse, so a player can never be
-                // trapped in the window. It still reaches the action map.
-                if pressed && code == KeyCode::Escape {
+                // Escape always frees the mouse, whatever the live action
+                // set does with it, so a player can never be trapped in the
+                // window. It still reaches the action map.
+                // Only a new press does: a key that repeats while held
+                // would free a mouse the game has just captured again.
+                if pressed && !event.repeat && !is_synthetic && code == KeyCode::Escape {
                     self.release_mouse();
                 }
                 let Some(key) = translate::key(code) else {
@@ -422,9 +460,10 @@ impl<G: Game> ApplicationHandler for App<G> {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
-                if pressed && !self.captured {
+                if pressed && !self.captured && self.mouse_mode() == MouseMode::Look {
                     // This click only captures the mouse. Passing it on would
-                    // fire a shot the player did not mean.
+                    // fire a shot the player did not mean. A set that points
+                    // wants its clicks.
                     self.capture_mouse();
                     return;
                 }
@@ -437,7 +476,11 @@ impl<G: Game> ApplicationHandler for App<G> {
                     self.input.release(button);
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.captured => self.scroll(delta),
+            WindowEvent::MouseWheel { delta, .. }
+                if self.captured || self.mouse_mode() == MouseMode::Pointer =>
+            {
+                self.scroll(delta);
+            }
             _ => {}
         }
     }

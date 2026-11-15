@@ -5,6 +5,9 @@
 //! drive each action. Every action can be bound on a gamepad as well as on
 //! keyboard and mouse.
 //!
+//! Actions come in sets, such as gameplay and menu, and one set is live at a
+//! time: see [`ActionMap::add_set`] and [`Input::set_active_set`].
+//!
 //! This crate has no platform dependencies. A window layer feeds device events
 //! into [`Input`], and once per simulation tick [`Input::tick`] produces an
 //! [`InputFrame`]: a plain snapshot of every action that game code, replays and
@@ -43,6 +46,6 @@ pub use devices::{GamepadButton, Key, MouseButton, MouseWheel, Stick, StickAxis}
 pub use file::{BindingsError, BindingsProblem, ProblemKind};
 pub use frame::{ActionState, InputFrame};
 pub use input::{Input, RebindError, Rebound};
-pub use map::{ActionId, ActionMap, Conflict, Device, MapError, ParityGap};
+pub use map::{ActionId, ActionMap, ActionSetId, Conflict, Device, MapError, MouseMode, ParityGap};
 pub use names::UnknownName;
 pub use shaping::Deadzone;

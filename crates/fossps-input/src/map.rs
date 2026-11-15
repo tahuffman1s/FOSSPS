@@ -21,11 +21,38 @@ impl ActionId {
     }
 }
 
+/// A handle to an action set in an [`ActionMap`].
+///
+/// Every map starts with one set, [`ActionMap::GAMEPLAY`];
+/// [`ActionMap::add_set`] makes more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ActionSetId(usize);
+
+/// What the mouse is for while an action set is live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MouseMode {
+    /// Looking around: the cursor is hidden and held in the window, and
+    /// moving the mouse drives `MouseMotion` bindings.
+    #[default]
+    Look,
+    /// Pointing at things: the cursor is visible and free to leave the
+    /// window, as a menu needs.
+    Pointer,
+}
+
+/// One named group of actions.
+#[derive(Debug, Clone, PartialEq)]
+struct Set {
+    name: Box<str>,
+    mouse: MouseMode,
+}
+
 /// One named action and where its bindings live in the map.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Action {
     pub(crate) name: Box<str>,
     pub(crate) kind: ActionKind,
+    pub(crate) set: ActionSetId,
     pub(crate) bindings: Range<usize>,
     pub(crate) stick_curve: f32,
 }
@@ -41,18 +68,127 @@ pub(crate) struct Action {
 /// map.axis2d("look", ["MouseMotion", "RightStick"])?;
 /// # Ok::<(), fossps_input::MapError>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// # Action sets
+///
+/// Actions are grouped into sets, and one set is live at a time: while a
+/// menu is open, `fire` should not fire. A map starts with the set
+/// [`GAMEPLAY`](Self::GAMEPLAY). [`add_set`](Self::add_set) starts another,
+/// and [`Input::set_active_set`](crate::Input::set_active_set) switches
+/// between them. The same key can do one thing in each set.
+///
+/// ```
+/// use fossps_input::{ActionMap, MouseMode};
+///
+/// let mut map = ActionMap::new();
+/// map.button("pause", ["Escape", "GamepadStart"])?;
+///
+/// // Actions added from here on belong to "menu".
+/// let menu = map.add_set("menu", MouseMode::Pointer)?;
+/// let resume = map.button("resume", ["Escape", "GamepadStart"])?;
+///
+/// assert_eq!(map.set_of(resume), Some(menu));
+/// assert!(map.conflicts().is_empty());
+/// # Ok::<(), fossps_input::MapError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq)]
 pub struct ActionMap {
     actions: Vec<Action>,
     bindings: Vec<Binding>,
     deadzone: Deadzone,
+    /// Never empty: the first is [`Self::GAMEPLAY`]. New actions join the last.
+    sets: Vec<Set>,
+}
+
+impl Default for ActionMap {
+    fn default() -> Self {
+        Self {
+            actions: Vec::new(),
+            bindings: Vec::new(),
+            deadzone: Deadzone::default(),
+            sets: vec![Set {
+                name: "gameplay".into(),
+                mouse: MouseMode::Look,
+            }],
+        }
+    }
 }
 
 impl ActionMap {
-    /// An empty map.
+    /// The set every map starts with, named `"gameplay"`. The mouse looks
+    /// around while it is live.
+    pub const GAMEPLAY: ActionSetId = ActionSetId(0);
+
+    /// A map with no actions and the one set [`GAMEPLAY`](Self::GAMEPLAY).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Starts a new action set, such as `"menu"`: every action added after
+    /// this call belongs to it.
+    ///
+    /// `mouse` says what the mouse is for while the set is live:
+    /// [`MouseMode::Pointer`] for a menu, [`MouseMode::Look`] for a set the
+    /// player still looks around in, such as driving.
+    ///
+    /// Action names stay unique across the whole map, so `"jump"` means one
+    /// thing wherever it is read.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the name is empty or a set already has it.
+    pub fn add_set(&mut self, name: &str, mouse: MouseMode) -> Result<ActionSetId, MapError> {
+        if name.trim().is_empty() {
+            return Err(MapError::EmptySetName);
+        }
+        if self.sets.iter().any(|set| &*set.name == name) {
+            return Err(MapError::DuplicateSet {
+                set: name.to_owned(),
+            });
+        }
+        self.sets.push(Set {
+            name: name.into(),
+            mouse,
+        });
+        Ok(ActionSetId(self.sets.len() - 1))
+    }
+
+    /// Finds an action set by name.
+    ///
+    /// # Errors
+    ///
+    /// Fails if no set has that name; the error suggests the closest one.
+    pub fn set(&self, name: &str) -> Result<ActionSetId, UnknownName> {
+        self.sets
+            .iter()
+            .position(|set| &*set.name == name)
+            .map(ActionSetId)
+            .ok_or_else(|| unknown("action set", name, self.sets.iter().map(|s| &*s.name)))
+    }
+
+    /// Every action set in the map, [`GAMEPLAY`](Self::GAMEPLAY) first.
+    pub fn sets(&self) -> impl ExactSizeIterator<Item = ActionSetId> + use<> {
+        (0..self.sets.len()).map(ActionSetId)
+    }
+
+    /// The set's name, or `""` for an id from a different map.
+    #[must_use]
+    pub fn set_name(&self, set: ActionSetId) -> &str {
+        self.sets.get(set.0).map_or("", |s| &s.name)
+    }
+
+    /// What the mouse is for while the set is live, or `None` for an id from
+    /// a different map.
+    #[must_use]
+    pub fn mouse_mode(&self, set: ActionSetId) -> Option<MouseMode> {
+        self.sets.get(set.0).map(|s| s.mouse)
+    }
+
+    /// The set the action belongs to, or `None` for an id from a different map.
+    #[must_use]
+    pub fn set_of(&self, action: ActionId) -> Option<ActionSetId> {
+        self.actions.get(action.0).map(|a| a.set)
     }
 
     /// The standard first-person shooter controls, for keyboard and mouse and for gamepad.
@@ -234,6 +370,7 @@ impl ActionMap {
         self.actions.push(Action {
             name: name.into(),
             kind,
+            set: ActionSetId(self.sets.len() - 1),
             bindings: start..self.bindings.len(),
             stick_curve: 1.0,
         });
@@ -386,7 +523,9 @@ impl ActionMap {
         changed
     }
 
-    /// Lists every key, button or stick that two different actions both use.
+    /// Lists every key, button or stick that two different actions in the
+    /// same set both use. Actions in different sets are never live together,
+    /// so they share inputs freely.
     ///
     /// Sharing is allowed, and sometimes wanted, so this never stops anything:
     /// each [`Conflict`] prints as a sentence to show the player. An empty
@@ -396,6 +535,9 @@ impl ActionMap {
         let mut found: Vec<Conflict> = Vec::new();
         for (index, first) in self.actions.iter().enumerate() {
             for second in &self.actions[index + 1..] {
+                if second.set != first.set {
+                    continue;
+                }
                 for ours in &self.bindings[first.bindings.clone()] {
                     for theirs in &self.bindings[second.bindings.clone()] {
                         for input in shared(*ours, *theirs) {
@@ -625,6 +767,13 @@ impl fmt::Display for ParityGap {
 pub enum MapError {
     /// The action name was empty.
     EmptyName,
+    /// The action set name was empty.
+    EmptySetName,
+    /// An action set with this name already exists.
+    DuplicateSet {
+        /// The repeated name.
+        set: String,
+    },
     /// An action with this name already exists.
     DuplicateAction {
         /// The repeated name.
@@ -652,6 +801,12 @@ impl fmt::Display for MapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyName => f.write_str("An action needs a name, for example \"jump\"."),
+            Self::EmptySetName => f.write_str("An action set needs a name, for example \"menu\"."),
+            Self::DuplicateSet { set } => write!(
+                f,
+                "There is already an action set called \"{set}\". \
+                 Look it up with `map.set(\"{set}\")`, or give the new one a different name."
+            ),
             Self::DuplicateAction { action } => write!(
                 f,
                 "Action \"{action}\" is defined twice. \
@@ -914,6 +1069,89 @@ mod tests {
                 clash("W", "look", "menu"),
                 clash("S", "look", "menu"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_map_starts_with_the_gameplay_set() {
+        let mut map = ActionMap::new();
+        let jump = map.button("jump", ["Space", "GamepadSouth"]).unwrap();
+        assert_eq!(map.sets().collect::<Vec<_>>(), [ActionMap::GAMEPLAY]);
+        assert_eq!(map.set_name(ActionMap::GAMEPLAY), "gameplay");
+        assert_eq!(map.set("gameplay"), Ok(ActionMap::GAMEPLAY));
+        assert_eq!(map.mouse_mode(ActionMap::GAMEPLAY), Some(MouseMode::Look));
+        assert_eq!(map.set_of(jump), Some(ActionMap::GAMEPLAY));
+        for action in ActionMap::default_fps().actions() {
+            assert_eq!(
+                ActionMap::default_fps().set_of(action),
+                Some(ActionMap::GAMEPLAY)
+            );
+        }
+    }
+
+    #[test]
+    fn actions_join_the_set_added_last() {
+        let mut map = ActionMap::new();
+        let pause = map.button("pause", ["Escape", "GamepadStart"]).unwrap();
+        let menu = map.add_set("menu", MouseMode::Pointer).unwrap();
+        let back = map.button("back", ["Escape", "GamepadEast"]).unwrap();
+
+        assert_eq!(map.set_of(pause), Some(ActionMap::GAMEPLAY));
+        assert_eq!(map.set_of(back), Some(menu));
+        assert_eq!(map.set("menu"), Ok(menu));
+        assert_eq!(map.set_name(menu), "menu");
+        assert_eq!(map.mouse_mode(menu), Some(MouseMode::Pointer));
+        assert_eq!(map.sets().len(), 2);
+        // An action that fails to be added does not move the next one.
+        assert!(map.button("back", ["Enter"]).is_err());
+        let confirm = map.button("confirm", ["Enter", "GamepadSouth"]).unwrap();
+        assert_eq!(map.set_of(confirm), Some(menu));
+    }
+
+    #[test]
+    fn set_names_are_checked() {
+        let mut map = ActionMap::new();
+        assert_eq!(
+            map.add_set(" ", MouseMode::Pointer),
+            Err(MapError::EmptySetName)
+        );
+        map.add_set("menu", MouseMode::Pointer).unwrap();
+        let twice = map.add_set("menu", MouseMode::Pointer).unwrap_err();
+        assert!(
+            twice.to_string().contains("already an action set"),
+            "{twice}"
+        );
+        let builtin = map.add_set("gameplay", MouseMode::Look).unwrap_err();
+        assert!(matches!(builtin, MapError::DuplicateSet { .. }));
+
+        let typo = map.set("menus").unwrap_err();
+        assert_eq!(typo.suggestion.as_deref(), Some("menu"));
+        assert!(typo.to_string().contains("action set"), "{typo}");
+    }
+
+    #[test]
+    fn an_action_name_is_taken_in_every_set() {
+        let mut map = ActionMap::new();
+        map.button("jump", ["Space", "GamepadSouth"]).unwrap();
+        map.add_set("menu", MouseMode::Pointer).unwrap();
+        let error = map.button("jump", ["Enter"]).unwrap_err();
+        assert!(matches!(error, MapError::DuplicateAction { .. }));
+    }
+
+    #[test]
+    fn sharing_a_key_across_sets_is_not_a_conflict() {
+        let mut map = ActionMap::new();
+        map.button("pause", ["Escape", "GamepadStart"]).unwrap();
+        map.add_set("menu", MouseMode::Pointer).unwrap();
+        map.button("back", ["Escape", "GamepadStart"]).unwrap();
+        assert_eq!(map.conflicts(), []);
+
+        map.button("close", ["Escape"]).unwrap();
+        let conflicts = map.conflicts();
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(
+            (&*conflicts[0].first, &*conflicts[0].second),
+            ("back", "close")
         );
     }
 }
