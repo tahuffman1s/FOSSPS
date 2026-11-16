@@ -147,7 +147,7 @@ fn a_player_is_told_when_the_server_stops() {
 #[test]
 fn a_game_played_alone_goes_through_the_same_netcode() {
     let actions = ActionMap::default_fps();
-    let mut game = LocalGame::start(new_game("alone"), &actions, TICK_RATE).unwrap();
+    let mut game = LocalGame::start(new_game("alone"), None, &actions, TICK_RATE).unwrap();
     let mut input = Input::new(actions);
 
     input.press(Key::W);
@@ -201,8 +201,15 @@ fn an_open_game_is_played_here_and_joined_by_someone_else() {
         .unwrap()
         .port();
     let actions = ActionMap::default_fps();
-    let mut local =
-        LocalGame::open(new_game("open"), "open-game", port, &actions, TICK_RATE).unwrap();
+    let mut local = LocalGame::open(
+        new_game("open"),
+        None,
+        "open-game",
+        port,
+        &actions,
+        TICK_RATE,
+    )
+    .unwrap();
     assert_eq!(local.hosted().players().count(), 1);
     let nothing = Input::new(actions.clone());
 
@@ -222,6 +229,120 @@ fn an_open_game_is_played_here_and_joined_by_someone_else() {
         .wait_until_joined(|| local.tick(nothing.frame(), STEP))
         .unwrap();
     assert_eq!(local.hosted().players().count(), 2);
+}
+
+/// The level `fossps new` writes: a 32 m floor with a wall around it at
+/// 16 m, and three places to start at each end, 14 m from the middle.
+fn starter_level() -> fossps::assets::Scene {
+    fossps::level::from_bytes("level.glb", scaffold::STARTER_LEVEL).unwrap()
+}
+
+#[test]
+fn a_game_with_a_level_starts_at_a_spawn_point_and_its_walls_are_solid() {
+    let actions = ActionMap::default_fps();
+    let level = starter_level();
+    let mut game = LocalGame::start(new_game("level"), Some(&level), &actions, TICK_RATE).unwrap();
+    let mut input = Input::new(actions);
+    let play = |game: &mut LocalGame, input: &mut Input, ticks: u32| {
+        for _ in 0..ticks {
+            game.tick(input.tick(), STEP);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    // Settled at one of the six spawn points, looking at the other end.
+    play(&mut game, &mut input, 30);
+    let start = game.joined().player().position;
+    assert!(start[1].abs() < 0.02, "on the floor: {start:?}");
+    assert!((start[2].abs() - 14.0).abs() < 0.01, "{start:?}");
+    assert!([0.0, 6.0].contains(&start[0].abs().round()), "{start:?}");
+    let yaw = game.joined().yaw();
+    let faces_south = (yaw - std::f32::consts::PI).abs() < 0.001;
+    assert!(
+        if start[2] < 0.0 {
+            faces_south
+        } else {
+            yaw == 0.0
+        },
+        "at {start:?} facing {yaw}"
+    );
+
+    // Backing away from the middle, the wall around the level is 2 m behind.
+    // Two seconds of walking would be 9 m on a flat floor.
+    input.press(Key::S);
+    play(&mut game, &mut input, 120);
+    input.release(Key::S);
+    play(&mut game, &mut input, 60);
+
+    let here = game.joined().player().position;
+    let out = here[2].abs();
+    assert!(out > 15.5 && out < 15.7, "stopped by the wall: {here:?}");
+    assert!((here[0] - start[0]).abs() < 0.01, "{here:?}");
+    assert!(here[1].abs() < 0.02, "on the floor: {here:?}");
+    let (_, on_server) = game.hosted().players().next().unwrap();
+    assert!(
+        distance(on_server.position, here) < 0.001,
+        "server {:?}, player {here:?}",
+        on_server.position
+    );
+}
+
+#[test]
+fn players_who_join_a_level_start_apart_and_one_without_it_is_put_right() {
+    let level = starter_level();
+    let hosted = HostedGame::open(new_game("apart"), "127.0.0.1:0", TICK_RATE).unwrap();
+    let mut hosted = hosted.with_level(&level);
+    let address = hosted.address().unwrap().to_string();
+    // The first has the level; the second joined with no copy of the game.
+    let nothing = Input::new(ActionMap::default_fps());
+    let mut first = JoinedGame::connect(&address, &ActionMap::default_fps(), TICK_RATE)
+        .unwrap()
+        .with_level(&level);
+    first
+        .wait_until_joined(|| hosted.tick(nothing.frame(), STEP))
+        .unwrap();
+    let mut second = join(&mut hosted, &address);
+    let (mut still, mut walking) = (
+        Input::new(ActionMap::default_fps()),
+        Input::new(ActionMap::default_fps()),
+    );
+    play(
+        &mut hosted,
+        &mut [(&mut first, &mut still), (&mut second, &mut walking)],
+        30,
+    );
+
+    // The second player is put at the other end from the first.
+    let (a, b) = (first.player().position, second.player().position);
+    assert!((a[2].abs() - 14.0).abs() < 0.01, "{a:?}");
+    assert!((b[2] + a[2]).abs() < 0.01, "{a:?} and {b:?}");
+
+    // Without the level the second player looks north and thinks the way
+    // is clear; the server knows where the walls are and has the last word.
+    walking.press(if b[2] < 0.0 { Key::W } else { Key::S });
+    play(
+        &mut hosted,
+        &mut [(&mut first, &mut still), (&mut second, &mut walking)],
+        150,
+    );
+    walking.release(Key::W);
+    walking.release(Key::S);
+    play(
+        &mut hosted,
+        &mut [(&mut first, &mut still), (&mut second, &mut walking)],
+        60,
+    );
+    let here = second.player().position;
+    assert!(here[2].abs() < 16.0, "kept inside the wall: {here:?}");
+    let on_server = hosted
+        .players()
+        .find(|(id, _)| Some(*id) == second.id())
+        .map(|(_, player)| player.position)
+        .unwrap();
+    assert!(
+        distance(on_server, here) < 0.05,
+        "server {on_server:?}, player {here:?}"
+    );
 }
 
 /// A map file with one spawn point at `position`.
