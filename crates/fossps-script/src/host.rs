@@ -257,6 +257,15 @@ impl ScriptHost {
         self.last_error.as_ref()
     }
 
+    /// How many different mistakes the script's functions have made, and
+    /// had logged, since it was last loaded. One that happens again on a
+    /// later tick is not counted again, so a number that went up over a
+    /// tick means that tick found a new one.
+    #[must_use]
+    pub fn mistakes_logged(&self) -> usize {
+        self.reported.len()
+    }
+
     /// Runs one simulation tick of `step` seconds with this tick's `input`.
     ///
     /// The first tick calls the script's `game.onStart` functions before its

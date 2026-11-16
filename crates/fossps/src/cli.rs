@@ -106,7 +106,7 @@ pub fn walked(check: &crate::online::WalkCheck) -> String {
         };
         return format!(
             "Players can walk it: one was started at {places} and landed on the floor every \
-             time. Nothing was pressed, so walk it yourself with `fossps run`.\n"
+             time. They stood still there, so walk it yourself with `fossps run`.\n"
         );
     }
     check

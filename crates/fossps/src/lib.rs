@@ -45,6 +45,7 @@ mod pace;
 #[cfg(feature = "cli")]
 pub mod package;
 pub mod player;
+pub mod press;
 pub mod scaffold;
 mod script_game;
 pub mod server;
