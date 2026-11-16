@@ -40,6 +40,7 @@ mod game;
 mod gamepad;
 #[cfg(feature = "window")]
 pub mod level;
+pub mod map;
 pub mod online;
 #[cfg(feature = "window")]
 mod pace;

@@ -223,3 +223,85 @@ fn an_open_game_is_played_here_and_joined_by_someone_else() {
         .unwrap();
     assert_eq!(local.hosted().players().count(), 2);
 }
+
+/// A map file with one spawn point at `position`.
+fn map_with_spawn(position: [f32; 3]) -> String {
+    let [x, y, z] = position;
+    format!(
+        "version = 1\n\n[[entity]]\nid = \"only\"\ntype = \"spawn\"\n\
+         position = [{x:?}, {y:?}, {z:?}]\n"
+    )
+}
+
+#[test]
+fn players_start_at_the_maps_spawn_point_and_a_saved_map_is_picked_up() {
+    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("online-map");
+    let _ = std::fs::remove_dir_all(&folder);
+    scaffold::new_game(&folder).unwrap();
+    let map_file = folder.join(fossps::map::MAP_FILE);
+    let first = [10.0, 0.0, -6.0];
+    std::fs::write(&map_file, map_with_spawn(first)).unwrap();
+
+    let game = ScriptGame::open(&folder, &ActionMap::default_fps()).unwrap();
+    assert_eq!(game.map().spawns().count(), 1);
+    let mut hosted = HostedGame::open(game, "127.0.0.1:0", TICK_RATE).unwrap();
+    let address = hosted.address().unwrap().to_string();
+
+    // The server puts the player at the spawn point, and the player's own
+    // side, which started in the middle, is brought there.
+    let mut one = join(&mut hosted, &address);
+    let mut still = Input::new(ActionMap::default_fps());
+    play(&mut hosted, &mut [(&mut one, &mut still)], 30);
+    let (_, on_server) = hosted.players().next().unwrap();
+    assert!(distance(on_server.position, first) < 0.01, "{on_server:?}");
+    assert!(
+        distance(one.player().position, first) < 0.01,
+        "{:?}",
+        one.player().position
+    );
+
+    // The map is saved with the spawn point somewhere else while the game
+    // runs. The game notices, and the next player comes in there.
+    let second = [-20.0, 0.0, 8.0];
+    std::fs::write(&map_file, map_with_spawn(second)).unwrap();
+    let moved = |hosted: &HostedGame| {
+        hosted
+            .game()
+            .map()
+            .spawns()
+            .any(|spawn| spawn.position == second)
+    };
+    for _ in 0..2000 {
+        if moved(&hosted) {
+            break;
+        }
+        play(&mut hosted, &mut [(&mut one, &mut still)], 1);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(moved(&hosted), "the saved map was never picked up");
+    let mut two = join(&mut hosted, &address);
+    let mut also_still = Input::new(ActionMap::default_fps());
+    play(
+        &mut hosted,
+        &mut [(&mut one, &mut still), (&mut two, &mut also_still)],
+        30,
+    );
+    let id = two.id().unwrap();
+    let (_, on_server) = hosted.players().find(|(other, _)| *other == id).unwrap();
+    assert!(distance(on_server.position, second) < 0.01, "{on_server:?}");
+    // Whoever was already playing stays where they are.
+    assert!(distance(one.player().position, first) < 0.01);
+
+    // A save with a mistake in it changes nothing: the map that worked stays.
+    std::fs::write(&map_file, "version = 1\n[[entity]]\nid = 3\n").unwrap();
+    for _ in 0..2000 {
+        if hosted.game().map_error().is_some() {
+            break;
+        }
+        play(&mut hosted, &mut [], 1);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let said = hosted.game().map_error().unwrap().to_string();
+    assert!(said.contains("line 3: An id has to be text"), "{said}");
+    assert!(moved(&hosted));
+}
