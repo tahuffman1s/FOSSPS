@@ -120,7 +120,8 @@ enum Command {
                             fossps serve my-game        Serve the game in the folder my-game\n  \
                             fossps serve --port 7000    Take players on UDP port 7000\n\n\
                       Players on your network join with `fossps join`, which finds the \
-                      server by itself.\nFrom elsewhere they add this computer's address.\n\
+                      server by itself.\nFrom elsewhere they add this computer's address. \
+                      They need no copy of the game:\nthe server sends them its level.\n\
                       Press Ctrl-C to stop the server. For a machine that only hosts, the \
                       separate\nfossps-server program does the same and needs no graphics \
                       card or desktop."
@@ -139,7 +140,10 @@ enum Command {
                             fossps join 192.168.1.20        Join the server at that address\n  \
                             fossps join example.com:7000    Join a server on another port than 24680\n\n\
                       With no address, `fossps join` joins the game it finds. If it finds \
-                      several, it lists\nthem and asks which one."
+                      several, it lists\nthem and asks which one.\n\n\
+                      No copy of the game is needed: the server sends its level, which is \
+                      kept on this\ncomputer so it is fetched once. Set FOSSPS_CACHE to a \
+                      folder to keep levels there."
     )]
     Join {
         /// The server's address. Leave it out to find a game on this network
@@ -555,7 +559,11 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     }
     let mut config = player_config();
     let game = open(folder, &config, "run")?;
-    config.level = cli::load_level(folder).map_err(|error| not_started(&error, "run"))?;
+    let level = cli::load_level_file(folder).map_err(|error| not_started(&error, "run"))?;
+    // The level's file is only needed to hand to players who join.
+    let (level, file) = level.unzip();
+    let file = file.filter(|_| others_may_join);
+    config.level = level;
 
     match scaffold::refresh_types(folder) {
         Ok(true) => log::info!(
@@ -579,7 +587,7 @@ fn run(folder: &Path, others_may_join: bool) -> Result<(), String> {
     if !name.is_empty() {
         config.title = format!("{name} | FOSSPS");
     }
-    start(config, game, &name, others_may_join)
+    start(config, game, &name, others_may_join.then_some(file))
 }
 
 /// `fossps edit`: opens the level of the game in `folder` to fly around
@@ -627,17 +635,18 @@ fn not_started(error: &str, verb: &str) -> String {
 }
 
 /// Starts `game`, called `name`, and plays it until its window is closed.
-/// With `others_may_join`, other players can join it meanwhile.
+/// With `open_with`, other players can join it meanwhile, and are sent the
+/// level file in it if the game has one.
 fn start(
     config: Config,
     game: ScriptGame,
     name: &str,
-    others_may_join: bool,
+    open_with: Option<Option<Vec<u8>>>,
 ) -> Result<(), String> {
     // The level that is drawn is the level that is walked.
     let level = config.level.as_ref();
-    let game = if others_may_join {
-        let game = LocalGame::open(
+    let game = if let Some(level_file) = open_with {
+        let mut game = LocalGame::open(
             game,
             level,
             name,
@@ -652,6 +661,11 @@ fn start(
                  play alone, leave out `--open`."
             )
         })?;
+        if let Some(file) = level_file {
+            game = game
+                .share_level(file)
+                .map_err(|error| cli::not_shared(&error, "fossps run --open"))?;
+        }
         log::info!(
             "Open for others to join. {}",
             cli::how_to_join(DEFAULT_PORT, fossps::online::lan_address())
@@ -683,7 +697,11 @@ fn play_packed(pack: &Path, others_may_join: bool) -> Result<(), String> {
     if !packed.name.is_empty() {
         config.title.clone_from(&packed.name);
     }
+    let mut level_file = None;
     if let Some(bytes) = &packed.level {
+        if others_may_join {
+            level_file = Some(bytes.clone());
+        }
         let name = format!("{LEVEL_FILE} in {}", pack.display());
         let level = level::from_bytes(&name, bytes).map_err(|error| {
             format!(
@@ -695,7 +713,12 @@ fn play_packed(pack: &Path, others_may_join: bool) -> Result<(), String> {
         })?;
         config.level = Some(level);
     }
-    start(config, packed.game, &packed.name, others_may_join)
+    start(
+        config,
+        packed.game,
+        &packed.name,
+        others_may_join.then_some(level_file),
+    )
 }
 
 /// `fossps package`: makes a download of the game in `folder` for `target`.
@@ -760,10 +783,20 @@ fn join(address: &str) -> Result<(), String> {
     let id = game
         .wait_until_joined(|| {})
         .map_err(|error| error.to_string())?;
-    log::info!(
-        "Joined as Player {}. Close the window to leave.",
-        u32::from(id) + 1
-    );
+    // The server's level, sent on joining: what is walked is what is drawn.
+    config.level = game.take_level();
+    match &config.level {
+        Some(level) => log::info!(
+            "Joined as Player {}, in the server's level ({}). Close the window to leave.",
+            u32::from(id) + 1,
+            level::summary(level)
+        ),
+        None => log::info!(
+            "Joined as Player {}. The server's game has no level, so it is played on the \
+             engine's test floor. Close the window to leave.",
+            u32::from(id) + 1
+        ),
+    }
     config.title = format!("{address} | FOSSPS");
     fossps::run(config, &mut game).map_err(|error| error.to_string())?;
     // The window closing by itself needs a reason; the player closing it does not.

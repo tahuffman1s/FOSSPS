@@ -19,13 +19,20 @@
 //! 18-byte datagram for a 1200-byte one: no use for flooding them.
 //! Afterwards every datagram carries the number, so a stranger who only
 //! knows a player's address cannot send commands in their name.
+//!
+//! The answer in step 2 also lists the files the server offers, such as
+//! the game's level ([`crate::share`]). A player who lacks one fetches it
+//! between steps 2 and 3, before taking a place, asking with the same
+//! number so a file is only ever sent to an address that has proved itself.
 
 use std::fmt;
 use std::hash::{BuildHasher, RandomState};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::find::{Notice, QUERY};
+use crate::share::{Offer, Progress, ShareError, Shelf, Transfer, WINDOW};
 use crate::snapshot::{MAX_PLAYERS, PlayerId};
 use crate::wire::{MAX_PACKET_BYTES, Reader, VERSION, Writer};
 
@@ -44,6 +51,11 @@ const DATA: u8 = 21;
 /// Either side says it is going.
 const GOODBYE: u8 = 22;
 
+/// A player asks for pieces of a file the server offers.
+const FETCH: u8 = 24;
+/// One piece of a file, server to player.
+const PIECE: u8 = 25;
+
 /// Four bytes every request carries, so stray traffic is not answered.
 const MAGIC: [u8; 4] = *b"FPSJ";
 
@@ -61,6 +73,15 @@ pub(crate) const MAX_DATAGRAM_BYTES: usize = MAX_PACKET_BYTES + DATA_HEADER;
 /// How many seconds one secret number is worked out for. A number is
 /// taken for this long at least and twice this long at most.
 const COOKIE_SECONDS: u64 = 8;
+
+/// How old a number may get before a player who is not joined yet asks for
+/// a new one. A number is taken for [`COOKIE_SECONDS`] at least, so one
+/// lost answer still leaves time for the next.
+const COOKIE_REFRESH: Duration = Duration::from_secs(3);
+
+/// A gap between two looks at a link longer than this is the game being
+/// busy, and does not count towards giving up on joining.
+const AWAY: Duration = Duration::from_secs(1);
 
 /// How many players who left are remembered, so a late copy of their
 /// joining datagram does not put them back.
@@ -129,6 +150,8 @@ pub enum Closed {
     Kicked,
     /// This side left.
     Left,
+    /// A file the server sent did not arrive as the server described it.
+    DamagedFile,
 }
 
 impl fmt::Display for Closed {
@@ -150,6 +173,10 @@ impl fmt::Display for Closed {
             Self::ServerStopped => "the server was shut down.",
             Self::Kicked => "the server took you out of the game.",
             Self::Left => "you left the game.",
+            Self::DamagedFile => {
+                "a file the server sent arrived damaged. Try joining again; if it happens \
+                 every time, restart the server."
+            }
         })
     }
 }
@@ -227,6 +254,19 @@ pub(crate) enum Heard {
     Packet(PlayerId),
     /// This player said goodbye.
     Left(PlayerId),
+    /// Somebody who proved their address wants pieces of an offered file.
+    Fetch(Fetch),
+}
+
+/// A request for pieces that the server may answer: see
+/// [`Host::write_piece`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fetch {
+    /// The number the player made up, which every piece repeats.
+    salt: u64,
+    slot: usize,
+    /// The first piece wanted.
+    first: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,6 +289,8 @@ pub(crate) struct Host {
     next_ended: usize,
     /// What is said to whoever is looking for servers.
     notice: Notice,
+    /// The files on offer to players about to join.
+    shelf: Shelf,
 }
 
 impl Host {
@@ -260,7 +302,51 @@ impl Host {
             ended: [0; REMEMBERED],
             next_ended: 0,
             notice: Notice::new(),
+            shelf: Shelf::default(),
         }
+    }
+
+    /// Puts `bytes` on offer in `slot`, in place of what was there.
+    pub(crate) fn share(&mut self, slot: usize, bytes: Arc<[u8]>) -> Result<(), ShareError> {
+        self.shelf.share(slot, bytes)
+    }
+
+    /// Takes what is on offer in `slot` away.
+    pub(crate) fn unshare(&mut self, slot: usize) {
+        self.shelf.unshare(slot);
+    }
+
+    /// Whether `cookie` is the number `from` was handed, not too long ago,
+    /// for `salt`: only somebody who receives what is sent to `from` knows
+    /// it.
+    fn proved(&self, now: Duration, from: SocketAddr, salt: u64, cookie: u64) -> bool {
+        let period = now.as_secs() / COOKIE_SECONDS;
+        cookie == self.cookie(from, salt, period)
+            || period
+                .checked_sub(1)
+                .is_some_and(|before| cookie == self.cookie(from, salt, before))
+    }
+
+    /// Writes one of the pieces `fetch` asked for: the one `ahead` after
+    /// the first. Gives `false`, and an empty `out`, when the file has no
+    /// such piece or `ahead` is past what one request is answered with.
+    pub(crate) fn write_piece(&self, fetch: Fetch, ahead: u32, out: &mut Vec<u8>) -> bool {
+        out.clear();
+        if ahead >= WINDOW {
+            return false;
+        }
+        let Some(index) = fetch.first.checked_add(ahead) else {
+            return false;
+        };
+        let Some((tag, piece)) = self.shelf.piece(fetch.slot, index) else {
+            return false;
+        };
+        let mut writer = Writer::open(out, PIECE);
+        writer.u64(fetch.salt);
+        writer.u64(tag);
+        writer.u32(index);
+        writer.bytes(piece);
+        true
     }
 
     /// Sets the name given to whoever is looking for servers.
@@ -320,6 +406,8 @@ impl Host {
                 let mut writer = Writer::open(reply, CHALLENGE);
                 writer.u64(salt);
                 writer.u64(self.cookie(from, salt, now.as_secs() / COOKIE_SECONDS));
+                // Still far shorter than the request it answers.
+                self.shelf.offer().write(&mut writer);
             } else {
                 write_refused(reply, salt, WRONG_VERSION);
             }
@@ -332,12 +420,7 @@ impl Host {
             RESPONSE => {
                 let salt = reader.u64().ok()?;
                 let session = reader.u64().ok()?;
-                let period = now.as_secs() / COOKIE_SECONDS;
-                let good = session == self.cookie(from, salt, period)
-                    || period
-                        .checked_sub(1)
-                        .is_some_and(|before| session == self.cookie(from, salt, before));
-                if !good || self.ended.contains(&session) {
+                if !self.proved(now, from, salt, session) || self.ended.contains(&session) {
                     return None;
                 }
                 if let Some(id) = self.find(from, session) {
@@ -368,6 +451,17 @@ impl Host {
                 let id = self.find(from, reader.u64().ok()?)?;
                 self.forget(id);
                 Some(Heard::Left(id))
+            }
+            FETCH => {
+                let salt = reader.u64().ok()?;
+                let cookie = reader.u64().ok()?;
+                let tag = reader.u64().ok()?;
+                let first = reader.u32().ok()?;
+                if !self.proved(now, from, salt, cookie) {
+                    return None;
+                }
+                let slot = self.shelf.find(tag, first)?;
+                Some(Heard::Fetch(Fetch { salt, slot, first }))
             }
             _ => None,
         }
@@ -474,6 +568,12 @@ fn write_goodbye(out: &mut Vec<u8>, session: u64, reason: u8) {
 pub(crate) enum LinkHeard {
     /// The server gave this player a place.
     Joined(PlayerId),
+    /// The server said which files it offers: see [`Link::offer`]. The
+    /// player joins next unless a file is fetched first.
+    Offered,
+    /// The file in this slot arrived whole: see [`Link::fetched`]. The
+    /// player joins next unless another file is fetched first.
+    Fetched(usize),
     /// A packet from the server sits after [`DATA_HEADER`] bytes.
     Packet,
     /// The server turned this player away or said goodbye.
@@ -483,8 +583,17 @@ pub(crate) enum LinkHeard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Asking,
-    Answering { cookie: u64 },
-    Joined { session: u64, id: PlayerId },
+    Answering {
+        cookie: u64,
+    },
+    /// Fetching the file in `Link::transfer` before answering.
+    Fetching {
+        cookie: u64,
+    },
+    Joined {
+        session: u64,
+        id: PlayerId,
+    },
     Closed(Closed),
 }
 
@@ -502,6 +611,14 @@ pub(crate) struct Link {
     send_at: Duration,
     /// When the server was last heard from.
     heard: Duration,
+    /// When the number in hand was given.
+    cookie_at: Duration,
+    /// When [`update`](Self::update) was last called.
+    updated: Duration,
+    /// What the server offers, as it last said.
+    offer: Offer,
+    /// The file being fetched, or the one that last arrived.
+    transfer: Option<Transfer>,
 }
 
 impl Link {
@@ -514,6 +631,126 @@ impl Link {
             started: now,
             send_at: now,
             heard: now,
+            cookie_at: now,
+            updated: now,
+            offer: Offer::default(),
+            transfer: None,
+        }
+    }
+
+    /// The files the server offers, as it last said.
+    pub(crate) fn offer(&self) -> &Offer {
+        &self.offer
+    }
+
+    /// Fetches the file the server offers in `slot` before joining. Call
+    /// it straight after [`LinkHeard::Offered`] or [`LinkHeard::Fetched`].
+    /// Gives `false`, and fetches nothing, when it is too late for that,
+    /// the slot is empty or the file is longer than
+    /// [`MAX_SHARED_BYTES`](crate::MAX_SHARED_BYTES).
+    pub(crate) fn fetch(&mut self, now: Duration, slot: usize) -> bool {
+        let Stage::Answering { cookie } = self.stage else {
+            return false;
+        };
+        let Some(transfer) = self
+            .offer
+            .file(slot)
+            .and_then(|file| Transfer::start(now, slot, file))
+        else {
+            return false;
+        };
+        self.transfer = Some(transfer);
+        self.stage = Stage::Fetching { cookie };
+        true
+    }
+
+    /// The file that last arrived whole, until the next is fetched.
+    pub(crate) fn fetched(&self) -> Option<&[u8]> {
+        match self.stage {
+            Stage::Fetching { .. } => None,
+            _ => self.transfer.as_ref().map(Transfer::bytes),
+        }
+    }
+
+    /// Lets go of the file that last arrived, to free its memory.
+    pub(crate) fn forget_fetched(&mut self) {
+        if !matches!(self.stage, Stage::Fetching { .. }) {
+            self.transfer = None;
+        }
+    }
+
+    /// How much of the file being fetched has arrived, and how long it is,
+    /// in bytes.
+    pub(crate) fn progress(&self) -> Option<(u64, u64)> {
+        let Stage::Fetching { .. } = self.stage else {
+            return None;
+        };
+        let transfer = self.transfer.as_ref()?;
+        Some((transfer.fetched(), u64::from(transfer.file().len)))
+    }
+
+    /// Takes the server's answer to a request: a number and its offer.
+    fn challenged(&mut self, now: Duration, reader: &mut Reader<'_>) -> Option<LinkHeard> {
+        let cookie = reader.u64().ok()?;
+        let offer = Offer::read(reader).ok()?;
+        self.cookie_at = now;
+        let changed = offer != self.offer;
+        self.offer = offer;
+        match self.stage {
+            Stage::Asking => {
+                self.stage = Stage::Answering { cookie };
+                self.send_at = now;
+                (!offer.is_empty()).then_some(LinkHeard::Offered)
+            }
+            Stage::Fetching { .. } => {
+                let wanted = self
+                    .transfer
+                    .as_ref()
+                    .map(|transfer| (transfer.slot, transfer.file()));
+                if wanted.is_some_and(|(slot, file)| offer.file(slot) == Some(file)) {
+                    self.stage = Stage::Fetching { cookie };
+                    return None;
+                }
+                // The server has put another file there: start over with
+                // what it offers now.
+                self.transfer = None;
+                self.stage = Stage::Answering { cookie };
+                self.send_at = now;
+                self.started = now;
+                Some(LinkHeard::Offered)
+            }
+            Stage::Answering { .. } => {
+                self.stage = Stage::Answering { cookie };
+                self.send_at = now;
+                changed.then_some(LinkHeard::Offered)
+            }
+            Stage::Joined { .. } | Stage::Closed(_) => None,
+        }
+    }
+
+    /// Takes one piece of the file being fetched.
+    fn piece(&mut self, now: Duration, reader: &mut Reader<'_>) -> Option<LinkHeard> {
+        let tag = reader.u64().ok()?;
+        let index = reader.u32().ok()?;
+        let Stage::Fetching { cookie } = self.stage else {
+            return None;
+        };
+        let transfer = self.transfer.as_mut()?;
+        match transfer.take(now, tag, index, reader.rest()) {
+            Progress::Nothing | Progress::More => None,
+            Progress::Whole => {
+                let slot = transfer.slot;
+                self.stage = Stage::Answering { cookie };
+                self.send_at = now;
+                // Giving up is counted from here, not from before the fetch.
+                self.started = now;
+                Some(LinkHeard::Fetched(slot))
+            }
+            Progress::Damaged => {
+                self.transfer = None;
+                self.stage = Stage::Closed(Closed::DamagedFile);
+                Some(LinkHeard::Closed(Closed::DamagedFile))
+            }
         }
     }
 
@@ -545,19 +782,20 @@ impl Link {
         match (kind, self.stage) {
             // A refusal is read whatever its version: a server of another
             // version has no other way to say so.
-            (REFUSED, Stage::Asking | Stage::Answering { .. }) if number == self.salt => {
+            (REFUSED, Stage::Asking | Stage::Answering { .. } | Stage::Fetching { .. })
+                if number == self.salt =>
+            {
                 let why = closed_by(reader.u8().ok()?);
                 self.stage = Stage::Closed(why);
                 Some(LinkHeard::Closed(why))
             }
             _ if version != VERSION => None,
-            (CHALLENGE, Stage::Asking) if number == self.salt => {
-                self.stage = Stage::Answering {
-                    cookie: reader.u64().ok()?,
-                };
-                self.send_at = now;
-                None
+            (CHALLENGE, Stage::Asking | Stage::Answering { .. } | Stage::Fetching { .. })
+                if number == self.salt =>
+            {
+                self.challenged(now, &mut reader)
             }
+            (PIECE, Stage::Fetching { .. }) if number == self.salt => self.piece(now, &mut reader),
             (ACCEPTED, Stage::Answering { cookie }) if number == cookie => {
                 let id = reader.u8().ok()?;
                 if usize::from(id) >= MAX_PLAYERS {
@@ -588,16 +826,54 @@ impl Link {
     /// too long.
     pub(crate) fn update(&mut self, now: Duration, out: &mut Vec<u8>) -> Option<Closed> {
         out.clear();
+        // Time the game spent elsewhere once the server had answered, such
+        // as reading a level that has just arrived, is not time the server
+        // kept this player waiting.
+        let away = now.saturating_sub(self.updated);
+        self.updated = now;
+        if away > AWAY && matches!(self.stage, Stage::Answering { .. }) {
+            self.started = self.started.saturating_add(away);
+        }
         let why = match self.stage {
             Stage::Asking | Stage::Answering { .. } => {
                 if now.saturating_sub(self.started) <= self.settings.give_up {
                     if now >= self.send_at {
                         self.send_at = now.saturating_add(self.settings.resend);
-                        self.write_handshake(out);
+                        // A number that has been held a while, as after a
+                        // long fetch, may no longer be taken: ask for a
+                        // new one before answering with it.
+                        if matches!(self.stage, Stage::Answering { .. })
+                            && now.saturating_sub(self.cookie_at) > COOKIE_REFRESH
+                        {
+                            self.write_request(out);
+                        } else {
+                            self.write_handshake(out);
+                        }
                     }
                     return None;
                 }
                 Closed::NoAnswer
+            }
+            Stage::Fetching { cookie } => {
+                let Some(transfer) = self.transfer.as_mut() else {
+                    self.stage = Stage::Answering { cookie };
+                    return None;
+                };
+                if now.saturating_sub(transfer.heard) <= self.settings.timeout {
+                    if now.saturating_sub(self.cookie_at) > COOKIE_REFRESH && now >= self.send_at {
+                        // Asked for no more often than joining is.
+                        self.send_at = now.saturating_add(self.settings.resend);
+                        self.write_request(out);
+                    } else if let Some((tag, first)) = transfer.ask(now) {
+                        let mut writer = Writer::open(out, FETCH);
+                        writer.u64(self.salt);
+                        writer.u64(cookie);
+                        writer.u64(tag);
+                        writer.u32(first);
+                    }
+                    return None;
+                }
+                Closed::TimedOut
             }
             Stage::Joined { .. } => {
                 if now.saturating_sub(self.heard) <= self.settings.timeout {
@@ -611,20 +887,22 @@ impl Link {
         Some(why)
     }
 
+    fn write_request(&self, out: &mut Vec<u8>) {
+        let mut writer = Writer::open(out, REQUEST);
+        writer.bytes(&MAGIC);
+        writer.u64(self.salt);
+        writer.pad_to(REQUEST_BYTES);
+    }
+
     fn write_handshake(&self, out: &mut Vec<u8>) {
         match self.stage {
-            Stage::Asking => {
-                let mut writer = Writer::open(out, REQUEST);
-                writer.bytes(&MAGIC);
-                writer.u64(self.salt);
-                writer.pad_to(REQUEST_BYTES);
-            }
+            Stage::Asking => self.write_request(out),
             Stage::Answering { cookie } => {
                 let mut writer = Writer::open(out, RESPONSE);
                 writer.u64(self.salt);
                 writer.u64(cookie);
             }
-            Stage::Joined { .. } | Stage::Closed(_) => {}
+            Stage::Fetching { .. } | Stage::Joined { .. } | Stage::Closed(_) => {}
         }
     }
 

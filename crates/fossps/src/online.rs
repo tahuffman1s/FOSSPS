@@ -9,6 +9,11 @@
 //! key is pressed, without waiting for the server, and corrects itself when
 //! the server disagrees.
 //!
+//! A player needs no copy of the game. A server hands its level file and
+//! its map to whoever joins ([`HostedGame::share_level`]), before giving
+//! them a place; the level is kept on the player's computer
+//! ([`crate::cache`]) so it is fetched once.
+//!
 //! [`LocalGame`] is both in one program, which is what `fossps run` plays:
 //! the same code runs alone as runs over the internet.
 //!
@@ -25,9 +30,10 @@
 //!     let game = ScriptGame::open("my-game", &config.actions)?;
 //!     let address = format!("0.0.0.0:{DEFAULT_PORT}");
 //!     let mut hosted = HostedGame::open(game, &address, config.tick_rate)?;
-//!     // Players walk the game's level, if it has one.
-//!     if let Some(level) = fossps::level::load("my-game".as_ref())? {
-//!         hosted = hosted.with_level(&level);
+//!     // Players walk the game's level, if it has one, and are sent it
+//!     // when they join.
+//!     if let Some((level, file)) = fossps::level::load_file("my-game".as_ref())? {
+//!         hosted = hosted.with_level(&level).share_level(file)?;
 //!     }
 //!     serve(&config, &mut hosted, &StopSignal::on_ctrl_c()?);
 //!     Ok(())
@@ -37,18 +43,19 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fossps_assets::{Marker, Scene};
 use fossps_input::{ActionId, ActionMap, InputFrame};
 use fossps_mode::{SpawnPoint, Stander, choose_spawn};
 use fossps_net::{
     Client, ClientSettings, Closed, HostEvent, HostSettings, LinkEvent, LinkSettings, MAX_PLAYERS,
-    PlayerId, PlayerInput, Refusal, RemotePlayer, Server, ServerSettings, SocketError, UdpHost,
-    UdpLink, UdpSearch,
+    MAX_SHARED_BYTES, Offer, PlayerId, PlayerInput, Refusal, RemotePlayer, Server, ServerSettings,
+    SocketError, UdpHost, UdpLink, UdpSearch, hash_of,
 };
-pub use fossps_net::{FoundServer, lan_address};
+pub use fossps_net::{FoundServer, ShareError, lan_address};
 use fossps_physics::{Level, MoveInput, MoveSettings, Player};
 
 use crate::game::{Frame, Game};
@@ -86,6 +93,19 @@ const LANDING_TICKS: u32 = 180;
 /// A player's first snapshot puts them this near a spawn point, in metres
 /// across the ground, if that is where the server started them.
 const AT_SPAWN: f32 = 0.5;
+
+/// Which of the files a server offers is the game's level file.
+const LEVEL_SLOT: usize = 0;
+
+/// Which of the files a server offers is the game's map, as text.
+const MAP_SLOT: usize = 1;
+
+/// The most bytes of map a server offers and a player takes: 1 MiB, far
+/// more than any map written by hand or by the editor.
+const MOST_MAP_BYTES: usize = 1024 * 1024;
+
+/// How often a player waiting for a level is told how far along it is.
+const PROGRESS_EVERY: Duration = Duration::from_secs(2);
 
 /// What a server and its players must agree on to work out the same moves.
 ///
@@ -394,6 +414,8 @@ pub struct HostedGame {
     /// How many times a player has been put at a spawn point.
     spawned: u32,
     packet: Vec<u8>,
+    /// The map as players who join are sent it.
+    offered_map: Map,
 }
 
 impl HostedGame {
@@ -422,7 +444,51 @@ impl HostedGame {
             names: [None; MAX_PLAYERS],
             spawned: 0,
             packet: Vec::new(),
+            offered_map: Map::default(),
         })
+    }
+
+    /// Hands `file` to every player who joins without it: the bytes of the
+    /// level file that [`with_level`](Self::with_level) was given, as
+    /// [`level::load_file`](crate::level::load_file) reads them. A player
+    /// who joins with `fossps join` has no copy of the game, and without
+    /// this walks a flat floor and is pulled back at every wall.
+    ///
+    /// The file is fetched before the player is given a place, and kept on
+    /// their computer for next time. The game's map file needs nothing
+    /// like this: players are always sent the map as the game has it.
+    /// Scripts are not sent; they run on the server only.
+    ///
+    /// # Errors
+    ///
+    /// When the file is empty or holds more than 256 MiB, the most a
+    /// player is sent.
+    pub fn share_level(mut self, file: impl Into<Arc<[u8]>>) -> Result<Self, ShareError> {
+        self.host.share(LEVEL_SLOT, file)?;
+        Ok(self)
+    }
+
+    /// Offers players who join the map as the game now has it, if it has
+    /// changed since it was last offered.
+    fn offer_map(&mut self) {
+        if *self.game.map() == self.offered_map {
+            return;
+        }
+        self.offered_map.clone_from(self.game.map());
+        let text = self.offered_map.to_text();
+        if self.offered_map.is_empty() {
+            self.host.unshare(MAP_SLOT);
+        } else if text.len() > MOST_MAP_BYTES {
+            self.host.unshare(MAP_SLOT);
+            log::warn!(
+                "{MAP_FILE} is {} KB, more than the {} KB sent to players who join, so they \
+                 are not sent it and start out facing north. Take entities out of it.",
+                text.len() / 1024,
+                MOST_MAP_BYTES / 1024
+            );
+        } else if let Err(error) = self.host.share(MAP_SLOT, text.into_bytes()) {
+            log::warn!("{MAP_FILE} is not sent to players who join: {error}");
+        }
     }
 
     /// Plays the game in `level`, usually the game's `level.glb` as
@@ -545,6 +611,7 @@ impl HostedGame {
 
 impl Game for HostedGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
+        self.offer_map();
         self.listen();
         // Before anyone is told where they are: a player the match brought
         // into the world, on joining or in the script's last tick, is at
@@ -613,6 +680,13 @@ pub enum JoinError {
         /// What happened.
         why: Closed,
     },
+    /// The level the server plays could not be used on this computer.
+    Level {
+        /// The address that was joined.
+        address: String,
+        /// What is wrong with the level, as a sentence or more.
+        problem: String,
+    },
 }
 
 impl fmt::Display for JoinError {
@@ -639,7 +713,15 @@ impl fmt::Display for JoinError {
                  running (`fossps serve`), that the address and port are right, and that \
                  the server's firewall and router let UDP (not TCP) through on that port."
             ),
+            // Only a player who has not joined yet is sent files.
+            Self::Closed {
+                address,
+                why: why @ Closed::DamagedFile,
+            } => write!(f, "Could not join {address}: {why}"),
             Self::Closed { address, why } => write!(f, "The game at {address} ended: {why}"),
+            Self::Level { address, problem } => {
+                write!(f, "Could not join {address}: {problem}")
+            }
         }
     }
 }
@@ -648,8 +730,197 @@ impl std::error::Error for JoinError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Address { error, .. } => Some(error),
-            Self::Closed { .. } => None,
+            Self::Closed { .. } | Self::Level { .. } => None,
         }
+    }
+}
+
+/// Why a player's stay is over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ended {
+    /// The server or the network ended it.
+    Closed(Closed),
+    /// The server's level could not be used; this is what is wrong with it.
+    Level(String),
+}
+
+/// What a player takes from a server before joining: the level and the map.
+#[derive(Debug)]
+struct Arrivals {
+    /// Whether to fetch what the server offers. A player in the server's
+    /// own program has it all already.
+    wanted: bool,
+    /// Where fetched levels are kept, if anywhere.
+    cache: Option<PathBuf>,
+    /// The hash of the level in hand, fetched or given.
+    level_held: Option<[u8; 32]>,
+    /// The hash of the map in hand.
+    map_held: Option<[u8; 32]>,
+    /// The caller gave the level itself, so the server's is not fetched.
+    level_given: bool,
+    /// The caller gave the map itself.
+    map_given: bool,
+    /// What the server last said it offers.
+    offer: Offer,
+    /// A level that has arrived, until the game takes it to walk.
+    level: Option<Scene>,
+    /// A map that has arrived, until the game takes it.
+    map: Option<Map>,
+    /// When the player was last told how the fetch is going.
+    told: Instant,
+    /// What went wrong, if the server's level cannot be used.
+    problem: Option<String>,
+}
+
+impl Arrivals {
+    fn new(wanted: bool) -> Self {
+        Self {
+            wanted,
+            cache: crate::cache::folder(),
+            level_held: None,
+            map_held: None,
+            level_given: false,
+            map_given: false,
+            offer: Offer::default(),
+            level: None,
+            map: None,
+            told: Instant::now(),
+            problem: None,
+        }
+    }
+
+    /// The server said what it offers. Gives the slot to fetch first, or
+    /// `None` when everything wanted is in hand.
+    fn offered(&mut self, offer: Offer) -> Option<usize> {
+        self.offer = offer;
+        self.next()
+    }
+
+    /// The slot to fetch next, or `None` when everything wanted is in hand
+    /// or something has gone wrong.
+    fn next(&mut self) -> Option<usize> {
+        if !self.wanted || self.problem.is_some() {
+            return None;
+        }
+        if let Some(file) = self.offer.file(LEVEL_SLOT)
+            && !self.level_given
+            && self.level_held != Some(file.hash)
+        {
+            if file.len as usize > MAX_SHARED_BYTES {
+                self.problem = Some(format!(
+                    "its level is {} MB, and the most a server can send a player is {} MB. \
+                     Ask whoever runs the server to make the level smaller.",
+                    file.len / (1024 * 1024),
+                    MAX_SHARED_BYTES / (1024 * 1024)
+                ));
+                return None;
+            }
+            let kept = self
+                .cache
+                .as_deref()
+                .and_then(|folder| crate::cache::find(folder, file));
+            let Some(kept) = kept else {
+                log::info!(
+                    "Getting the level from the server ({})...",
+                    size_text(u64::from(file.len))
+                );
+                self.told = Instant::now();
+                return Some(LEVEL_SLOT);
+            };
+            log::info!("This computer already has the server's level from an earlier visit.");
+            self.take_level(&kept, file.hash);
+            if self.problem.is_some() {
+                return None;
+            }
+        }
+        if let Some(file) = self.offer.file(MAP_SLOT)
+            && !self.map_given
+            && self.map_held != Some(file.hash)
+        {
+            if file.len as usize <= MOST_MAP_BYTES {
+                return Some(MAP_SLOT);
+            }
+            // Only which way spawn points face is lost.
+            self.map_held = Some(file.hash);
+        }
+        None
+    }
+
+    /// The file in `slot` arrived. Gives the slot to fetch next, as
+    /// [`next`](Self::next) does.
+    fn fetched(&mut self, slot: usize, file: &[u8]) -> Option<usize> {
+        let hash = hash_of(file);
+        if slot == LEVEL_SLOT {
+            self.take_level(file, hash);
+            if self.problem.is_none()
+                && let Some(folder) = &self.cache
+            {
+                match crate::cache::keep(folder, file) {
+                    Ok(path) => log::info!(
+                        "Got the level. It is kept in {} so it is not fetched again.",
+                        path.display()
+                    ),
+                    // The game is played all the same.
+                    Err(error) => log::warn!(
+                        "Got the level, but could not keep it in {} ({error}), so it will be \
+                         fetched again next time.",
+                        folder.display()
+                    ),
+                }
+            }
+        } else if slot == MAP_SLOT {
+            self.map_held = Some(hash);
+            // What a server sends is read as any stranger's file: a map
+            // that does not read is done without.
+            let read = std::str::from_utf8(file)
+                .map_err(|error| error.to_string())
+                .and_then(|text| Map::parse(MAP_FILE, text).map_err(|error| error.to_string()));
+            match read {
+                Ok(map) => self.map = Some(map),
+                Err(error) => log::warn!(
+                    "The server's map could not be read, so you may start out facing the \
+                     wrong way: {error}"
+                ),
+            }
+        }
+        self.next()
+    }
+
+    /// Reads `file` as the level the server plays.
+    fn take_level(&mut self, file: &[u8], hash: [u8; 32]) {
+        match crate::level::from_bytes("the server's level", file) {
+            Ok(level) => {
+                self.level_held = Some(hash);
+                self.level = Some(level);
+            }
+            Err(error) => {
+                self.problem = Some(format!(
+                    "the level it plays could not be read on this computer.\n{error}\nIf the \
+                     server runs a newer FOSSPS than this, update this copy; otherwise tell \
+                     whoever runs the server that its level does not load."
+                ));
+            }
+        }
+    }
+
+    /// Tells the player how far along a fetch is, every couple of seconds.
+    fn tell(&mut self, progress: Option<(u64, u64)>) {
+        let Some((fetched, whole)) = progress else {
+            return;
+        };
+        if self.told.elapsed() >= PROGRESS_EVERY {
+            self.told = Instant::now();
+            log::info!("{} of {} so far...", size_text(fetched), size_text(whole));
+        }
+    }
+}
+
+/// `bytes` as a person reads a file's size: `812 KB`, `12.3 MB`.
+fn size_text(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -666,12 +937,16 @@ pub struct JoinedGame {
     address: String,
     yaw: f32,
     pitch: f32,
-    closed: Option<Closed>,
+    closed: Option<Ended>,
     packet: Vec<u8>,
     /// The game's map as this side has it, for which way spawn points face.
     map: Map,
     /// The player has been turned the way their spawn point faces.
     faced: bool,
+    /// What is fetched from the server before joining.
+    arrivals: Arrivals,
+    /// The level the server sent, until it is taken to be drawn.
+    level: Option<Scene>,
 }
 
 impl JoinedGame {
@@ -691,10 +966,15 @@ impl JoinedGame {
     ///
     /// When the address cannot be read or its name is not known.
     pub fn connect(address: &str, actions: &ActionMap, tick_rate: u32) -> Result<Self, JoinError> {
-        Self::connect_in(address, actions, World::flat(tick_rate))
+        Self::connect_in(address, actions, World::flat(tick_rate), true)
     }
 
-    fn connect_in(address: &str, actions: &ActionMap, world: World) -> Result<Self, JoinError> {
+    fn connect_in(
+        address: &str,
+        actions: &ActionMap,
+        world: World,
+        fetches: bool,
+    ) -> Result<Self, JoinError> {
         let address = with_port(address);
         Ok(Self {
             link: match UdpLink::connect(&address, LinkSettings::default()) {
@@ -711,7 +991,32 @@ impl JoinedGame {
             packet: Vec::new(),
             map: Map::default(),
             faced: false,
+            arrivals: Arrivals::new(fetches),
+            level: None,
         })
+    }
+
+    /// Keeps levels fetched from servers in `folder` instead of the usual
+    /// place ([`cache::folder`](crate::cache::folder)).
+    ///
+    /// Call it before the first tick.
+    #[must_use]
+    pub fn with_cache(mut self, folder: impl Into<PathBuf>) -> Self {
+        self.arrivals.cache = Some(folder.into());
+        self
+    }
+
+    /// The level the server sent, to draw: put it in
+    /// [`Config::level`](crate::Config). `None` if the server plays on the
+    /// flat floor or shares no level, if the level was given with
+    /// [`with_level`](Self::with_level), or once it has been taken.
+    ///
+    /// It is there by the time
+    /// [`wait_until_joined`](Self::wait_until_joined) comes back. It is
+    /// what the server chose to send, read with the same care as any file
+    /// from a stranger.
+    pub fn take_level(&mut self) -> Option<Scene> {
+        self.level.take()
     }
 
     /// Gives this side the game's map file as the server has it
@@ -719,10 +1024,14 @@ impl JoinedGame {
     /// their spawn point faces. Without it a player started at one of the
     /// map's spawn points looks north, along -Z.
     ///
+    /// A player given no map takes the one the server sends, so this is
+    /// only for a program that has the game already.
+    ///
     /// Call it before the first tick.
     #[must_use]
     pub fn with_map(mut self, map: Map) -> Self {
         self.map = map;
+        self.arrivals.map_given = true;
         self
     }
 
@@ -732,29 +1041,39 @@ impl JoinedGame {
     /// different level, the player still ends up where the server says, but
     /// is pulled back each time the two disagree, at a wall for one.
     ///
+    /// A player given no level takes the one the server sends
+    /// ([`HostedGame::share_level`]), so this is only for a program that
+    /// has the game already; the server's level is then not fetched.
+    ///
     /// Call it before the first tick.
     #[must_use]
     pub fn with_level(mut self, level: &Scene) -> Self {
         self.world = World::from_level(level, self.world.tick_rate);
+        self.arrivals.level_given = true;
         self
     }
 
-    /// Waits until the server has let this player in, for five seconds at
-    /// most, and gives the player's number. `meanwhile` is called over and
-    /// over while waiting; a server in the same program must be given its
-    /// turn there.
+    /// Waits until the server has let this player in and gives the
+    /// player's number. A server that does not answer is given up on after
+    /// five seconds. One that shares its level
+    /// ([`HostedGame::share_level`]) is waited on for as long as the level
+    /// keeps arriving, which is logged as it goes; a level this computer
+    /// has from an earlier visit is not fetched again. `meanwhile` is
+    /// called over and over while waiting; a server in the same program
+    /// must be given its turn there.
     ///
     /// # Errors
     ///
-    /// When nothing answers or the server turns the player away.
+    /// When nothing answers, the server turns the player away, or the
+    /// server's level does not arrive whole or cannot be read.
     pub fn wait_until_joined(
         &mut self,
         mut meanwhile: impl FnMut(),
     ) -> Result<PlayerId, JoinError> {
         loop {
             self.listen();
-            if let Some(why) = self.closed {
-                return Err(self.error(why));
+            if let Some(error) = self.closed() {
+                return Err(error);
             }
             if let Some(id) = self.link.id() {
                 return Ok(id);
@@ -768,14 +1087,14 @@ impl JoinedGame {
     /// game goes on being ticked but nothing moves.
     #[must_use]
     pub fn closed(&self) -> Option<JoinError> {
-        self.closed.map(|why| self.error(why))
-    }
-
-    fn error(&self, why: Closed) -> JoinError {
-        JoinError::Closed {
-            address: self.address.clone(),
-            why,
-        }
+        let address = self.address.clone();
+        Some(match self.closed.as_ref()? {
+            Ended::Closed(why) => JoinError::Closed { address, why: *why },
+            Ended::Level(problem) => JoinError::Level {
+                address,
+                problem: problem.clone(),
+            },
+        })
     }
 
     /// This player's number on the server, once joined.
@@ -818,23 +1137,41 @@ impl JoinedGame {
 
     /// Takes in everything the server has sent since the last call.
     fn listen(&mut self) {
-        let Self {
-            link,
-            client,
-            world,
-            closed,
-            ..
-        } = self;
-        while let Some(event) = link.poll() {
-            match event {
-                LinkEvent::Joined(_) => {}
+        while let Some(event) = self.link.poll() {
+            let fetch = match event {
+                LinkEvent::Joined(_) => None,
+                LinkEvent::Offered(offer) => self.arrivals.offered(offer),
+                LinkEvent::Fetched(slot, file) => self.arrivals.fetched(slot, file),
                 // A snapshot that cannot be read is one more lost packet.
                 LinkEvent::Packet(snapshot) => {
-                    let _ = client.receive(&world.level, &world.rules, snapshot);
+                    let _ = self
+                        .client
+                        .receive(&self.world.level, &self.world.rules, snapshot);
+                    None
                 }
-                LinkEvent::Closed(why) => *closed = Some(why),
+                LinkEvent::Closed(why) => {
+                    self.closed.get_or_insert(Ended::Closed(why));
+                    None
+                }
+            };
+            // What has arrived is taken up before a place is asked for.
+            if let Some(level) = self.arrivals.level.take() {
+                self.world = World::from_level(&level, self.world.tick_rate);
+                self.level = Some(level);
+            }
+            if let Some(map) = self.arrivals.map.take() {
+                self.map = map;
+            }
+            if let Some(problem) = self.arrivals.problem.take() {
+                // No place is taken on a server whose level cannot be used.
+                self.arrivals.wanted = false;
+                self.closed.get_or_insert(Ended::Level(problem));
+                self.link.leave();
+            } else if let Some(slot) = fetch {
+                self.link.fetch(slot);
             }
         }
+        self.arrivals.tell(self.link.progress());
         // The server's first word says where this player starts: look the
         // way that spawn point faces.
         if !self.faced && self.client.server_tick() > 0 {
@@ -964,10 +1301,23 @@ impl LocalGame {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let port = hosted.host.local_addr()?.port();
         let address = format!("127.0.0.1:{port}");
-        let mut joined = JoinedGame::connect_in(&address, actions, hosted.world.clone())?
+        let mut joined = JoinedGame::connect_in(&address, actions, hosted.world.clone(), false)?
             .with_map(hosted.game.map().clone());
         joined.wait_until_joined(|| hosted.listen())?;
         Ok(Self { hosted, joined })
+    }
+
+    /// Hands `file`, the bytes of the level file the game is played in, to
+    /// every player who joins without it: see
+    /// [`HostedGame::share_level`].
+    ///
+    /// # Errors
+    ///
+    /// When the file is empty or holds more than 256 MiB, the most a
+    /// player is sent.
+    pub fn share_level(mut self, file: impl Into<Arc<[u8]>>) -> Result<Self, ShareError> {
+        self.hosted = self.hosted.share_level(file)?;
+        Ok(self)
     }
 
     /// The server's side.
