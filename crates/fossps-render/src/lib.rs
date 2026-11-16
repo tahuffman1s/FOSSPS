@@ -19,6 +19,7 @@ mod font;
 mod gpu;
 mod grid;
 mod headless;
+mod material;
 mod mesh;
 #[cfg(test)]
 mod offscreen;
@@ -27,7 +28,10 @@ mod overlay;
 mod panels;
 mod renderer;
 mod scene;
+#[cfg(test)]
+mod shading;
 mod swapchain;
+mod texture;
 mod tonemap;
 mod ui_pass;
 mod upscale;

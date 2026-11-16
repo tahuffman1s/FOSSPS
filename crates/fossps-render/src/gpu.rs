@@ -220,6 +220,10 @@ unsafe extern "system" fn report_validation(
     if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
         log::error!("Vulkan validation: {message}");
+        // A test that counts these has often set up no log to read them in.
+        if !log::log_enabled!(log::Level::Error) {
+            eprintln!("Vulkan validation: {message}");
+        }
     } else {
         log::warn!("Vulkan validation: {message}");
     }
@@ -317,6 +321,8 @@ pub struct Gpu {
     queue: vk::Queue,
     /// Whether the features the upscaler's shaders use are switched on.
     can_upscale: bool,
+    /// Whether samplers may ask for anisotropic filtering.
+    anisotropy: bool,
     name: String,
     /// Last, so the device above is destroyed first.
     instance: Instance,
@@ -380,13 +386,20 @@ impl Gpu {
             >= wanted.shader_storage_image_extended_formats
             && offered.shader_storage_image_write_without_format
                 >= wanted.shader_storage_image_write_without_format;
-        let mut info = vk::DeviceCreateInfo::default()
+        // Textures seen at a slant, as floors always are, stay sharp with
+        // this. Without it they are a little blurrier and nothing else changes.
+        let anisotropy = offered.sampler_anisotropy == vk::TRUE;
+        let enabled = if can_upscale {
+            wanted
+        } else {
+            vk::PhysicalDeviceFeatures::default()
+        }
+        .sampler_anisotropy(anisotropy);
+        let info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(&extensions)
+            .enabled_features(&enabled)
             .push_next(&mut features);
-        if can_upscale {
-            info = info.enabled_features(&wanted);
-        }
         // SAFETY: `physical` came from this instance, and the extensions and
         // features asked for were all reported as supported by `inspect`.
         let device = unsafe { instance.raw.create_device(physical, &info, None) }
@@ -406,6 +419,7 @@ impl Gpu {
             queue_family,
             queue,
             can_upscale,
+            anisotropy,
             name: candidate.name.clone(),
             instance,
         })
@@ -435,6 +449,11 @@ impl Gpu {
     /// Whether this graphics card can run the upscaler.
     pub(crate) fn can_upscale(&self) -> bool {
         self.can_upscale
+    }
+
+    /// Whether textures seen at a slant can be kept sharp (anisotropic filtering).
+    pub(crate) fn anisotropy(&self) -> bool {
+        self.anisotropy
     }
 
     /// The name of the graphics card, as its driver reports it.

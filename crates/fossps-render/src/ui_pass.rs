@@ -116,6 +116,7 @@ impl UiPass {
             ATLAS_FORMAT,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             COLOUR,
+            doing,
         )?;
 
         let bindings = [

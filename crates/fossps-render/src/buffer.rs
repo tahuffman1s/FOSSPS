@@ -141,6 +141,45 @@ impl Buffer {
         }
     }
 
+    /// Makes a buffer of `size` bytes whose contents can be copied to the
+    /// graphics card's own memory once [`fill`](Self::fill) has written them.
+    pub(crate) fn staging(
+        gpu: &Arc<Gpu>,
+        size: u64,
+        doing: &'static str,
+    ) -> Result<Self, RenderError> {
+        Self::new(
+            gpu,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            false,
+            doing,
+        )
+    }
+
+    /// Writes `bytes` to the start of a buffer that no command has used yet.
+    /// The buffer must come from [`staging`](Self::staging) or
+    /// [`writable`](Self::writable); anything past its end is not written.
+    pub(crate) fn fill(&self, bytes: &[u8], doing: &'static str) -> Result<(), RenderError> {
+        let device = self.gpu.device();
+        // SAFETY: the memory is this buffer's own, of a kind that can be
+        // mapped, and nothing else is using it. No more is written than the
+        // buffer was made to hold, and it is unmapped straight after.
+        unsafe {
+            let needs = device.get_buffer_memory_requirements(self.handle);
+            let length = bytes
+                .len()
+                .min(usize::try_from(needs.size).unwrap_or(usize::MAX));
+            let mapped = device
+                .map_memory(self.memory, 0, length as u64, vk::MemoryMapFlags::empty())
+                .map_err(RenderError::driver(doing))?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), length);
+            device.unmap_memory(self.memory);
+        }
+        Ok(())
+    }
+
     /// Makes a buffer for `usage` that holds `bytes`, which must not be empty.
     ///
     /// Waits for the graphics card to finish the copy, so this is for
@@ -155,14 +194,7 @@ impl Buffer {
         let size = bytes.len() as u64;
         // The graphics card's own memory usually cannot be written from
         // here, so the bytes go through a buffer that can.
-        let staging = Self::new(
-            gpu,
-            size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            false,
-            doing,
-        )?;
+        let staging = Self::staging(gpu, size, doing)?;
         let buffer = Self::new(
             gpu,
             size,
@@ -172,75 +204,88 @@ impl Buffer {
             doing,
         )?;
 
-        // SAFETY: the staging memory is mapped for exactly `size` bytes, which
-        // is how many are copied into it, and unmapped before it is used.
+        staging.fill(bytes, doing)?;
+        // SAFETY: both buffers are alive and `size` bytes long, and stay
+        // alive until the copy, which `once` waits for, has finished.
         unsafe {
-            let mapped = device
-                .map_memory(staging.memory, 0, size, vk::MemoryMapFlags::empty())
-                .map_err(RenderError::driver(doing))?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
-            device.unmap_memory(staging.memory);
-        }
-
-        // SAFETY: the pool, command buffer and fence are created here, used
-        // by the one submission below, which is waited for, and destroyed
-        // before returning. Both buffers are alive and `size` bytes long.
-        unsafe {
-            let pool = device
-                .create_command_pool(
-                    &vk::CommandPoolCreateInfo::default()
-                        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                        .queue_family_index(gpu.queue_family()),
-                    None,
-                )
-                .map_err(RenderError::driver(doing))?;
-            let fence = match device.create_fence(&vk::FenceCreateInfo::default(), None) {
-                Ok(fence) => fence,
-                Err(code) => {
-                    device.destroy_command_pool(pool, None);
-                    return Err(RenderError::driver(doing)(code));
-                }
-            };
-            let copied = (|| {
-                let commands = device
-                    .allocate_command_buffers(
-                        &vk::CommandBufferAllocateInfo::default()
-                            .command_pool(pool)
-                            .level(vk::CommandBufferLevel::PRIMARY)
-                            .command_buffer_count(1),
-                    )?
-                    .first()
-                    .copied()
-                    .ok_or(vk::Result::ERROR_UNKNOWN)?;
-                device.begin_command_buffer(
-                    commands,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )?;
+            once(gpu, doing, |commands| {
                 device.cmd_copy_buffer(
                     commands,
                     staging.handle,
                     buffer.handle,
                     &[vk::BufferCopy::default().size(size)],
                 );
-                device.end_command_buffer(commands)?;
-                let buffers = [vk::CommandBufferSubmitInfo::default().command_buffer(commands)];
-                device.queue_submit2(
-                    gpu.queue(),
-                    &[vk::SubmitInfo2::default().command_buffer_infos(&buffers)],
-                    fence,
-                )?;
-                device.wait_for_fences(&[fence], true, u64::MAX)
-            })();
-            if copied.is_err() {
-                // The copy may have been submitted; nothing may be freed under it.
-                let _ = device.device_wait_idle();
-            }
-            device.destroy_fence(fence, None);
-            device.destroy_command_pool(pool, None);
-            copied.map_err(RenderError::driver(doing))?;
-        }
+            })
+        }?;
         Ok(buffer)
+    }
+}
+
+/// Runs the commands `record` writes, once, and waits for the graphics card
+/// to finish them. For loading, not for every frame.
+///
+/// # Safety
+///
+/// Everything the recorded commands use must belong to `gpu`'s device, be
+/// used as Vulkan allows, and stay alive until this returns.
+pub(crate) unsafe fn once(
+    gpu: &Gpu,
+    doing: &'static str,
+    record: impl FnOnce(vk::CommandBuffer),
+) -> Result<(), RenderError> {
+    let device = gpu.device();
+    // SAFETY: the pool, command buffer and fence are created here, used by
+    // the one submission below, which is waited for, and destroyed before
+    // returning. The caller answers for what the commands themselves use.
+    unsafe {
+        let pool = device
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                    .queue_family_index(gpu.queue_family()),
+                None,
+            )
+            .map_err(RenderError::driver(doing))?;
+        let fence = match device.create_fence(&vk::FenceCreateInfo::default(), None) {
+            Ok(fence) => fence,
+            Err(code) => {
+                device.destroy_command_pool(pool, None);
+                return Err(RenderError::driver(doing)(code));
+            }
+        };
+        let ran = (|| {
+            let commands = device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )?
+                .first()
+                .copied()
+                .ok_or(vk::Result::ERROR_UNKNOWN)?;
+            device.begin_command_buffer(
+                commands,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            record(commands);
+            device.end_command_buffer(commands)?;
+            let buffers = [vk::CommandBufferSubmitInfo::default().command_buffer(commands)];
+            device.queue_submit2(
+                gpu.queue(),
+                &[vk::SubmitInfo2::default().command_buffer_infos(&buffers)],
+                fence,
+            )?;
+            device.wait_for_fences(&[fence], true, u64::MAX)
+        })();
+        if ran.is_err() {
+            // The commands may have been submitted; nothing may be freed under them.
+            let _ = device.device_wait_idle();
+        }
+        device.destroy_fence(fence, None);
+        device.destroy_command_pool(pool, None);
+        ran.map_err(RenderError::driver(doing))
     }
 }
 

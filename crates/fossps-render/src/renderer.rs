@@ -255,11 +255,25 @@ impl Renderer {
 
     /// Draws the meshes of `scene` from now on, in place of any scene set before.
     ///
-    /// Each mesh is drawn in its material's base colour, with nearer
-    /// surfaces in front of farther ones and the backs of surfaces left out
-    /// unless the material is double-sided. Textures and lights are not
-    /// drawn yet. The meshes are copied to the graphics card here, so call
-    /// this when a level loads, not every frame.
+    /// Each mesh is drawn with its material: its textures, how metallic and
+    /// how rough it is, its normal map, baked shadowing and glow. Surfaces
+    /// whose material cuts holes by alpha or is see-through are drawn that
+    /// way, and the backs of surfaces are left out unless the material is
+    /// double-sided.
+    ///
+    /// The scene is lit by the first sun among its lights, in the units the
+    /// file gives, and by the sky. A scene with no sun gets one of the
+    /// engine's own, under which a matte surface facing up shows exactly
+    /// its material's colour. Lamps are not drawn yet and nothing casts a
+    /// shadow.
+    ///
+    /// A picture the graphics card cannot take (one that is too large, or
+    /// whose size does not match its bytes) is left out with a warning that
+    /// says what to change, and the material is drawn without it.
+    ///
+    /// The meshes and pictures are copied to the graphics card here, which
+    /// takes a moment for a level with many large textures, so call this
+    /// when a level loads, not every frame.
     ///
     /// ```no_run
     /// # fn show(renderer: &mut fossps_render::Renderer) -> Result<(), Box<dyn std::error::Error>> {
