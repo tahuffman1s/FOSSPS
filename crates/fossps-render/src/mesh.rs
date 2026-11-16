@@ -632,25 +632,24 @@ impl MeshPipeline {
                 .depth_write_enable(!see_through)
                 .depth_compare_op(vk::CompareOp::GREATER);
             // The colour, then how far the pixel moved. A see-through
-            // surface is mixed over the colour by its alpha and leaves the
-            // movement of what is behind it alone.
-            let colour = vk::PipelineColorBlendAttachmentState::default()
+            // surface is mixed over the colour by its alpha. The movement
+            // image has to be mixed the same way, as only some graphics
+            // cards can treat the two differently, so the shader writes it
+            // with an alpha of nothing and what is behind is left alone.
+            let attachment = vk::PipelineColorBlendAttachmentState::default()
                 .color_write_mask(vk::ColorComponentFlags::RGBA);
-            let attachments = if see_through {
-                [
-                    colour
-                        .blend_enable(true)
-                        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-                        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                        .color_blend_op(vk::BlendOp::ADD)
-                        .src_alpha_blend_factor(vk::BlendFactor::ZERO)
-                        .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-                        .alpha_blend_op(vk::BlendOp::ADD),
-                    vk::PipelineColorBlendAttachmentState::default(),
-                ]
+            let attachments = [if see_through {
+                attachment
+                    .blend_enable(true)
+                    .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                    .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                    .color_blend_op(vk::BlendOp::ADD)
+                    .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+                    .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+                    .alpha_blend_op(vk::BlendOp::ADD)
             } else {
-                [colour; 2]
-            };
+                attachment
+            }; 2];
             let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
             let mut rendering = vk::PipelineRenderingCreateInfo::default()
                 .color_attachment_formats(&formats)

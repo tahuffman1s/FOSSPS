@@ -301,13 +301,20 @@ fn fragment_cutout(corner: Corner, @builtin(front_facing) front: bool) -> Pixel 
     return pixel;
 }
 
-// A see-through surface, mixed over what is behind it by its alpha. What it
-// writes as movement is thrown away: the pixel moves with what is behind.
+struct Mixed {
+    @location(0) colour: vec4<f32>,
+    @location(1) motion: vec4<f32>,
+}
+
+// A see-through surface, mixed over what is behind it by its alpha. Both
+// images are mixed the same way (not every graphics card can mix them
+// differently), so the movement is written with no alpha at all, which
+// leaves what was there: the pixel moves with what is behind.
 @fragment
-fn fragment_blend(corner: Corner, @builtin(front_facing) front: bool) -> Pixel {
+fn fragment_blend(corner: Corner, @builtin(front_facing) front: bool) -> Mixed {
     let base = base_colour(corner);
-    var pixel: Pixel;
+    var pixel: Mixed;
     pixel.colour = vec4<f32>(lit(corner, front, base.rgb), base.a);
-    pixel.motion = vec2<f32>(0.0);
+    pixel.motion = vec4<f32>(0.0);
     return pixel;
 }

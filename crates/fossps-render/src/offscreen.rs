@@ -49,12 +49,12 @@ pub(crate) fn gpu() -> Option<Arc<Gpu>> {
 }
 
 /// What the last of a run of frames looked like.
-struct Shot {
+pub(crate) struct Shot {
     /// The finished picture's RGBA pixels, row by row from the top.
-    pixels: Vec<u8>,
+    pub(crate) pixels: Vec<u8>,
     /// How far each drawn pixel moved since the frame before, as a fraction
     /// of the picture: across, then down.
-    motion: Vec<[f32; 2]>,
+    pub(crate) motion: Vec<[f32; 2]>,
     /// How many pixels wide the scene was drawn, before any upscaling.
     drawn_width: u32,
     /// Whether the frames were upscaled.
@@ -124,7 +124,7 @@ unsafe fn read(gpu: &Gpu, memory: vk::DeviceMemory, bytes: u64) -> Vec<u8> {
 
 /// Draws `scene` once for each of `cameras`, one frame after another, into
 /// a `size` by `size` picture made `stops` brighter, and returns the last.
-fn frames(
+pub(crate) fn frames(
     gpu: &Arc<Gpu>,
     scene: &Scene,
     cameras: &[Camera],

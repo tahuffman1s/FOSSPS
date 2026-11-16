@@ -220,6 +220,10 @@ unsafe extern "system" fn report_validation(
     if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
         log::error!("Vulkan validation: {message}");
+        // A test that counts these has often set up no log to read them in.
+        if !log::log_enabled!(log::Level::Error) {
+            eprintln!("Vulkan validation: {message}");
+        }
     } else {
         log::warn!("Vulkan validation: {message}");
     }

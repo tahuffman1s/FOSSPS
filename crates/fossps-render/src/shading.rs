@@ -12,7 +12,10 @@ use fossps_assets::{
 };
 
 use crate::camera::Camera;
-use crate::offscreen::{MIDDLE, SIZE, draw, finish, gpu, is_background, pixel, placed, squares};
+use crate::offscreen::{
+    MIDDLE, SIZE, draw, finish, frames, gpu, is_background, pixel, placed, squares,
+};
+use crate::upscale::Upscaling;
 
 /// A matte white floor two metres across at height 0, facing up. Seen by
 /// [`above`], its texture lies the way it would in an image viewer: u runs
@@ -490,6 +493,39 @@ fn alpha_cuts_holes_or_lets_what_is_behind_show_through() {
     assert_eq!(
         see_through(&[(pane, -3.0), (wall, -2.0)]),
         see_through(&[(wall, -2.0)])
+    );
+
+    // The eye steps sideways: the wall is seen to move, and through the
+    // pane it is still the wall's movement that is written, not the pane's.
+    let moved = |list: &[([f32; 4], f32)]| {
+        let mut scene = squares(
+            &list
+                .iter()
+                .map(|&(colour, z)| (colour, placed(0.0, 0.0, z, 1.0), false))
+                .collect::<Vec<_>>(),
+        );
+        scene.materials[0].alpha_mode = AlphaMode::Blend;
+        let stepped = Camera {
+            position: [0.1, 0.0, 0.0],
+            ..Camera::default()
+        };
+        let shot = frames(
+            &gpu,
+            &scene,
+            &[Camera::default(), stepped],
+            0.0,
+            SIZE,
+            Upscaling::Off,
+        );
+        shot.motion[(MIDDLE.1 * SIZE + MIDDLE.0) as usize]
+    };
+    let behind = moved(&[(pane, -2.0), (wall, -3.0)]);
+    assert!(behind[0].abs() > 1e-3, "the wall moved: {behind:?}");
+    // The pane is nearer, so it would have moved half as far again.
+    let alone = moved(&[(wall, -3.0), (wall, -3.0)]);
+    assert!(
+        (behind[0] - alone[0]).abs() < 1e-4,
+        "{behind:?} is not {alone:?}"
     );
 
     // Two panes are mixed farthest first, whichever is listed first.
