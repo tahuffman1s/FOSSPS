@@ -35,6 +35,10 @@ fossps-render = { path = "../fossps-render", optional = true }
 # textures yet (#59).
 fossps-assets = { path = "../fossps-assets", default-features = false }
 log = "0.4"
+# Reads a game's `map.toml`. The same reader the bindings file uses.
+toml = { version = "1.2", default-features = false, features = ["parse", "std"] }
+# Chooses which of a map's spawn points a player gets.
+fossps-mode = { path = "../fossps-mode" }
 # Ctrl-C and the operating system's "please end" requests, for a clean server stop.
 ctrlc = { version = "3.4", features = ["termination"] }
 # `fossps package` writes the Linux `.tar.gz` itself, so packaging needs no

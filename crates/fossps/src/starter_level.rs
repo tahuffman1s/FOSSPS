@@ -538,7 +538,7 @@ mod tests {
             }
         }
         // And a player started at each one lands.
-        let walked = crate::online::try_walking(&scene);
+        let walked = crate::online::try_walking(&scene, &crate::map::Map::default());
         assert_eq!(walked.spawn_points, 6);
         assert_eq!(walked.problems, Vec::<String>::new());
     }

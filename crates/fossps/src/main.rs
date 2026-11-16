@@ -19,6 +19,7 @@ use fossps::bench::Bench;
 use fossps::cli::{self, quoted};
 use fossps::input::ActionKind;
 use fossps::level::{self, LEVEL_FILE};
+use fossps::map::MAP_FILE;
 use fossps::online::{DEFAULT_PORT, FoundServer, JoinedGame, LocalGame, SEARCH_TIME, find_servers};
 use fossps::package;
 use fossps::player;
@@ -78,7 +79,7 @@ enum Command {
         #[arg(long)]
         open: bool,
     },
-    /// Open a game's level in the editor: fly around it and see what is in it
+    /// Open a game's level in the editor: fly around it and place spawn points
     #[cfg(feature = "editor")]
     #[command(
         after_help = "Examples:\n  fossps edit            Edit the game in this folder\n  \
@@ -89,8 +90,12 @@ enum Command {
                       up, pressing the left stick flies\nfaster and the d-pad changes the \
                       speed. The lines on the ground are a metre apart.\n\nThe list on the left \
                       names everything in the level. Click a name to see where it is and\nhow \
-                      big it is on the right; double-click it to fly there. Nothing can be \
-                      changed yet."
+                      big it is on the right; double-click it to fly there.\n\n\"Place a spawn \
+                      here\" puts a spawn point on the ground where the camera looks. Choose it \
+                      to\nchange its type, name, position and facing on the right. What is placed \
+                      is saved in\nmap.toml in the game's folder as you go, with no save button, \
+                      and a game that is\nrunning picks it up. The level file itself is never \
+                      changed."
     )]
     Edit {
         /// The game's folder. Leave it out to edit the game in the folder you are in
@@ -481,6 +486,13 @@ fn check(folder: &Path) -> Result<(), String> {
              would not start. Export the level again, then run `fossps check` again."
         ));
     };
+    // The mistake itself was printed when the game was opened.
+    if game.map_error().is_some() {
+        return Err(format!(
+            "{MAP_FILE} has a mistake (the error is shown above), so nothing would be \
+             placed in the level. Fix it, then run `fossps check` again."
+        ));
+    }
     println!(
         "{ENTRY_SCRIPT} is fine: it loaded and ran for {TICKS} ticks (1 second of game time) \
          with no errors."
@@ -521,7 +533,16 @@ fn check(folder: &Path) -> Result<(), String> {
              with `fossps edit`.",
             level::summary(&level)
         );
-        print!("{}", cli::walked(&fossps::online::try_walking(&level)));
+        print!(
+            "{}",
+            cli::walked(&fossps::online::try_walking(&level, game.map()))
+        );
+    }
+    if !game.map().is_empty() {
+        println!(
+            "{MAP_FILE} is fine: {}. Players come into the world at its spawn points.",
+            game.map().summary()
+        );
     }
     Ok(())
 }
@@ -574,13 +595,25 @@ fn edit(folder: &Path) -> Result<(), String> {
     }
     cli::find_game(folder, "fossps edit")?;
     let level = cli::load_level(folder).map_err(|error| not_started(&error, "edit"))?;
+    // A map file with a mistake is not opened: the editor saves what it
+    // holds, which would write over whatever is in the file.
+    let (map_file, map) = fossps::map::MapFile::open(folder);
+    let map = map.map_err(|error| {
+        format!(
+            "{error}\nNothing was opened, because saving from the editor would replace \
+             the file as it is. Fix the line above in a text editor, then run `fossps \
+             edit` again. To start the map afresh, move {MAP_FILE} out of the game's folder."
+        )
+    })?;
     let name = cli::game_name(folder);
     log::info!(
         "Editing {}. Hold the right mouse button to look around; W, A, S and D fly. \
-         `fossps edit --help` lists the rest, for a gamepad too.",
-        if name.is_empty() { "the game" } else { &name }
+         `fossps edit --help` lists the rest, for a gamepad too. What you place is saved \
+         in {} as you go.",
+        if name.is_empty() { "the game" } else { &name },
+        map_file.path().display()
     );
-    fossps::editor::run(&name, level).map_err(|error| error.to_string())
+    fossps::editor::run(&name, level, Some((map, map_file))).map_err(|error| error.to_string())
 }
 
 /// What to say when a game's level cannot be loaded, so `fossps {verb}`
@@ -688,8 +721,15 @@ fn package(folder: &Path, target: Target, runtime_dir: Option<&Path>) -> Result<
             error.file
         ));
     }
+    // The same goes for the map file and the level: the player's copy would
+    // not start.
+    if game.map_error().is_some() {
+        return Err(format!(
+            "{MAP_FILE} has a mistake (the error is shown above), so the game was not \
+             packaged. Fix it, try it with `fossps check`, then run `fossps package` again."
+        ));
+    }
     drop(game);
-    // The same goes for the level: the player's copy would not start.
     level::load(folder).map_err(|error| {
         format!(
             "{error}\nThe game was not packaged, because its level could not be loaded. \
