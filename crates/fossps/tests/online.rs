@@ -30,7 +30,11 @@ fn host(test: &str) -> (HostedGame, String) {
 
 fn join(hosted: &mut HostedGame, address: &str) -> JoinedGame {
     let nothing = Input::new(ActionMap::default_fps());
-    let mut joined = JoinedGame::connect(address, &ActionMap::default_fps(), TICK_RATE).unwrap();
+    // Nothing these tests fetch is kept on the computer they run on.
+    let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("online-cache-unused");
+    let mut joined = JoinedGame::connect(address, &ActionMap::default_fps(), TICK_RATE)
+        .unwrap()
+        .with_cache(cache);
     joined
         .wait_until_joined(|| hosted.tick(nothing.frame(), STEP))
         .unwrap();
@@ -425,4 +429,168 @@ fn players_start_at_the_maps_spawn_point_and_a_saved_map_is_picked_up() {
     let said = hosted.game().map_error().unwrap().to_string();
     assert!(said.contains("line 3: An id has to be text"), "{said}");
     assert!(moved(&hosted));
+}
+/// An empty folder for levels fetched in `test` to be kept in.
+fn cache_for(test: &str) -> PathBuf {
+    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("online-cache-{test}"));
+    let _ = std::fs::remove_dir_all(&folder);
+    folder
+}
+
+#[test]
+fn a_player_with_no_copy_of_the_game_is_sent_its_level_and_walks_it() {
+    let level = starter_level();
+    let mut hosted = HostedGame::open(new_game("sent"), "127.0.0.1:0", TICK_RATE)
+        .unwrap()
+        .with_level(&level)
+        .share_level(scaffold::STARTER_LEVEL)
+        .unwrap();
+    let address = hosted.address().unwrap().to_string();
+    let cache = cache_for("sent");
+    let nothing = Input::new(ActionMap::default_fps());
+
+    // All this player has is the server's address.
+    let mut joined = JoinedGame::connect(&address, &ActionMap::default_fps(), TICK_RATE)
+        .unwrap()
+        .with_cache(&cache);
+    joined
+        .wait_until_joined(|| hosted.tick(nothing.frame(), STEP))
+        .unwrap();
+    // The level to draw is the server's, and it is kept for next time.
+    let sent = joined.take_level().expect("the server's level");
+    assert_eq!(sent.instances.len(), level.instances.len());
+    assert!(joined.take_level().is_none());
+    let kept: Vec<_> = std::fs::read_dir(&cache).unwrap().flatten().collect();
+    assert_eq!(kept.len(), 1);
+    let path = kept[0].path();
+    assert_eq!(std::fs::read(&path).unwrap(), scaffold::STARTER_LEVEL);
+
+    // Started at a spawn point of the level, looking at the other end.
+    let mut input = Input::new(ActionMap::default_fps());
+    play(&mut hosted, &mut [(&mut joined, &mut input)], 30);
+    let start = joined.player().position;
+    assert!((start[2].abs() - 14.0).abs() < 0.01, "{start:?}");
+    let yaw = joined.yaw();
+    assert!(
+        if start[2] < 0.0 {
+            (yaw - std::f32::consts::PI).abs() < 0.001
+        } else {
+            yaw == 0.0
+        },
+        "at {start:?} facing {yaw}"
+    );
+
+    // Backing into the wall 2 m behind, the player stops at it on their
+    // own side, where the server has them too: nothing to put right.
+    input.press(Key::S);
+    play(&mut hosted, &mut [(&mut joined, &mut input)], 120);
+    input.release(Key::S);
+    play(&mut hosted, &mut [(&mut joined, &mut input)], 60);
+    let here = joined.player().position;
+    let out = here[2].abs();
+    assert!(out > 15.5 && out < 15.7, "stopped by the wall: {here:?}");
+    let (_, on_server) = hosted.players().next().unwrap();
+    assert!(
+        distance(on_server.position, here) < 0.001,
+        "server {:?}, player {here:?}",
+        on_server.position
+    );
+    drop(joined);
+    play(&mut hosted, &mut [], 5);
+
+    // The next visit uses the kept file and leaves it as it is.
+    let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut again = JoinedGame::connect(&address, &ActionMap::default_fps(), TICK_RATE)
+        .unwrap()
+        .with_cache(&cache);
+    again
+        .wait_until_joined(|| hosted.tick(nothing.frame(), STEP))
+        .unwrap();
+    assert!(again.take_level().is_some());
+    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+    assert!(std::fs::metadata(&path).unwrap().modified().unwrap() >= written);
+    drop(again);
+    play(&mut hosted, &mut [], 5);
+
+    // A kept file that is no longer what the server offers is not
+    // trusted: the level is fetched afresh.
+    let mut changed = scaffold::STARTER_LEVEL.to_vec();
+    let last = changed.len() - 1;
+    changed[last] ^= 1;
+    std::fs::write(&path, &changed).unwrap();
+    let mut afresh = JoinedGame::connect(&address, &ActionMap::default_fps(), TICK_RATE)
+        .unwrap()
+        .with_cache(&cache);
+    afresh
+        .wait_until_joined(|| hosted.tick(nothing.frame(), STEP))
+        .unwrap();
+    assert!(afresh.take_level().is_some());
+    assert_eq!(std::fs::read(&path).unwrap(), scaffold::STARTER_LEVEL);
+}
+
+#[test]
+fn a_player_is_sent_the_map_and_faces_the_way_its_spawn_point_does() {
+    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("online-sent-map");
+    let _ = std::fs::remove_dir_all(&folder);
+    scaffold::new_game(&folder).unwrap();
+    let at = [3.0, 0.0, -2.0];
+    let map = format!("{}facing = 90.0\n", map_with_spawn(at));
+    std::fs::write(folder.join(fossps::map::MAP_FILE), map).unwrap();
+    let game = ScriptGame::open(&folder, &ActionMap::default_fps()).unwrap();
+    assert_eq!(game.map().spawns().count(), 1);
+    let mut hosted = HostedGame::open(game, "127.0.0.1:0", TICK_RATE).unwrap();
+    let address = hosted.address().unwrap().to_string();
+
+    let mut joined = join(&mut hosted, &address);
+    let mut still = Input::new(ActionMap::default_fps());
+    play(&mut hosted, &mut [(&mut joined, &mut still)], 30);
+    let here = joined.player().position;
+    let (_, on_server) = hosted.players().next().unwrap();
+    // Dropped on the floor, a player settles within a centimetre or two.
+    assert!(distance(here, at) < 0.05, "{here:?}");
+    assert!(distance(here, on_server.position) < 0.001, "{here:?}");
+    let yaw = joined.yaw();
+    assert!(
+        (yaw - std::f32::consts::FRAC_PI_2).abs() < 0.001,
+        "facing {yaw}"
+    );
+}
+
+#[test]
+fn a_server_whose_level_cannot_be_read_is_not_joined() {
+    let mut hosted = HostedGame::open(new_game("unreadable"), "127.0.0.1:0", TICK_RATE)
+        .unwrap()
+        .share_level(b"this is not a level".to_vec())
+        .unwrap();
+    let address = hosted.address().unwrap().to_string();
+    let cache = cache_for("unreadable");
+    let nothing = Input::new(ActionMap::default_fps());
+    let mut joined = JoinedGame::connect(&address, &ActionMap::default_fps(), TICK_RATE)
+        .unwrap()
+        .with_cache(&cache);
+    let error = joined
+        .wait_until_joined(|| hosted.tick(nothing.frame(), STEP))
+        .unwrap_err();
+    let said = error.to_string();
+    assert!(
+        said.starts_with(&format!(
+            "Could not join {address}: the level it plays could not"
+        )),
+        "{said}"
+    );
+    assert!(said.contains("tell whoever runs the server"), "{said}");
+    // No place was taken, and nothing unreadable was kept.
+    for _ in 0..10 {
+        hosted.tick(nothing.frame(), STEP);
+    }
+    assert_eq!(hosted.players().count(), 0);
+    assert!(!cache.exists());
+    assert!(joined.take_level().is_none());
+}
+
+#[test]
+fn a_level_file_with_nothing_in_it_is_not_shared_and_says_why() {
+    let hosted = HostedGame::open(new_game("empty-level"), "127.0.0.1:0", TICK_RATE).unwrap();
+    let error = hosted.share_level(Vec::new()).unwrap_err();
+    assert!(error.to_string().contains("empty"), "{error}");
 }

@@ -7,6 +7,7 @@
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::connect::{
@@ -14,6 +15,7 @@ use crate::connect::{
     LinkSettings, MAX_DATAGRAM_BYTES, Refusal,
 };
 use crate::find::{FoundServer, QUERY_BYTES, Search};
+use crate::share::{Offer, ShareError, WINDOW};
 use crate::snapshot::PlayerId;
 
 /// How many times a goodbye is sent, since any one copy may be lost.
@@ -26,6 +28,15 @@ const MOST_ERRORS: usize = 16;
 /// is still waiting, so a flood of rubbish cannot hold up the tick. The
 /// rest is read on the next tick. A full server's players send 64 a tick.
 const MOST_DATAGRAMS: usize = 1024;
+
+/// How many pieces of offered files one `poll` sends before leaving the
+/// rest unanswered, to be asked for again: four requests' worth. It keeps
+/// a tick short and caps what a server uploads at about 8 MB a second at
+/// 60 ticks, however many are fetching.
+const MOST_PIECES: u32 = MOST_SERVED as u32 * WINDOW;
+
+/// How many askers one `poll` sends pieces to: one request's worth each.
+const MOST_SERVED: usize = 4;
 
 /// Room for one datagram and one byte more, so one that is too long is
 /// seen to be too long instead of being cut to fit.
@@ -107,6 +118,26 @@ fn next_datagram<T>(budget: &mut Budget, mut read: impl FnMut() -> io::Result<T>
 struct Budget {
     datagrams: usize,
     errors: usize,
+    /// Pieces of offered files sent.
+    pieces: u32,
+    /// The addresses pieces were sent to.
+    served: [Option<SocketAddr>; MOST_SERVED],
+}
+
+impl Budget {
+    /// Whether `from`, who asked for pieces of a file, is answered: once
+    /// each `poll`, so that one asker cannot take what is sent in a tick
+    /// from everybody else, and not at all once [`MOST_PIECES`] are sent.
+    fn serves(&mut self, from: SocketAddr) -> bool {
+        if self.pieces >= MOST_PIECES || self.served.contains(&Some(from)) {
+            return false;
+        }
+        let Some(place) = self.served.iter_mut().find(|place| place.is_none()) else {
+            return false;
+        };
+        *place = Some(from);
+        true
+    }
 }
 
 /// Something a server's game should act on, from [`UdpHost::poll`].
@@ -213,6 +244,29 @@ impl UdpHost {
         self.host.set_name(name);
     }
 
+    /// Offers `bytes` to players about to join, in `slot` (0 to
+    /// [`MAX_SHARED_FILES`](crate::MAX_SHARED_FILES) - 1), in place of
+    /// what was offered there. What a slot holds is for the game to
+    /// decide: `fossps` keeps the level in slot 0. Players see the offer
+    /// as [`LinkEvent::Offered`] and fetch what they lack with
+    /// [`UdpLink::fetch`]; `poll` sends the pieces.
+    ///
+    /// A file is only sent to an address that has proved it asked, and no
+    /// more than a few megabytes a second leave the server whoever asks.
+    ///
+    /// # Errors
+    ///
+    /// When there is no such slot, or the file is empty or holds more
+    /// than [`MAX_SHARED_BYTES`](crate::MAX_SHARED_BYTES).
+    pub fn share(&mut self, slot: usize, bytes: impl Into<Arc<[u8]>>) -> Result<(), ShareError> {
+        self.host.share(slot, bytes.into())
+    }
+
+    /// Stops offering what is in `slot`.
+    pub fn unshare(&mut self, slot: usize) {
+        self.host.unshare(slot);
+    }
+
     /// The address and port the socket is open on.
     ///
     /// # Errors
@@ -244,6 +298,17 @@ impl UdpHost {
                     return Some(HostEvent::Packet(id, packet));
                 }
                 Some(Heard::Left(id)) => return Some(HostEvent::Left(id, Gone::Quit)),
+                Some(Heard::Fetch(fetch)) => {
+                    let mut ahead = 0;
+                    while (ahead > 0 || self.budget.serves(from))
+                        && self.host.write_piece(fetch, ahead, &mut self.outbox)
+                    {
+                        // A piece that cannot be sent is asked for again.
+                        let _ = self.socket.send_to(&self.outbox, from);
+                        self.budget.pieces += 1;
+                        ahead += 1;
+                    }
+                }
                 None => {}
             }
         }
@@ -318,6 +383,15 @@ impl Drop for UdpHost {
 pub enum LinkEvent<'a> {
     /// The server gave this player a place, with this number.
     Joined(PlayerId),
+    /// The server offers these files ([`UdpHost::share`]). To have one
+    /// before joining, call [`UdpLink::fetch`] before the next `poll`;
+    /// otherwise the player joins without it. It comes again if the server
+    /// changes what it offers before the player has joined.
+    Offered(Offer),
+    /// The file in this slot has arrived whole, with the hash the server
+    /// gave. Call [`UdpLink::fetch`] before the next `poll` for another;
+    /// otherwise the player joins.
+    Fetched(usize, &'a [u8]),
     /// A snapshot from the server, for
     /// [`Client::receive`](crate::Client::receive).
     Packet(&'a [u8]),
@@ -345,6 +419,8 @@ pub enum LinkEvent<'a> {
 ///     while let Some(event) = link.poll() {
 ///         match event {
 ///             LinkEvent::Joined(_) => println!("joined"),
+///             // Files the server offers; see `UdpLink::fetch`.
+///             LinkEvent::Offered(_) | LinkEvent::Fetched(..) => {}
 ///             // A packet that cannot be read is thrown away.
 ///             LinkEvent::Packet(snapshot) => drop(client.receive(&level, &rules, snapshot)),
 ///             LinkEvent::Closed(why) => {
@@ -428,7 +504,15 @@ impl UdpLink {
         {
             let datagram = self.inbox.get(..len).unwrap_or_default();
             match self.link.receive(now, datagram) {
-                Some(LinkHeard::Joined(id)) => return Some(LinkEvent::Joined(id)),
+                Some(LinkHeard::Joined(id)) => {
+                    self.link.forget_fetched();
+                    return Some(LinkEvent::Joined(id));
+                }
+                Some(LinkHeard::Offered) => return Some(LinkEvent::Offered(*self.link.offer())),
+                Some(LinkHeard::Fetched(slot)) => {
+                    let file = self.link.fetched().unwrap_or_default();
+                    return Some(LinkEvent::Fetched(slot, file));
+                }
                 Some(LinkHeard::Packet) => {
                     let packet = self.inbox.get(DATA_HEADER..len).unwrap_or_default();
                     return Some(LinkEvent::Packet(packet));
@@ -445,6 +529,29 @@ impl UdpLink {
             self.budget = Budget::default();
         }
         closed.map(LinkEvent::Closed)
+    }
+
+    /// Fetches the file the server offers in `slot` before joining. Call
+    /// it straight after [`LinkEvent::Offered`] or [`LinkEvent::Fetched`],
+    /// before the next [`poll`](Self::poll); the file comes in a later
+    /// [`LinkEvent::Fetched`], and [`progress`](Self::progress) says how
+    /// far along it is. A server that stops sending ends the stay with
+    /// [`Closed::TimedOut`], and a file that does not match the hash the
+    /// server gave with [`Closed::DamagedFile`].
+    ///
+    /// Gives `false`, and fetches nothing, when the player is past that
+    /// point, the slot is empty, or the file is longer than
+    /// [`MAX_SHARED_BYTES`](crate::MAX_SHARED_BYTES). The file is whatever
+    /// the server chose to send: check it as any file from a stranger.
+    pub fn fetch(&mut self, slot: usize) -> bool {
+        self.link.fetch(self.started.elapsed(), slot)
+    }
+
+    /// How many bytes of the file being fetched have arrived, and how many
+    /// it holds. `None` when no file is on its way.
+    #[must_use]
+    pub fn progress(&self) -> Option<(u64, u64)> {
+        self.link.progress()
     }
 
     /// Sends a packet of commands to the server. Does nothing until
@@ -642,5 +749,32 @@ pub fn lan_address() -> Option<Ipv4Addr> {
             Some(*here.ip())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_asker_is_sent_one_answer_a_poll_and_a_poll_serves_four() {
+        let asker = |port| SocketAddr::from(([203, 0, 113, 5], port));
+        let mut budget = Budget::default();
+        // The same asker again and again, as someone hogging would.
+        assert!(budget.serves(asker(1)));
+        for _ in 0..100 {
+            assert!(!budget.serves(asker(1)));
+        }
+        // Everybody else still has their turn, up to four in all.
+        assert!(budget.serves(asker(2)));
+        assert!(budget.serves(asker(3)));
+        assert!(budget.serves(asker(4)));
+        assert!(!budget.serves(asker(5)));
+        // The next poll starts afresh.
+        budget = Budget::default();
+        assert!(budget.serves(asker(5)));
+        // Nobody is served once a poll's pieces are all sent.
+        budget.pieces = MOST_PIECES;
+        assert!(!budget.serves(asker(6)));
     }
 }

@@ -77,11 +77,23 @@ pub fn find_game(folder: &Path, command: &str) -> Result<(), String> {
 /// Fails with a message for the person if the level is there but cannot be
 /// loaded.
 pub fn load_level(folder: &Path) -> Result<Option<fossps_assets::Scene>, String> {
+    Ok(load_level_file(folder)?.map(|(level, _)| level))
+}
+
+/// Loads the level of the game in `folder` as [`load_level`] does, and
+/// gives the file's bytes with it, for a server to hand to the players who
+/// join.
+///
+/// # Errors
+///
+/// Fails with a message for the person if the level is there but cannot be
+/// loaded.
+pub fn load_level_file(folder: &Path) -> Result<Option<(fossps_assets::Scene, Vec<u8>)>, String> {
     use crate::level::LEVEL_FILE;
 
-    let level = crate::level::load(folder).map_err(|error| error.to_string())?;
+    let level = crate::level::load_file(folder).map_err(|error| error.to_string())?;
     match &level {
-        Some(level) => {
+        Some((level, _)) => {
             for warning in &level.warnings {
                 log::warn!("{LEVEL_FILE}: {warning}");
             }
@@ -164,7 +176,7 @@ pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String>
     let game = open_game(folder, &config.actions, command)?;
     // Before the port is opened: a server whose players would walk through
     // the level's walls is not worth joining.
-    let level = load_level(folder).map_err(|error| {
+    let level = load_level_file(folder).map_err(|error| {
         format!(
             "{error}\nThe server was not started, because the level could not be loaded. \
              Export it again, then run `{command}` again. To serve the game on the engine's \
@@ -180,16 +192,22 @@ pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String>
             )
         })?
         .named(&game_name(folder));
-    if let Some(level) = &level {
-        game = game.with_level(level);
+    // Only the level's shapes are kept, for players to collide with, and
+    // its file, for players who join to be sent.
+    if let Some((level, file)) = level {
+        let size = file.len();
+        game = game
+            .with_level(&level)
+            .share_level(file)
+            .map_err(|error| not_shared(&error, command))?;
         log::info!(
-            "Players walk {}: {}.",
+            "Players walk {}: {}. Players who join are sent it ({} KB), so they need no copy \
+             of the game.",
             crate::level::LEVEL_FILE,
-            crate::level::summary(level)
+            crate::level::summary(&level),
+            size.div_ceil(1024)
         );
     }
-    // Only the level's shapes are kept, for players to collide with.
-    drop(level);
     let stop = StopSignal::on_ctrl_c().map_err(|error| error.to_string())?;
 
     log::info!(
@@ -210,6 +228,18 @@ pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String>
         }
     );
     Ok(())
+}
+
+/// What to say when a game's level cannot be handed to the players who
+/// join, so `command` started nothing.
+#[must_use]
+pub fn not_shared(error: &crate::online::ShareError, command: &str) -> String {
+    format!(
+        "{} cannot be sent to players who join: {error}\nNothing was started, because \
+         players without the level would walk through its walls. Export the level with \
+         smaller or fewer textures, then run `{command}` again.",
+        crate::level::LEVEL_FILE
+    )
 }
 
 /// Gives `actions` the player's own controls from their bindings file, and
