@@ -27,6 +27,10 @@ The level is drawn in its materials' colours, and every shape in it is solid: pl
 | Fire   | Left mouse button  | Right trigger |
 | Move   | W A S D            | Left stick |
 
+## Sounds
+
+Firing plays the engine's starter gunshot. To use a sound of your own, make a folder called `sounds` in this folder and put a WAV file in it: `sounds/gunshot.wav` replaces the starter gunshot, and any other name is a new sound, so `sounds/door.wav` is played with `game.audio.play("door")`. A sound saved while the game runs is picked up. Only WAV files load for now. Only use sounds you made or are allowed to share, and keep their licence beside them.
+
 ## Change it
 
 The game is `main.luau`. Edit it and save: the running game loads the new version by itself.

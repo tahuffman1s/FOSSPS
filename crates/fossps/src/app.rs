@@ -16,6 +16,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::game::{Frame, Game};
 use crate::gamepad::Gamepads;
 use crate::pace::{FramePacer, WATCH};
+use crate::sound_output::{LazySpeakers, SoundOutput};
 use crate::tick::TickClock;
 use crate::translate;
 
@@ -223,6 +224,7 @@ fn start(config: Config, game: impl Game, editing: bool) -> Result<(), AppError>
         last_frame: Instant::now(),
         last_view: None,
         ui: fossps_ui::DrawBuffer::default(),
+        sound: SoundOutput::new(LazySpeakers::default()),
         #[cfg(feature = "editor")]
         panels: None,
         error: None,
@@ -261,6 +263,8 @@ struct App<G> {
     /// The HUD and menus the game asked for this frame. Kept from frame to
     /// frame so that gathering them stops asking for memory.
     ui: fossps_ui::DrawBuffer,
+    /// Plays the sounds the game asks for through the speakers.
+    sound: SoundOutput<LazySpeakers>,
     /// What the editor's panels are made with; `None` in a game.
     #[cfg(feature = "editor")]
     panels: Option<PanelInput>,
@@ -510,6 +514,11 @@ impl<G: Game> App<G> {
             }
             self.last_view = Some(view.position);
         }
+        // The ears are where the eyes are.
+        if let Some(view) = frame.view() {
+            self.sound.listen_from(view.position, view.yaw);
+        }
+        self.sound.handle(frame.take_sounds());
         if let Some(set) = frame.action_set() {
             self.use_action_set(set);
         }

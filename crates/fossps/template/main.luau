@@ -32,6 +32,10 @@ game.onTick(function(step)
         -- motor thumps, how hard its light motor buzzes, and for how long:
         -- game.input.rumble(strong, weak, seconds).
         game.input.rumble(0.2, 0.6, 0.1)
+        -- The shot is heard too. "gunshot" is one of the engine's starter
+        -- sounds. Put a gunshot.wav of your own in a folder called sounds,
+        -- inside this folder, and that is played instead.
+        game.audio.play("gunshot")
     end
 end)
 

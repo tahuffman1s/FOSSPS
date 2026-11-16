@@ -17,6 +17,7 @@ use fossps_mode::{Event, Match, PlayerId};
 use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, VmState};
 
 use crate::api::{self, Handlers, Shared};
+use crate::audio::{AudioCommand, AudioState};
 use crate::error::{OpenError, ScriptError, TookTooLong, is_time_limit};
 use crate::keep::{Kept, Store};
 use crate::mode_api::{Handles, ModeState};
@@ -146,6 +147,9 @@ pub struct ScriptHost {
     kept: Rc<RefCell<Store>>,
     /// Players who have come into the world and not yet been given a place.
     spawns: Vec<PlayerId>,
+    /// The sounds the game has, and the ones the script asked for that the
+    /// engine has not yet taken. Kept here so a save loses none of them.
+    audio: Rc<AudioState>,
 }
 
 impl std::fmt::Debug for ScriptHost {
@@ -245,6 +249,7 @@ impl ScriptHost {
             mode: Rc::new(ModeState::new()),
             kept: Rc::default(),
             spawns: Vec::new(),
+            audio: Rc::default(),
         };
         // A script error is already logged and kept in `last_error`.
         let _ = host.install();
@@ -287,6 +292,42 @@ impl ScriptHost {
     /// asked more than once, this is the latest.
     pub fn take_rumble(&mut self) -> Option<Rumble> {
         self.running.as_ref()?.shared.rumble.take()
+    }
+
+    /// Tells the script which sounds the game has, by name, so that asking
+    /// for one that is not there is a mistake the script's author is shown,
+    /// with the nearest real name. Call it again when the sounds change.
+    ///
+    /// Until it is called, `game.audio.play` takes any name. A script cannot
+    /// play a sound while it loads, only from the functions it registers, so
+    /// calling this right after opening the host is soon enough.
+    pub fn set_sounds<S: Into<String>>(&mut self, names: impl IntoIterator<Item = S>) {
+        self.audio
+            .set_names(names.into_iter().map(Into::into).collect());
+    }
+
+    /// The next thing the script asked of the sound with `game.audio.play`,
+    /// `game.audio.playAt` or a sound's `stop`, oldest first, for whoever
+    /// owns the speakers. Call it until it gives `None`, every frame.
+    ///
+    /// Only the latest 256 are kept, so a server, where nobody listens, can
+    /// leave them be.
+    ///
+    /// ```
+    /// use fossps_input::{ActionMap, InputFrame};
+    /// use fossps_script::{AudioCommand, ScriptHost};
+    ///
+    /// let script = r#"game.onStart(function() game.audio.play("music", { loop = true }) end)"#;
+    /// let mut host = ScriptHost::from_source(script, ActionMap::default_fps());
+    /// host.tick(&InputFrame::default(), 1.0 / 60.0);
+    /// let Some(AudioCommand::Play(sound)) = host.take_sound() else {
+    ///     panic!("the script played a sound");
+    /// };
+    /// assert_eq!((sound.name.as_str(), sound.looping), ("music", true));
+    /// assert_eq!(host.take_sound(), None);
+    /// ```
+    pub fn take_sound(&mut self) -> Option<AudioCommand> {
+        self.audio.take()
     }
 
     /// The match being played: the rules the script set with `game.mode`,
@@ -485,6 +526,7 @@ impl ScriptHost {
             loading: Cell::new(true),
             rules: RefCell::new(None),
             rumble: Cell::new(None),
+            audio: Rc::clone(&self.audio),
             modules: Modules::new(Rc::clone(&self.files)),
             kept: Kept::default(),
             store: Rc::clone(&self.kept),
