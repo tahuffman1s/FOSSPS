@@ -1131,3 +1131,99 @@ fn a_packed_game_whose_level_does_not_load_says_so_and_opens_no_window() {
     );
     assert!(said.contains("tell the game's maker"), "{said}");
 }
+
+/// A 16-bit, one-channel WAV file: a tenth of a second of a steady level.
+fn wav() -> Vec<u8> {
+    let samples = 4800_u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&96_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(samples * 2).to_le_bytes());
+    for _ in 0..samples {
+        bytes.extend_from_slice(&8000_i16.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn check_loads_the_games_sounds_and_says_so() {
+    let folder = scratch("check-sounds");
+    fs::create_dir_all(folder.join("sounds/ui")).unwrap();
+    fs::write(folder.join("sounds/ui/click.wav"), wav()).unwrap();
+    fs::write(folder.join("sounds/gunshot.wav"), wav()).unwrap();
+    fs::write(folder.join("sounds/LICENCE.txt"), "CC0").unwrap();
+    fs::write(
+        folder.join("main.luau"),
+        "game.onTick(function()\n    if game.input.justPressed(\"fire\") then\n        \
+         game.audio.play(\"ui/click\", { volume = 0.5 })\n        \
+         game.audio.playAt(\"gunshot\", vector.create(0, 1, -5), { range = 80 })\n    \
+         end\nend)\n",
+    )
+    .unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("The 2 sound files in the sounds folder are fine"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn check_fails_on_a_sound_that_is_not_in_the_game_and_names_the_nearest() {
+    let folder = scratch("check-sound-name");
+    fs::create_dir_all(folder.join("sounds")).unwrap();
+    fs::write(folder.join("sounds/door.wav"), wav()).unwrap();
+    fs::write(
+        folder.join("main.luau"),
+        "game.onTick(function()\n    if game.input.justPressed(\"interact\") then\n        \
+         game.audio.play(\"dor\")\n    end\nend)\n",
+    )
+    .unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("Script error in main.luau, line 3"), "{said}");
+    assert!(
+        said.contains("There is no sound called \"dor\". Did you mean \"door\"?"),
+        "{said}"
+    );
+    assert!(said.contains("pressing \"interact\""), "{said}");
+}
+
+#[test]
+fn check_fails_on_a_sound_file_that_cannot_be_played_and_says_what_to_do() {
+    let folder = scratch("check-sound-file");
+    fs::create_dir_all(folder.join("sounds")).unwrap();
+    fs::write(folder.join("sounds/door.wav"), "not a sound").unwrap();
+    fs::write(folder.join("sounds/music.mp3"), "ID3").unwrap();
+    fs::write(folder.join("main.luau"), "game.onStart(function() end)\n").unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let said = stderr(&output);
+    assert!(said.contains("sounds/door.wav was not loaded."), "{said}");
+    assert!(
+        said.contains("sounds/music.mp3 was not loaded: only WAV files can be played"),
+        "{said}"
+    );
+    assert!(
+        said.contains("2 of the files in the game's sounds folder cannot be played"),
+        "{said}"
+    );
+    assert!(said.contains("run `fossps check` again"), "{said}");
+}

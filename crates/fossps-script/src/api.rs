@@ -10,6 +10,7 @@ use fossps_input::{ActionKind, ActionMap, ActionState, InputFrame, Rumble};
 use fossps_mode::Rules;
 use mlua::{Function, Lua, Table, Value, Variadic};
 
+use crate::audio::{self, AUDIO_FUNCTIONS, AudioState};
 use crate::error::{TookTooLong, closest};
 use crate::keep::{self, Kept, Store};
 use crate::mode_api::{self, Handles, ModeState};
@@ -86,6 +87,9 @@ pub(crate) struct Shared {
     pub rules: RefCell<Option<(Rules, Option<usize>)>>,
     /// The rumble the script asked for and the engine has not yet taken.
     pub rumble: Cell<Option<Rumble>>,
+    /// The sounds the game has and the ones asked for. It outlives this
+    /// version of the script.
+    pub audio: Rc<AudioState>,
     /// The script files this version has read, and what `require` gave for each.
     pub modules: Modules,
     /// The tables this version asked for with `game.keep`.
@@ -129,6 +133,7 @@ pub(crate) fn describe(value: &Value) -> &'static str {
         Value::String(_) => "text",
         Value::Table(_) => "a table",
         Value::Function(_) => "a function",
+        Value::Vector(_) => "a vector",
         _ => "something else",
     }
 }
@@ -238,7 +243,12 @@ pub(crate) fn install(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<()> {
     strict(lua, &input, "game.input", INPUT_FUNCTIONS)?;
     game.set("input", input)?;
 
+    let sounds = audio::table(lua, shared)?;
+    strict(lua, &sounds, "game.audio", AUDIO_FUNCTIONS)?;
+    game.set("audio", sounds)?;
+
     let mut members = GAME_FUNCTIONS.to_vec();
+    members.push("audio");
     members.push("input");
     members.push("round");
     strict(lua, &game, "game", &members)?;
@@ -492,8 +502,10 @@ mod tests {
             MODE_SETTINGS, PLAYER_FIELDS, PLAYER_METHODS, ROUND_FUNCTIONS, TEAM_FIELDS,
             TEAM_METHODS,
         };
-        let groups: [(&str, &[&str]); 8] = [
+        let groups: [(&str, &[&str]); 10] = [
             ("game.", GAME_FUNCTIONS),
+            ("game.audio.", AUDIO_FUNCTIONS),
+            ("Sound:", crate::audio::SOUND_METHODS),
             ("game.input.", INPUT_FUNCTIONS),
             ("game.round.", ROUND_FUNCTIONS),
             ("game.mode.", MODE_SETTINGS),

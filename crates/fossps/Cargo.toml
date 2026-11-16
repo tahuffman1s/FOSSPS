@@ -15,6 +15,7 @@ window = [
     "dep:winit",
     "dep:gilrs",
     "dep:fossps-render",
+    "fossps-audio/device",
     # The pictures a level's materials use are decoded only where they are drawn.
     "fossps-assets/textures",
 ]
@@ -33,6 +34,10 @@ fossps-script = { path = "../fossps-script" }
 fossps-net = { path = "../fossps-net" }
 fossps-pack = { path = "../fossps-pack" }
 fossps-physics = { path = "../fossps-physics" }
+# Reads a game's sound files and mixes them. Its `device` feature, which
+# plays through the speakers and links a sound library, comes with `window`:
+# a dedicated server has neither.
+fossps-audio = { path = "../fossps-audio", default-features = false }
 # The HUD and menus a game hands over each frame. No dependencies of its own.
 fossps-ui = { path = "../fossps-ui" }
 fossps-render = { path = "../fossps-render", optional = true }

@@ -16,6 +16,7 @@ use fossps_script::ENTRY_SCRIPT;
 use crate::map::{MAP_FILE, Map, MapError};
 use crate::scaffold::LEVEL_FILE;
 use crate::script_game::ScriptGame;
+use crate::sounds::Sounds;
 
 /// Where the pack for the program at `program` would be: beside it, with the
 /// program's name and `.fpk` after it. A Windows program's `.exe` is left
@@ -167,6 +168,12 @@ pub fn open(pack: &Path, actions: &ActionMap) -> Result<PackedGame, PlayError> {
         scripts.push((name, source));
     }
     let game = ScriptGame::from_sources(scripts, actions);
+    // Nothing is played while a script loads, so the sounds can follow it.
+    let sounds = Sounds::in_pack(&mut opened);
+    for problem in sounds.problems() {
+        log::warn!("{problem}");
+    }
+    let game = game.with_sounds(sounds);
     if let Some(error) = game.host().last_error() {
         return Err(PlayError::ScriptMistake {
             pack: pack.to_owned(),
