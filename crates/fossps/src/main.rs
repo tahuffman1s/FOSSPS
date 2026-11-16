@@ -92,8 +92,14 @@ enum Command {
                       names everything in the level. Click a name to see where it is and\nhow \
                       big it is on the right; double-click it to fly there.\n\n\"Place a spawn \
                       here\" puts a spawn point on the ground where the camera looks. Choose it \
-                      to\nchange its type, name, position and facing on the right. What is placed \
-                      is saved in\nmap.toml in the game's folder as you go, with no save button, \
+                      to\nchange its type, name, position and facing on the right. In the \
+                      picture, drag its\nmark to move it and the tip of its line to turn it; \
+                      with \"Click in the picture to\nplace\" on, a click on the ground places \
+                      one. Things land on a grid (the Snap\nbutton changes it; hold Ctrl to go \
+                      without, Alt to move up and down). On a gamepad\nA places where you look, \
+                      X carries what you look at and puts it down, B puts it\nback, LB and RB \
+                      turn it and Y changes the snap; P, F, Esc, Z, C and G do the same.\n\nWhat \
+                      is placed is saved in\nmap.toml in the game's folder as you go, with no save button, \
                       and a game that is\nrunning picks it up. The level file itself is never \
                       changed."
     )]

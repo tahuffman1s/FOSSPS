@@ -752,7 +752,7 @@ fn rounded(value: f32, per: f64) -> f64 {
 }
 
 /// `degrees` as the same facing from -180 (not included) to 180.
-fn wrapped(degrees: f32) -> f32 {
+pub(crate) fn wrapped(degrees: f32) -> f32 {
     let turned = degrees.rem_euclid(360.0);
     if turned > 180.0 {
         turned - 360.0
