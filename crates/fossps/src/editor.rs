@@ -22,9 +22,14 @@
 //! A mark is moved by dragging it and turned by dragging the tip of its
 //! line, on a grid; with keys or a gamepad, things are placed, picked up
 //! and put down where the camera looks. See [`place`].
+//!
+//! F5, or Select on a gamepad, plays the level from where the camera is,
+//! and the same key or button comes back to editing with the camera and
+//! the map as they were. See [`play`].
 
 mod panels;
 mod place;
+mod play;
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fmt::Write as _;
@@ -34,10 +39,12 @@ use fossps_input::{ActionId, ActionMap, ActionSetId, InputFrame, MouseMode};
 pub(crate) use self::panels::context as panel_context;
 use self::panels::{LevelPanels, placed_name};
 use self::place::{Drag, Held, Hit, Keys, Snap};
+use self::play::Play;
 use crate::app::{self, AppError, Config};
 use crate::game::{Frame, Game};
 use crate::map::{Map, MapFile, SPAWN};
-use crate::online::{MOUSE_TURN, STICK_TURN};
+use crate::online::{MOUSE_TURN, STICK_TURN, World};
+use crate::sound_output::SoundAsk;
 
 /// How fast the camera flies to begin with, in metres a second: a little
 /// faster than a sprinting player.
@@ -254,35 +261,64 @@ struct Controls {
     turn_right: ActionId,
     /// Changes what things snap to.
     snap: ActionId,
+    /// Plays the level from where the camera is.
+    play: ActionId,
+    /// Comes back from playing. Bound as `play` is, so it is one key and
+    /// one button both ways, but among the game's own actions, which are
+    /// the live ones while the level is played.
+    back: ActionId,
 }
 
-/// The editor's own actions and what they are bound to: every one on
-/// keyboard and mouse and on a gamepad.
+/// What switches between editing and playing: one key and one gamepad
+/// button. F5 is "play" in most editors; Select (View, Back) is the one
+/// button left over once a game has Start for its pause menu.
+const PLAY_KEYS: [&str; 2] = ["F5", "GamepadSelect"];
+
+/// The editor's own actions and what they are bound to, added to `game`,
+/// the actions of the game being edited: every one on keyboard and mouse
+/// and on a gamepad.
 ///
-/// They are kept apart from a game's actions in a set called `editor`,
+/// They are kept apart from the game's actions in a set called `editor`,
 /// which leaves the cursor free for pointing; the window captures the mouse
-/// while the right mouse button is held.
-fn controls() -> Option<(ActionMap, Controls)> {
-    let mut map = ActionMap::new();
+/// while the right mouse button is held. Their names begin with `editor_`,
+/// so none is a name a game uses. The one that comes back from playing
+/// joins the game's own.
+///
+/// `None` if `game` already has a set or an action by one of these names.
+fn controls(mut map: ActionMap) -> Option<(ActionMap, Controls)> {
+    let back = map.button("editor_back", PLAY_KEYS).ok()?;
     let set = map.add_set("editor", MouseMode::Pointer).ok()?;
-    let fly = map.axis2d("fly", ["WASD", "LeftStick"]).ok()?;
-    let look = map.axis2d("look", ["MouseMotion", "RightStick"]).ok()?;
+    let fly = map.axis2d("editor_fly", ["WASD", "LeftStick"]).ok()?;
+    let look = map
+        .axis2d("editor_look", ["MouseMotion", "RightStick"])
+        .ok()?;
     map.set_stick_curve(look, 2.0);
     let rise = map
-        .axis1d("rise", ["Q/E", "LeftTrigger/RightTrigger"])
+        .axis1d("editor_rise", ["Q/E", "LeftTrigger/RightTrigger"])
         .ok()?;
-    let fast = map.button("fast", ["LeftShift", "LeftStickPress"]).ok()?;
-    let faster = map.button("faster", ["MouseWheelUp", "DpadUp"]).ok()?;
-    let slower = map.button("slower", ["MouseWheelDown", "DpadDown"]).ok()?;
+    let fast = map
+        .button("editor_fast", ["LeftShift", "LeftStickPress"])
+        .ok()?;
+    let faster = map
+        .button("editor_faster", ["MouseWheelUp", "DpadUp"])
+        .ok()?;
+    let slower = map
+        .button("editor_slower", ["MouseWheelDown", "DpadDown"])
+        .ok()?;
     // Not Space or Enter, which also press whichever button of the panels
     // was clicked last.
-    let place = map.button("place", ["P", "GamepadSouth"]).ok()?;
-    let grab = map.button("grab", ["F", "GamepadWest"]).ok()?;
-    let cancel = map.button("cancel", ["Escape", "GamepadEast"]).ok()?;
-    let turn_left = map.button("turn_left", ["Z", "LeftBumper"]).ok()?;
-    let turn_right = map.button("turn_right", ["C", "RightBumper"]).ok()?;
-    let snap = map.button("snap", ["G", "GamepadNorth"]).ok()?;
+    let place = map.button("editor_place", ["P", "GamepadSouth"]).ok()?;
+    let grab = map.button("editor_grab", ["F", "GamepadWest"]).ok()?;
+    let cancel = map
+        .button("editor_cancel", ["Escape", "GamepadEast"])
+        .ok()?;
+    let turn_left = map.button("editor_turn_left", ["Z", "LeftBumper"]).ok()?;
+    let turn_right = map.button("editor_turn_right", ["C", "RightBumper"]).ok()?;
+    let snap = map.button("editor_snap", ["G", "GamepadNorth"]).ok()?;
+    let play = map.button("editor_play", PLAY_KEYS).ok()?;
     let controls = Controls {
+        play,
+        back,
         set,
         fly,
         look,
@@ -341,6 +377,19 @@ struct Editor {
     /// Whether things were last placed or carried with keys or a gamepad:
     /// the spot the camera looks at is then ringed in the picture.
     aiming: bool,
+    /// Every action the window reads: the game's and the editor's.
+    actions: ActionMap,
+    /// The level's solid shapes, as a game played from here walks them.
+    world: World,
+    /// The level being played, while it is.
+    play: Option<Play>,
+    /// The "Play from here" button was clicked: the next tick starts.
+    play_asked: bool,
+    /// Why playing could not start or stopped by itself, as the panels
+    /// say it until the next try.
+    play_problem: String,
+    /// Playing has just stopped, so the game's sounds are to stop too.
+    hush: bool,
 }
 
 impl Editor {
@@ -351,12 +400,19 @@ impl Editor {
     ///
     /// The panels list `level`, which is the engine's stand-in if
     /// `stand_in`, and `placed`: the game's map and the file it is saved in.
+    ///
+    /// `game` is the actions the game is played with, and `tick_rate` how
+    /// many times a second the window ticks: what playing the level needs.
     fn new(
         level: &fossps_assets::Scene,
         stand_in: bool,
         placed: Option<(Map, MapFile)>,
+        game: ActionMap,
+        tick_rate: u32,
     ) -> Option<(Self, ActionMap)> {
-        let (actions, controls) = controls()?;
+        let (actions, controls) = controls(game)?;
+        // A game with no level of its own is played on a flat floor.
+        let world = World::for_editor((!stand_in).then_some(level), tick_rate);
         let camera = FlyCamera::default();
         let (map, file) = match placed {
             Some((map, file)) => (map, Some(file)),
@@ -376,8 +432,49 @@ impl Editor {
             drag: None,
             held: None,
             aiming: false,
+            actions: actions.clone(),
+            world,
+            play: None,
+            play_asked: false,
+            play_problem: String::new(),
+            hush: false,
         };
         Some((editor, actions))
+    }
+
+    /// Plays the level from where the camera is. What was being carried or
+    /// dragged is put down where it is.
+    fn start_playing(&mut self) {
+        self.play_asked = false;
+        self.held = None;
+        self.drag = None;
+        self.play_problem.clear();
+        // The game's own folder is the one its map is kept in.
+        let folder = self.file.as_ref().and_then(|file| file.path().parent());
+        let camera = self.camera;
+        match Play::start(
+            folder,
+            &self.map,
+            &self.world,
+            &self.actions,
+            camera.position,
+            [camera.yaw, camera.pitch],
+        ) {
+            Ok(play) => self.play = Some(play),
+            Err(problem) => {
+                log::error!("{problem}");
+                self.play_problem = problem;
+            }
+        }
+    }
+
+    /// Comes back from playing: the camera, what is chosen and the map are
+    /// as they were, since playing never touched them.
+    fn stop_playing(&mut self) {
+        self.play = None;
+        self.hush = true;
+        // No frame is drawn part of the way from an older tick.
+        self.before = self.camera;
     }
 
     /// Writes the map to its file now, and notes how that went.
@@ -540,6 +637,26 @@ impl Editor {
 
 impl Game for Editor {
     fn tick(&mut self, input: &InputFrame, step: f32) {
+        if self.play.is_some() {
+            // The map goes on being saved, and read again when something
+            // else saves it: playing has its own copy.
+            self.keep_map(step);
+            if input.just_pressed(self.controls.back) {
+                self.stop_playing();
+            } else if let Some(problem) = self.play.as_mut().and_then(|play| play.tick(input, step))
+            {
+                log::error!("{problem}");
+                self.play_problem = problem;
+                self.stop_playing();
+            }
+            return;
+        }
+        if self.play_asked || input.just_pressed(self.controls.play) {
+            self.start_playing();
+            if self.play.is_some() {
+                return;
+            }
+        }
         self.before = self.camera;
         let asked = self.read(input, step);
         self.camera.step(&asked, step);
@@ -550,7 +667,18 @@ impl Game for Editor {
     }
 
     fn frame(&mut self, frame: &mut Frame) {
+        if let Some(play) = &mut self.play {
+            // The game's own actions are live, and the mouse looks around.
+            frame.use_action_set(ActionMap::GAMEPLAY);
+            frame.show_grid(false);
+            play.frame(frame);
+            return;
+        }
         frame.use_action_set(self.controls.set);
+        frame.show_grid(true);
+        if std::mem::take(&mut self.hush) {
+            frame.sound(SoundAsk::StopAll);
+        }
         let [x, y, z] = self.camera.position;
         self.status.clear();
         // Writing to a `String` cannot fail.
@@ -576,14 +704,18 @@ impl Game for Editor {
             drag,
             held,
             aiming,
+            play_asked,
+            play_problem,
             ..
         } = self;
         let alpha = frame.alpha();
         let mut changed = false;
         frame.panels(|ui| {
             let spot = camera.place_spot(0.0, *snap);
-            let asked = panels.show(ui, status, map, saved, spot, snap);
+            let said = [status.as_str(), play_problem.as_str()];
+            let asked = panels.show(ui, said, map, saved, spot, snap);
             changed |= asked.changed;
+            *play_asked |= asked.play;
             if let Some((middle, reach)) = asked.fly_to {
                 camera.fly_to(middle, reach);
                 // No frame is drawn part of the way there.
@@ -802,9 +934,17 @@ pub fn run(
         },
         ..Config::default()
     };
+    // Playing the level from here is done with the player's own controls,
+    // as `fossps run` does it.
+    if let Some(path) = crate::controls::file() {
+        for problem in crate::controls::load(&path, &mut config.actions) {
+            log::warn!("{problem}");
+        }
+    }
+    let (game, rate) = (config.actions.clone(), config.tick_rate);
     let made = match &config.level {
-        Some(level) => Editor::new(level, false, placed),
-        None => Editor::new(&crate::standin::scene(), true, placed),
+        Some(level) => Editor::new(level, false, placed, game, rate),
+        None => Editor::new(&crate::standin::scene(), true, placed, game, rate),
     };
     let Some((editor, actions)) = made else {
         // Not reachable: the bindings are fixed and covered by a test.
@@ -831,7 +971,7 @@ mod tests {
 
     /// The same, for `level`.
     fn editor_of(level: &Scene) -> (Editor, Input) {
-        let (editor, map) = Editor::new(level, true, None).unwrap();
+        let (editor, map) = Editor::new(level, true, None, ActionMap::default_fps(), 60).unwrap();
         let mut input = Input::new(map);
         input.set_active_set(editor.controls.set);
         (editor, input)
@@ -843,13 +983,45 @@ mod tests {
 
     #[test]
     fn every_action_is_on_keyboard_and_mouse_and_on_a_gamepad() {
-        let (map, controls) = controls().unwrap();
+        // Added to no game's actions, the editor's own are all there is.
+        let (map, controls) = controls(ActionMap::new()).unwrap();
         assert_eq!(map.parity_gaps(), Vec::new());
         assert_eq!(map.conflicts(), Vec::new());
         assert_eq!(map.mouse_mode(controls.set), Some(MouseMode::Pointer));
         for action in map.actions() {
-            assert_eq!(map.set_of(action), Some(controls.set));
+            // Coming back from playing is among the game's actions, which
+            // are the live ones then; the rest are the editor's.
+            let set = if action == controls.back {
+                ActionMap::GAMEPLAY
+            } else {
+                controls.set
+            };
+            assert_eq!(map.set_of(action), Some(set), "{}", map.name(action));
+            assert!(map.name(action).starts_with("editor_"));
         }
+        // One key and one button, the same both ways.
+        assert_eq!(map.bindings(controls.play), map.bindings(controls.back));
+        assert_eq!(map.bindings(controls.play).len(), 2);
+
+        // Added to a game's actions, they leave the game's as they were
+        // and bring no gap: only Select now does two things while playing,
+        // since the usual controls show the scoreboard with it.
+        let game = ActionMap::default_fps();
+        let (map, controls) = super::controls(game.clone()).unwrap();
+        assert_eq!(map.parity_gaps(), Vec::new());
+        for action in game.actions() {
+            assert_eq!(map.action(game.name(action)), Ok(action));
+            assert_eq!(map.bindings(action), game.bindings(action));
+            assert_eq!(map.set_of(action), Some(ActionMap::GAMEPLAY));
+        }
+        assert_eq!(map.set_of(controls.back), Some(ActionMap::GAMEPLAY));
+        assert_eq!(map.conflicts().len(), 1, "{:?}", map.conflicts());
+
+        // A game that already has an action by one of these names is not
+        // edited over: the editor says it cannot start.
+        let mut taken = ActionMap::default_fps();
+        taken.button("editor_play", ["F6", "DpadUp"]).unwrap();
+        assert!(super::controls(taken).is_none());
     }
 
     #[test]
@@ -1341,8 +1513,14 @@ mod tests {
     /// An editor for the game in `folder`, on a small level.
     fn editor_in(folder: &std::path::Path) -> (Editor, Input) {
         let (file, map) = MapFile::open(folder);
-        let (editor, actions) =
-            Editor::new(&small_level(), false, Some((map.unwrap(), file))).unwrap();
+        let (editor, actions) = Editor::new(
+            &small_level(),
+            false,
+            Some((map.unwrap(), file)),
+            ActionMap::default_fps(),
+            60,
+        )
+        .unwrap();
         let mut input = Input::new(actions);
         input.set_active_set(editor.controls.set);
         (editor, input)
@@ -2044,7 +2222,14 @@ mod tests {
         .unwrap();
         let folder = scratch("marks");
         let (file, _) = MapFile::open(&folder);
-        let (mut editor, mut input) = Editor::new(&level, false, Some((map, file))).unwrap();
+        let (mut editor, mut input) = Editor::new(
+            &level,
+            false,
+            Some((map, file)),
+            ActionMap::default_fps(),
+            60,
+        )
+        .unwrap();
         let mut input = {
             let mut made = Input::new(std::mem::take(&mut input));
             made.set_active_set(editor.controls.set);
@@ -2298,5 +2483,317 @@ mod tests {
         for (x, y) in [(640, 300), (500, 600), (800, 100)] {
             assert_eq!(pixel(&shown, x, y), pixel(&with_grid, x, y));
         }
+    }
+
+    /// One spawn point, at the far end of the starter level.
+    const ONE_SPAWN: &str =
+        "version = 1\n[[entity]]\nid = \"a\"\ntype = \"spawn\"\nposition = [-3, 0, -10]\n";
+
+    /// An editor for a game that can be played: a folder with a script (an
+    /// empty one) and `map` as its map file, on the starter level.
+    fn game_in(test: &str, map: &str) -> (std::path::PathBuf, Editor, Input) {
+        let folder = scratch(test);
+        std::fs::write(folder.join(fossps_script::ENTRY_SCRIPT), "").unwrap();
+        if !map.is_empty() {
+            std::fs::write(folder.join(crate::map::MAP_FILE), map).unwrap();
+        }
+        let level = crate::level::from_bytes("level.glb", crate::scaffold::STARTER_LEVEL).unwrap();
+        let (file, map) = MapFile::open(&folder);
+        let placed = Some((map.unwrap(), file));
+        let (editor, actions) =
+            Editor::new(&level, false, placed, ActionMap::default_fps(), 60).unwrap();
+        let mut input = Input::new(actions);
+        input.set_active_set(editor.controls.set);
+        (folder, editor, input)
+    }
+
+    /// One tick and the frame after it, as the window does them: the
+    /// action set the frame asks for is the live one from then on.
+    fn tick_and_frame(editor: &mut Editor, input: &mut Input) -> Frame {
+        editor.tick(input.tick(), STEP);
+        let mut frame = Frame::new(1.0);
+        editor.frame(&mut frame);
+        if let Some(set) = frame.action_set() {
+            input.set_active_set(set);
+        }
+        frame
+    }
+
+    #[test]
+    fn one_key_plays_from_where_the_camera_is_and_the_same_key_comes_back() {
+        use fossps_input::Button;
+
+        for toggle in [
+            Button::from(Key::F5),
+            Button::from(GamepadButton::GamepadSelect),
+        ] {
+            let (folder, mut editor, mut input) = game_in("play", ONE_SPAWN);
+            // Over the clear middle of the starter level, 4 m up, looking
+            // down and off to the left.
+            editor.camera.position = [1.0, 4.0, 2.0];
+            editor.camera.yaw = 0.7;
+            editor.camera.pitch = -0.3;
+            let _ = tick_and_frame(&mut editor, &mut input);
+            // Something placed a moment ago is not saved yet.
+            tap(&mut editor, &mut input, Key::P);
+            assert!(editor.unsaved.is_some());
+            assert_eq!(editor.map.entities().len(), 2);
+            let (camera, map) = (editor.camera, editor.map.clone());
+            let chosen = editor.panels.chosen_placed().map(str::to_owned);
+            assert!(chosen.is_some());
+
+            input.press(toggle);
+            let frame = tick_and_frame(&mut editor, &mut input);
+            input.release(toggle);
+            let play = editor.play.as_ref().expect("the level is being played");
+            assert!(play.started_here());
+            // What is played has the map as the editor holds it, saved or not.
+            assert_eq!(play.map(), &map);
+            // The game's own actions are live, the grid is gone, and the
+            // first frame is seen from just where the camera was.
+            assert_eq!(frame.action_set(), Some(ActionMap::GAMEPLAY));
+            assert_eq!(frame.grid(), Some(false));
+            let view = frame.view().unwrap();
+            for axis in 0..3 {
+                assert!(
+                    close(view.position[axis], camera.position[axis]),
+                    "{view:?}"
+                );
+            }
+            assert!(close(view.yaw, 0.7) && close(view.pitch, -0.3), "{view:?}");
+
+            // The player drops to the floor and stands there, eyes 1.6 m up.
+            for _ in 0..120 {
+                let _ = tick_and_frame(&mut editor, &mut input);
+            }
+            let eye = editor.play.as_ref().unwrap().eye();
+            assert!(close(eye[0], 1.0) && close(eye[2], 2.0), "{eye:?}");
+            assert!((eye[1] - 1.6).abs() < 0.05, "{eye:?}");
+            // W walks the way the camera faced: to the left of -Z.
+            input.press(Key::W);
+            for _ in 0..60 {
+                let _ = tick_and_frame(&mut editor, &mut input);
+            }
+            input.release(Key::W);
+            let play = editor.play.as_ref().unwrap();
+            let eye = play.eye();
+            assert!(eye[0] < -1.0 && eye[2] < -0.5, "{eye:?}");
+            assert!(close(play.facing()[0], 0.7), "{:?}", play.facing());
+            // The editor meanwhile: its camera stood still, and the change
+            // made before playing was saved as ever.
+            assert_eq!(editor.camera, camera);
+            assert_eq!(editor.map, map);
+            assert!(editor.unsaved.is_none());
+            assert_eq!(MapFile::open(&folder).1.unwrap(), map);
+
+            // The same key or button again: back to editing, with the
+            // camera, the map and what was chosen as they were.
+            input.press(toggle);
+            let mut frame = tick_and_frame(&mut editor, &mut input);
+            input.release(toggle);
+            assert!(editor.play.is_none());
+            assert_eq!(frame.action_set(), Some(editor.controls.set));
+            assert_eq!(frame.grid(), Some(true));
+            assert_eq!(frame.view().unwrap().position, camera.position);
+            // The game's sounds stop with it.
+            assert!(matches!(frame.take_sounds()[..], [SoundAsk::StopAll]));
+            assert_eq!(editor.camera, camera);
+            assert_eq!(editor.before, camera);
+            assert_eq!(editor.map, map);
+            assert_eq!(editor.panels.chosen_placed(), chosen.as_deref());
+            // Letting go and pressing nothing does not start it again, and
+            // the camera flies at once.
+            let mut frame = tick_and_frame(&mut editor, &mut input);
+            assert!(editor.play.is_none());
+            assert!(frame.take_sounds().is_empty());
+            input.press(Key::W);
+            let _ = tick_and_frame(&mut editor, &mut input);
+            assert_ne!(editor.camera.position, camera.position);
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+    }
+
+    #[test]
+    fn a_camera_with_nothing_under_it_starts_the_player_at_a_spawn_point_and_says_so() {
+        let (folder, mut editor, mut input) = game_in("play-off", ONE_SPAWN);
+        // Far outside the level's walls.
+        editor.camera.position = [200.0, 5.0, 200.0];
+        editor.tick(input.tick(), STEP);
+        let context = panel_context();
+        let _ = panel_frame(&mut editor, &context, 0.0, Vec::new());
+        let (_, output) = panel_frame(&mut editor, &context, 0.1, Vec::new());
+        assert!(words(&output).contains("Play: F5"));
+        assert!(words(&output).contains("Select plays"));
+
+        // The button along the bottom plays, as F5 does.
+        let _ = click_on(&mut editor, &context, "play", 1.0);
+        editor.tick(input.tick(), STEP);
+        assert!(!editor.play.as_ref().expect("playing").started_here());
+        let (frame, output) = panel_frame(&mut editor, &context, 2.0, Vec::new());
+        input.set_active_set(frame.action_set().unwrap());
+        let shown = words(&output);
+        for expected in [
+            "Playing",
+            "F5 or Select: back to editing",
+            "nothing under the camera to stand on",
+        ] {
+            assert!(shown.contains(expected), "no {expected:?} in:\n{shown}");
+        }
+        // The panels are not drawn while playing.
+        assert!(!shown.contains("hold the right mouse button"), "{shown}");
+        for _ in 0..30 {
+            let _ = tick_and_frame(&mut editor, &mut input);
+        }
+        let eye = editor.play.as_ref().unwrap().eye();
+        assert!(close(eye[0], -3.0) && close(eye[2], -10.0), "{eye:?}");
+
+        // Back, and the game's script is taken away: it cannot be played,
+        // which is said along the bottom, and the editor carries on.
+        tap(&mut editor, &mut input, Key::F5);
+        assert!(editor.play.is_none());
+        let _ = tick_and_frame(&mut editor, &mut input);
+        std::fs::remove_file(folder.join(fossps_script::ENTRY_SCRIPT)).unwrap();
+        tap(&mut editor, &mut input, Key::F5);
+        assert!(editor.play.is_none());
+        assert!(
+            editor.play_problem.starts_with("Could not play: "),
+            "{}",
+            editor.play_problem
+        );
+        let (_, output) = panel_frame(&mut editor, &context, 3.0, Vec::new());
+        let shown = words(&output);
+        assert!(shown.contains("Could not play: "), "{shown}");
+        assert!(shown.contains("hold the right mouse button"), "{shown}");
+
+        // With the script back, it plays, and the problem is forgotten.
+        std::fs::write(folder.join(fossps_script::ENTRY_SCRIPT), "").unwrap();
+        tap(&mut editor, &mut input, Key::F5);
+        assert!(editor.play.is_some());
+        assert_eq!(editor.play_problem, "");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Playing is drawn for real, with no window, and the picture is read
+    /// back: the level from where the camera was, with no grid and no
+    /// panels over it, and a line along the top that says how to come back.
+    #[test]
+    fn while_playing_the_picture_is_the_level_alone_under_a_line_on_how_to_come_back() {
+        use fossps_render::{Camera, Headless, Panels, RenderError, Upscaling};
+
+        let mut headless = match Headless::new(SCREEN[0], SCREEN[1], Upscaling::Off) {
+            Ok(headless) => headless,
+            Err(
+                error @ (RenderError::NoVulkan(_)
+                | RenderError::OldVulkan { .. }
+                | RenderError::NoSuitableGpu { .. }),
+            ) => {
+                let required =
+                    std::env::var("FOSSPS_REQUIRE_VULKAN").is_ok_and(|value| value != "0");
+                assert!(!required, "FOSSPS_REQUIRE_VULKAN is set, but: {error}");
+                eprintln!("Skipping the drawing test: {error}");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let level = crate::level::from_bytes("level.glb", crate::scaffold::STARTER_LEVEL).unwrap();
+        headless.set_scene(&level).unwrap();
+
+        let (folder, mut editor, mut input) = game_in("play-picture", ONE_SPAWN);
+        editor.camera.position = [0.0, 3.0, 6.0];
+        editor.camera.pitch = -0.25;
+        editor.tick(input.tick(), STEP);
+        let context = panel_context();
+        #[allow(clippy::cast_precision_loss)]
+        let size = egui::vec2(SCREEN[0] as f32, SCREEN[1] as f32);
+        // What the window does with a frame: the grid as the editor asks
+        // for it, the panels it made, seen from where it says.
+        let draw = |editor: &mut Editor, headless: &mut Headless, time: f64| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(time),
+                ..egui::RawInput::default()
+            };
+            let mut frame = Frame::new(1.0)
+                .for_window(Some(SCREEN), fossps_ui::DrawBuffer::default())
+                .with_panels(context.clone(), input);
+            editor.frame(&mut frame);
+            if let Some(shown) = frame.grid() {
+                headless.set_grid(shown);
+            }
+            let output = frame.take_panels().unwrap();
+            headless.set_panels(Panels {
+                shapes: context.tessellate(output.shapes, output.pixels_per_point),
+                textures: output.textures_delta,
+                pixels_per_point: output.pixels_per_point,
+            });
+            let view = frame.view().unwrap();
+            let camera = Camera {
+                position: view.position,
+                yaw: view.yaw,
+                pitch: view.pitch,
+                ..Camera::default()
+            };
+            headless.screenshot(&camera).unwrap()
+        };
+        // The level alone, before there are any panels or a grid.
+        let alone = headless
+            .screenshot(&Camera {
+                position: editor.camera.position,
+                yaw: editor.camera.yaw,
+                pitch: editor.camera.pitch,
+                ..Camera::default()
+            })
+            .unwrap();
+        let _ = draw(&mut editor, &mut headless, 0.0);
+        let editing = draw(&mut editor, &mut headless, 0.1);
+
+        input.press(Key::F5);
+        editor.tick(input.tick(), STEP);
+        assert!(editor.play.is_some());
+        let playing = draw(&mut editor, &mut headless, 0.2);
+        // Set `FOSSPS_SAVE_PICTURES` to a folder to look at the pictures:
+        // 1280 by 720 pixels of four bytes each.
+        if let Some(folder) = std::env::var_os("FOSSPS_SAVE_PICTURES") {
+            let folder = std::path::Path::new(&folder);
+            std::fs::write(folder.join("playing.rgba"), &playing).unwrap();
+            std::fs::write(folder.join("before-playing.rgba"), &editing).unwrap();
+        }
+
+        let pixel = |picture: &[u8], x: usize, y: usize| {
+            let at = (y * SCREEN[0] as usize + x) * 4;
+            [picture[at], picture[at + 1], picture[at + 2]]
+        };
+        let near = |a: [u8; 3], b: [u8; 3]| (0..3).all(|part| a[part].abs_diff(b[part]) <= 3);
+        let fill = context.global_style().visuals.panel_fill;
+        let fill = [fill.r(), fill.g(), fill.b()];
+        // Where the list, the inspector and the bar along the bottom were
+        // while editing, the level shows while playing; and all over the
+        // picture below the line at the top, it is the level with no grid.
+        for (x, y) in [(100, 300), (1180, 300), (640, 700)] {
+            assert!(near(pixel(&editing, x, y), fill), "{x}, {y} while editing");
+        }
+        let (mut same, mut all) = (0_u32, 0_u32);
+        for y in (80..SCREEN[1] as usize).step_by(4) {
+            for x in (0..SCREEN[0] as usize).step_by(4) {
+                all += 1;
+                same += u32::from(near(pixel(&playing, x, y), pixel(&alone, x, y)));
+            }
+        }
+        assert!(
+            same * 1000 >= all * 995,
+            "{same} of {all} as the level alone"
+        );
+        // The line: white letters on a dark ground, in the middle at the top.
+        let (mut white, mut dark) = (0, 0);
+        for y in 10..46 {
+            for x in 440..840 {
+                let [red, green, blue] = pixel(&playing, x, y);
+                white += u32::from(red > 220 && green > 220 && blue > 220);
+                dark += u32::from(u32::from(red) + u32::from(green) + u32::from(blue) < 200);
+            }
+        }
+        assert!(white > 150, "{white} white pixels in the line");
+        assert!(dark > 3000, "{dark} dark pixels behind the line");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

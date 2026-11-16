@@ -83,6 +83,11 @@ const SPAWN_NAME: &str = "spawn";
 /// is tried out, in ticks: three seconds, a fall of some 40 m.
 const LANDING_TICKS: u32 = 180;
 
+/// A player started where the editor's camera is stands at least this far
+/// above the floor under it, in metres, so the first step settles them on it.
+#[cfg(feature = "editor")]
+const STEP_CLEAR: f32 = 0.01;
+
 /// A player's first snapshot puts them this near a spawn point, in metres
 /// across the ground, if that is where the server started them.
 const AT_SPAWN: f32 = 0.5;
@@ -91,7 +96,7 @@ const AT_SPAWN: f32 = 0.5;
 ///
 /// Cheap to copy: the level's shapes are shared, not copied.
 #[derive(Debug, Clone)]
-struct World {
+pub(crate) struct World {
     level: Arc<Level>,
     /// Where players may start. Never empty.
     spawns: Arc<[SpawnPoint]>,
@@ -205,6 +210,28 @@ impl World {
             .and_then(|point| points.get(point))
             .map_or([0.0; 3], |point| point.position);
         Player::at(chosen, &self.rules)
+    }
+
+    /// The world the editor plays a game in: `level`'s, or the flat floor of
+    /// a game with none. Made once and used for every play, with whatever
+    /// map the editor then holds, so nothing is said here about its spawn
+    /// points.
+    #[cfg(feature = "editor")]
+    pub(crate) fn for_editor(level: Option<&Scene>, tick_rate: u32) -> Self {
+        level.map_or_else(
+            || Self::flat(tick_rate),
+            |level| Self::from_level(level, tick_rate),
+        )
+    }
+
+    /// Where the feet of a player go whose eyes are at `eye`, if there is
+    /// anything under them to land on: a standing player's height below
+    /// the eyes, and never under the floor.
+    #[cfg(feature = "editor")]
+    fn feet_under(&self, eye: [f32; 3]) -> Option<[f32; 3]> {
+        let floor = self.level.raycast(eye, [0.0, -1.0, 0.0], f32::MAX)?.point[1];
+        let feet = (eye[1] - self.rules.standing_eye_height).max(floor + STEP_CLEAR);
+        Some([eye[0], feet, eye[2]])
     }
 
     /// A player where one may start, before the server has said where this
@@ -393,6 +420,9 @@ pub struct HostedGame {
     names: [Option<fossps_script::PlayerId>; MAX_PLAYERS],
     /// How many times a player has been put at a spawn point.
     spawned: u32,
+    /// Where the first player starts in place of a spawn point: the
+    /// editor's "play from here". Used until the first tick is over.
+    from_here: Option<[f32; 3]>,
     packet: Vec<u8>,
 }
 
@@ -421,6 +451,7 @@ impl HostedGame {
             world,
             names: [None; MAX_PLAYERS],
             spawned: 0,
+            from_here: None,
             packet: Vec::new(),
         })
     }
@@ -483,14 +514,20 @@ impl HostedGame {
             world,
             names,
             spawned,
+            from_here,
             ..
         } = self;
         while let Some(event) = host.poll() {
             match event {
                 HostEvent::Join(request) => {
                     *spawned = spawned.wrapping_add(1);
-                    let standing = server.players().map(|(_, player)| player);
-                    let player = world.spawn_in(game.map(), standing, *spawned);
+                    let player = match *from_here {
+                        Some(here) => Player::at(here, &world.rules),
+                        None => {
+                            let standing = server.players().map(|(_, player)| player);
+                            world.spawn_in(game.map(), standing, *spawned)
+                        }
+                    };
                     match server.join(player) {
                         Ok(id) => {
                             host.accept(request, id);
@@ -521,6 +558,9 @@ impl HostedGame {
     fn place_spawned(&mut self) {
         // Taken out first: placing reads the map, which the game also holds.
         let waiting: Vec<fossps_script::PlayerId> = self.game.host_mut().take_spawns().collect();
+        // Only the match's first word on the first player is overruled:
+        // the next round, or the next life, starts at a spawn point.
+        let mut from_here = self.from_here.take();
         for name in waiting {
             let place = (0..)
                 .zip(self.names.iter())
@@ -529,13 +569,18 @@ impl HostedGame {
                 continue;
             };
             self.spawned = self.spawned.wrapping_add(1);
-            // Everyone but the one being placed is to be kept away from.
-            let standing = self
-                .server
-                .players()
-                .filter(|(other, _)| *other != id)
-                .map(|(_, player)| player);
-            let placed = self.world.spawn_in(self.game.map(), standing, self.spawned);
+            let placed = match from_here.take() {
+                Some(here) => Player::at(here, &self.world.rules),
+                None => {
+                    // Everyone but the one being placed is to be kept away from.
+                    let standing = self
+                        .server
+                        .players()
+                        .filter(|(other, _)| *other != id)
+                        .map(|(_, player)| player);
+                    self.world.spawn_in(self.game.map(), standing, self.spawned)
+                }
+            };
             if let Some(player) = self.server.player_mut(id) {
                 *player = placed;
             }
@@ -672,6 +717,9 @@ pub struct JoinedGame {
     map: Map,
     /// The player has been turned the way their spawn point faces.
     faced: bool,
+    /// Which way the player looks to begin with (yaw, then pitch) in place
+    /// of the way their spawn point faces: the editor's "play from here".
+    start_looking: Option<[f32; 2]>,
 }
 
 impl JoinedGame {
@@ -711,6 +759,7 @@ impl JoinedGame {
             packet: Vec::new(),
             map: Map::default(),
             faced: false,
+            start_looking: None,
         })
     }
 
@@ -840,7 +889,9 @@ impl JoinedGame {
         if !self.faced && self.client.server_tick() > 0 {
             self.faced = true;
             let at = self.client.player().position;
-            if let Some(yaw) = self.world.facing_at(&self.map, at) {
+            if let Some([yaw, pitch]) = self.start_looking {
+                (self.yaw, self.pitch) = (yaw, pitch);
+            } else if let Some(yaw) = self.world.facing_at(&self.map, at) {
                 self.yaw = yaw;
             }
         }
@@ -954,6 +1005,44 @@ impl LocalGame {
         let world = World::of(level, game.map(), tick_rate);
         let hosted = HostedGame::open_in(game, &format!("0.0.0.0:{port}"), world)?.named(name);
         Self::join_own(hosted, actions)
+    }
+
+    /// Starts `game` in `world` and joins it, as the editor does to play
+    /// from where its camera is: the player's eyes start at `eye`, looking
+    /// the way `yaw` and `pitch` say ([`Frame::look_from`]), and the player
+    /// drops to the floor from there.
+    ///
+    /// With nothing under `eye` to land on, the player starts as in any
+    /// game, at a spawn point, and `false` is given with the game.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    #[cfg(feature = "editor")]
+    pub(crate) fn start_from(
+        game: ScriptGame,
+        world: &World,
+        actions: &ActionMap,
+        eye: [f32; 3],
+        [yaw, pitch]: [f32; 2],
+    ) -> Result<(Self, bool), Box<dyn std::error::Error>> {
+        let mut hosted = HostedGame::open_in(game, "127.0.0.1:0", world.clone())?;
+        let feet = world
+            .feet_under(eye)
+            .filter(|_| yaw.is_finite() && pitch.is_finite());
+        hosted.from_here = feet;
+        let mut local = Self::join_own(hosted, actions)?;
+        if let Some(feet) = feet {
+            // The player's side starts out there as well, so not one frame
+            // is seen from a spawn point before the server's first word.
+            let joined = &mut local.joined;
+            let player = Player::at(feet, &world.rules);
+            joined.client = Client::new(player, world.step, ClientSettings::default());
+            joined.yaw = yaw.rem_euclid(TAU);
+            joined.pitch = pitch.clamp(-FRAC_PI_2, FRAC_PI_2);
+            joined.start_looking = Some([joined.yaw, joined.pitch]);
+        }
+        Ok((local, feet.is_some()))
     }
 
     /// Joins `hosted` from this program, over this machine's own network,

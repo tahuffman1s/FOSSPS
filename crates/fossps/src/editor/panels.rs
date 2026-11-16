@@ -18,14 +18,18 @@ const INSPECTOR_WIDTH: f32 = 300.0;
 
 /// How to fly, said along the bottom of the window.
 const KEYS: &str = "Look: hold the right mouse button    Fly: W A S D    Up, down: E, Q    \
-                    Faster: hold Shift    Speed: mouse wheel";
+                    Faster: hold Shift    Speed: mouse wheel    Play: F5";
+/// Said when the mouse rests on the button that plays the level.
+const PLAY_HINT: &str = "Play the level from where the camera is. F5, or Select on a gamepad, \
+                         and the same again to come back to editing.";
 const EDIT_KEYS: &str = "Move: drag a mark (Alt: up and down, Ctrl: off the grid)    \
                          Turn: drag the tip of its line, or Z and C    Place: P    \
                          Carry, put down: F    Put back: Esc    Snap: G";
 const EDIT_GAMEPAD: &str = "A places where you look, X carries what you look at and puts it \
                             down, B puts it back, LB and RB turn it, Y changes the snap";
 const GAMEPAD: &str = "Gamepad: the sticks fly and look, the triggers go down and up, \
-                       pressing the left stick is faster, d-pad up and down change the speed";
+                       pressing the left stick is faster, d-pad up and down change the speed, \
+                       Select plays";
 
 /// The sorts of thing a level holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +294,8 @@ pub(crate) struct Asked {
     pub(crate) fly_to: Option<([f32; 3], f32)>,
     /// The map was changed and needs saving.
     pub(crate) changed: bool,
+    /// Play the level from where the camera is.
+    pub(crate) play: bool,
 }
 
 /// What is chosen: something in the level file, by its place in the list of
@@ -433,7 +439,9 @@ impl LevelPanels {
     }
 
     /// Draws the panels into `ui`, which covers the window, with `status`
-    /// (the camera's speed and place) in the bottom corner.
+    /// (the camera's speed and place) in the bottom corner. `problem` is
+    /// why the level could not be played, if it could not, and is said
+    /// along the bottom too.
     ///
     /// `map` is what is placed in the level, which the panels change;
     /// `saved` says how saving it went, `spot` is where the next thing
@@ -442,7 +450,7 @@ impl LevelPanels {
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
-        status: &str,
+        [status, problem]: [&str; 2],
         map: &mut Map,
         saved: &str,
         spot: ([f32; 3], f32),
@@ -461,9 +469,16 @@ impl LevelPanels {
             ui.horizontal(|ui| {
                 ui.label(KEYS);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let play = ui.button("Play from here").on_hover_text(PLAY_HINT);
+                    self.mark("play", &play);
+                    asked.play = play.clicked();
                     ui.label(status);
                 });
             });
+            if !problem.is_empty() {
+                let ink = ui.visuals().warn_fg_color;
+                ui.add(egui::Label::new(egui::RichText::new(problem).color(ink)).wrap());
+            }
             ui.label(EDIT_KEYS);
             ui.weak(GAMEPAD);
             ui.weak(EDIT_GAMEPAD);

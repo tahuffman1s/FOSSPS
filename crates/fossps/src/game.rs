@@ -53,6 +53,10 @@ pub struct Frame {
     /// The editor's panels: what they are made with, and what was made.
     #[cfg(feature = "editor")]
     panels: Option<PanelFrame>,
+    /// Whether the editor wants its ground grid drawn from now on, if it
+    /// said.
+    #[cfg(feature = "editor")]
+    grid: Option<bool>,
 }
 
 /// One frame of the editor's panels.
@@ -116,7 +120,22 @@ impl Frame {
             sounds: Vec::new(),
             #[cfg(feature = "editor")]
             panels: None,
+            #[cfg(feature = "editor")]
+            grid: None,
         }
+    }
+
+    /// Draws the editor's ground grid from now on, or stops drawing it: it
+    /// is in the way while the level is played.
+    #[cfg(feature = "editor")]
+    pub(crate) fn show_grid(&mut self, shown: bool) {
+        self.grid = Some(shown);
+    }
+
+    /// Whether the editor asked for its grid this frame, if it said.
+    #[cfg(feature = "editor")]
+    pub(crate) fn grid(&self) -> Option<bool> {
+        self.grid
     }
 
     /// Gives the frame what the editor's panels are made with: `context`,
