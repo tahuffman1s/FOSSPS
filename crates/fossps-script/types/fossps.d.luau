@@ -65,6 +65,16 @@ declare class Player
     function addScore(self, points: number): ()
 end
 
+--- A sound that was started with `game.audio.play` or `game.audio.playAt`.
+--- Keep it only if you mean to stop it; a sound that is not looped ends by
+--- itself.
+declare class Sound
+    --- Stops the sound, with a fade too short to hear so it does not click.
+    --- Stopping a sound that has already ended does nothing.
+    --- Example: music:stop()
+    function stop(self): ()
+end
+
 declare game: {
     --- Calls `handler` once, on the first tick, when the game starts.
     --- Example: game.onStart(function() print("Go!") end)
@@ -212,6 +222,49 @@ declare game: {
         --- round is being played.
         --- Example: game.round.finish(game.team("Red"))
         finish: (winner: Team | Player | nil) -> (),
+    },
+
+    --- Sound. A sound is a WAV file in a folder called `sounds` inside the
+    --- game's folder, named without the folder and without `.wav`:
+    --- `sounds/door.wav` is "door" and `sounds/ui/click.wav` is "ui/click".
+    --- The engine also has starter sounds a new game can use straight away:
+    --- "footstep", "gunshot", "landing", "dry-fire" and "reload". A file of
+    --- your own with one of those names replaces the starter sound.
+    ---
+    --- Sounds are played from functions that run while the game is on, such
+    --- as `game.onStart` and `game.onTick`, not while the script loads. For
+    --- now only the player at the computer running the script hears them
+    --- (`fossps run`); players who joined over the network do not yet.
+    audio: {
+        --- Plays a sound that is not in the world: it is as loud wherever the
+        --- player stands. For music, menus and announcements. Options, all
+        --- of which can be left out:
+        ---   volume: from 0 (silent) to 1 (as recorded, the default).
+        ---   pitch: how fast and high it plays. 1 is as recorded, 2 is twice
+        ---     as fast and an octave higher, 0.5 half as fast. From 0.25 to 4.
+        ---   loop: true to start again at the end, until it is stopped.
+        --- A volume or pitch outside its range is brought into it.
+        --- Example: game.audio.play("gunshot")
+        --- Example: local music = game.audio.play("music", { volume = 0.4, loop = true })
+        play: (name: string, options: { volume: number?, pitch: number?, loop: boolean? }?) -> Sound,
+
+        --- Plays a sound from a place in the world: quieter the further the
+        --- player is from it, and louder in the ear it is nearer to. The
+        --- place is `vector.create(x, y, z)` in metres, with y up. Takes the
+        --- options of `play`, and:
+        ---   range: how many metres away it can still be heard, above 0. If
+        ---     left out, a sound of your own carries 50 metres, and a starter
+        ---     sound as far as the real thing: a gunshot 150, a footstep 30.
+        --- Example: game.audio.playAt("gunshot", vector.create(10, 1, -4))
+        --- Example: game.audio.playAt("alarm", vector.create(0, 3, 0), { range = 80, loop = true })
+        playAt: (name: string, position: vector, options: { volume: number?, pitch: number?, loop: boolean?, range: number? }?) -> Sound,
+
+        --- Stops every sound the script has played, such as when a round
+        --- ends. Sounds keep playing when the script is saved and loaded
+        --- again, and the new version no longer holds the old one's sounds:
+        --- this is how it stops a looped sound it has lost.
+        --- Example: game.onRoundEnd(function() game.audio.stopAll() end)
+        stopAll: () -> (),
     },
 
     --- What the player is doing right now, by action name. An action works

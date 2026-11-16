@@ -18,8 +18,13 @@
 //! saved by itself a moment after each change, with no save button, and
 //! read again when something else saves it. Each placed thing is marked in
 //! the picture with a dot and a line the way it faces.
+//!
+//! A mark is moved by dragging it and turned by dragging the tip of its
+//! line, on a grid; with keys or a gamepad, things are placed, picked up
+//! and put down where the camera looks. See [`place`].
 
 mod panels;
+mod place;
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fmt::Write as _;
@@ -28,6 +33,7 @@ use fossps_input::{ActionId, ActionMap, ActionSetId, InputFrame, MouseMode};
 
 pub(crate) use self::panels::context as panel_context;
 use self::panels::{LevelPanels, placed_name};
+use self::place::{Drag, Held, Hit, Keys, Snap};
 use crate::app::{self, AppError, Config};
 use crate::game::{Frame, Game};
 use crate::map::{Map, MapFile, SPAWN};
@@ -70,6 +76,10 @@ const FOV_DEGREES: f32 = 74.0;
 const MARK_SIZE: f32 = 6.0;
 const MARK_FACING: f32 = 1.0;
 const MARK_NAMED_WITHIN: f32 = 40.0;
+/// The tip of the chosen thing's line, which is dragged to turn it, and the
+/// ring where the next thing goes: their sizes in `egui` points.
+const TIP_SIZE: f32 = 4.5;
+const SPOT_SIZE: f32 = 7.0;
 
 /// What the person at the controls asks of the camera in one tick.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -209,26 +219,6 @@ impl FlyCamera {
         Some((at, ahead))
     }
 
-    /// Where the next thing is placed and how far it is turned to the left,
-    /// in degrees: on the ground (height 0) where the camera looks, or a
-    /// little ahead of the camera if it looks at the sky or far away, to
-    /// the tenth of a metre, facing the way the camera does.
-    fn place_spot(&self) -> ([f32; 3], f32) {
-        let [_, _, forward] = self.axes();
-        let reach = -self.position[1] / forward[1];
-        let [x, z] = if forward[1] < -0.01 && reach > 0.0 && reach <= PLACE_WITHIN {
-            [0, 2].map(|axis| self.position[axis] + forward[axis] * reach)
-        } else {
-            let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
-            [
-                self.position[0] - sin_yaw * PLACE_AHEAD,
-                self.position[2] - cos_yaw * PLACE_AHEAD,
-            ]
-        };
-        let tenth = |metres: f32| (metres * 10.0).round() / 10.0 + 0.0;
-        ([tenth(x), 0.0, tenth(z)], self.yaw.to_degrees().round())
-    }
-
     /// The camera `alpha` of the way from `before` to this one.
     fn blended(&self, before: &Self, alpha: f32) -> Self {
         let blend = |from: f32, to: f32| from + (to - from) * alpha;
@@ -254,6 +244,16 @@ struct Controls {
     fast: ActionId,
     faster: ActionId,
     slower: ActionId,
+    /// Places a new thing where the camera looks, or puts down what is held.
+    place: ActionId,
+    /// Picks up what the camera looks at, or puts it down.
+    grab: ActionId,
+    /// Puts what is held back where it was, or stops placing by clicking.
+    cancel: ActionId,
+    turn_left: ActionId,
+    turn_right: ActionId,
+    /// Changes what things snap to.
+    snap: ActionId,
 }
 
 /// The editor's own actions and what they are bound to: every one on
@@ -274,6 +274,14 @@ fn controls() -> Option<(ActionMap, Controls)> {
     let fast = map.button("fast", ["LeftShift", "LeftStickPress"]).ok()?;
     let faster = map.button("faster", ["MouseWheelUp", "DpadUp"]).ok()?;
     let slower = map.button("slower", ["MouseWheelDown", "DpadDown"]).ok()?;
+    // Not Space or Enter, which also press whichever button of the panels
+    // was clicked last.
+    let place = map.button("place", ["P", "GamepadSouth"]).ok()?;
+    let grab = map.button("grab", ["F", "GamepadWest"]).ok()?;
+    let cancel = map.button("cancel", ["Escape", "GamepadEast"]).ok()?;
+    let turn_left = map.button("turn_left", ["Z", "LeftBumper"]).ok()?;
+    let turn_right = map.button("turn_right", ["C", "RightBumper"]).ok()?;
+    let snap = map.button("snap", ["G", "GamepadNorth"]).ok()?;
     let controls = Controls {
         set,
         fly,
@@ -282,6 +290,12 @@ fn controls() -> Option<(ActionMap, Controls)> {
         fast,
         faster,
         slower,
+        place,
+        grab,
+        cancel,
+        turn_left,
+        turn_right,
+        snap,
     };
     Some((map, controls))
 }
@@ -317,6 +331,16 @@ struct Editor {
     unsaved: Option<f32>,
     /// How saving went, as the panels say it.
     saved: String,
+    /// What positions and turns snap to.
+    snap: Snap,
+    /// What is being dragged in the picture with the mouse.
+    drag: Option<Drag>,
+    /// What was picked up with a key or a gamepad, carried where the
+    /// camera looks.
+    held: Option<Held>,
+    /// Whether things were last placed or carried with keys or a gamepad:
+    /// the spot the camera looks at is then ringed in the picture.
+    aiming: bool,
 }
 
 impl Editor {
@@ -348,6 +372,10 @@ impl Editor {
             file,
             unsaved: None,
             saved: String::new(),
+            snap: Snap::default(),
+            drag: None,
+            held: None,
+            aiming: false,
         };
         Some((editor, actions))
     }
@@ -436,6 +464,78 @@ impl Editor {
             speed_steps: steps,
         }
     }
+
+    /// Places, picks up, puts down and turns things as the keys and the
+    /// gamepad ask this tick, where the camera looks.
+    fn edit(&mut self, input: &InputFrame) {
+        let controls = self.controls;
+        let pressed = |action| input.just_pressed(action);
+        let mut changed = false;
+        if pressed(controls.snap) {
+            self.snap = self.snap.next();
+        }
+        if pressed(controls.cancel) {
+            if let Some(held) = self.held.take() {
+                if let Some(entity) = self.map.get_mut(&held.id) {
+                    changed |= entity.position != held.from;
+                    entity.position = held.from;
+                }
+            } else {
+                self.panels.placing = false;
+            }
+        }
+        if pressed(controls.grab) {
+            self.aiming = true;
+            if self.held.take().is_none() {
+                let id = self
+                    .camera
+                    .aimed_at(&self.map)
+                    .or(self.panels.chosen_placed())
+                    .map(str::to_owned);
+                if let Some(entity) = id.and_then(|id| self.map.get(&id)) {
+                    self.held = Some(Held {
+                        id: entity.id.clone(),
+                        from: entity.position,
+                    });
+                    self.panels.choose_placed(&entity.id);
+                }
+            }
+        }
+        if pressed(controls.place) {
+            self.aiming = true;
+            if self.held.take().is_none() {
+                let (spot, facing) = self.camera.place_spot(0.0, self.snap);
+                changed |= self.panels.place(&mut self.map, spot, facing);
+            }
+        }
+        let turns = f32::from(
+            i8::from(pressed(controls.turn_left)) - i8::from(pressed(controls.turn_right)),
+        );
+        if turns != 0.0
+            && let Some(id) = self.panels.chosen_placed()
+            && let Some(entity) = self.map.get_mut(id)
+        {
+            let facing = self
+                .snap
+                .degrees(entity.facing + turns * self.snap.turn(false), false);
+            changed |= facing != entity.facing;
+            entity.facing = facing;
+        }
+        // What is held goes where the camera looks, at the height it has.
+        if let Some(held) = &self.held {
+            if let Some(entity) = self.map.get_mut(&held.id) {
+                let (spot, _) = self.camera.place_spot(entity.position[1], self.snap);
+                changed |= spot != entity.position;
+                entity.position = spot;
+            } else {
+                // Something else saved the map without it.
+                self.held = None;
+            }
+        }
+        if changed {
+            self.unsaved = Some(0.0);
+        }
+    }
 }
 
 impl Game for Editor {
@@ -443,7 +543,10 @@ impl Game for Editor {
         self.before = self.camera;
         let asked = self.read(input, step);
         self.camera.step(&asked, step);
+        // A change made outside is taken in before anything is changed
+        // here, so that a change made here is never lost to it.
         self.keep_map(step);
+        self.edit(input);
     }
 
     fn frame(&mut self, frame: &mut Frame) {
@@ -453,6 +556,15 @@ impl Game for Editor {
         // Writing to a `String` cannot fail.
         let _ = write_speed(&mut self.status, self.camera.speed);
         let _ = write!(self.status, " m/s at {x:.1}, {y:.1}, {z:.1}");
+        if let Some(held) = &self.held
+            && let Some(entity) = self.map.get(&held.id)
+        {
+            let _ = write!(
+                self.status,
+                "    Carrying {}: F or X puts it down, Esc or B puts it back",
+                placed_name(entity)
+            );
+        }
         let Self {
             panels,
             status,
@@ -460,12 +572,17 @@ impl Game for Editor {
             saved,
             camera,
             before,
+            snap,
+            drag,
+            held,
+            aiming,
             ..
         } = self;
         let alpha = frame.alpha();
         let mut changed = false;
         frame.panels(|ui| {
-            let asked = panels.show(ui, status, map, saved, camera.place_spot());
+            let spot = camera.place_spot(0.0, *snap);
+            let asked = panels.show(ui, status, map, saved, spot, snap);
             changed |= asked.changed;
             if let Some((middle, reach)) = asked.fly_to {
                 camera.fly_to(middle, reach);
@@ -477,13 +594,92 @@ impl Game for Editor {
             let seen = camera.blended(before, alpha);
             let picture = ui.available_rect_before_wrap();
             let window = ui.ctx().content_rect();
-            mark_placed(
-                &ui.painter_at(picture),
-                window,
-                &seen,
-                map,
-                panels.chosen_placed(),
+            let size = [window.width(), window.height()];
+            let pointer = ui.interact(
+                picture,
+                egui::Id::new("fossps picture"),
+                egui::Sense::click_and_drag(),
             );
+            let (keys, pressed_at, moving) = ui.input(|input| {
+                (
+                    Keys {
+                        free: input.modifiers.command,
+                        lift: input.modifiers.alt,
+                    },
+                    input.pointer.press_origin(),
+                    input.pointer.is_moving(),
+                )
+            });
+            let left = egui::PointerButton::Primary;
+            // What is carried with keys or a gamepad is not dragged as well.
+            if held.is_some() {
+                *drag = None;
+            } else if pointer.drag_started_by(left)
+                && let Some(at) = pressed_at
+            {
+                let at = [at.x, at.y];
+                *drag = match seen.hit(at, size, map, panels.chosen_placed()) {
+                    Some(Hit::Tip(id)) => Some(Drag::Turn { id }),
+                    Some(Hit::Mark(id)) => {
+                        panels.choose_placed(&id);
+                        let offset = place::drag_offset(&seen, at, size, map, &id);
+                        Some(Drag::Move { id, offset })
+                    }
+                    None => None,
+                };
+            }
+            if let Some(dragged) = drag.as_ref() {
+                if pointer.dragged_by(left)
+                    && let Some(at) = pointer.interact_pointer_pos()
+                {
+                    let at = [at.x, at.y];
+                    changed |= place::drag_to(dragged, &seen, at, size, map, *snap, keys);
+                } else if !pointer.drag_started_by(left) {
+                    *drag = None;
+                }
+            }
+            if pointer.hovered() && moving {
+                *aiming = false;
+            }
+            // Where a click would place something, if clicks place.
+            let mut spot = None;
+            if panels.placing
+                && drag.is_none()
+                && held.is_none()
+                && let Some(at) = pointer.hover_pos()
+                && seen
+                    .hit([at.x, at.y], size, map, panels.chosen_placed())
+                    .is_none()
+                && let Some([x, _, z]) = seen.pointed([at.x, at.y], size, 0.0)
+            {
+                spot = Some([snap.metres(x, keys.free), 0.0, snap.metres(z, keys.free)]);
+            }
+            if pointer.clicked_by(left)
+                && held.is_none()
+                && let Some(at) = pointer.interact_pointer_pos()
+            {
+                match seen.hit([at.x, at.y], size, map, panels.chosen_placed()) {
+                    Some(Hit::Mark(id) | Hit::Tip(id)) => panels.choose_placed(&id),
+                    None => {
+                        if let Some(spot) = spot {
+                            let facing = snap.degrees(seen.yaw.to_degrees(), keys.free);
+                            changed |= panels.place(map, spot, facing);
+                        }
+                    }
+                }
+            }
+            // With keys or a gamepad, the next thing goes where the camera
+            // looks: that spot is ringed, unless something is carried there.
+            if spot.is_none() && *aiming && held.is_none() {
+                spot = Some(seen.place_spot(0.0, *snap).0);
+            }
+            let painter = ui.painter_at(picture);
+            mark_placed(&painter, window, &seen, map, panels.chosen_placed());
+            if let Some(spot) = spot
+                && let Some(([x, y], _)) = seen.pictured(spot, size)
+            {
+                mark_spot(&painter, egui::pos2(x, y));
+            }
         });
         if changed {
             self.unsaved = Some(0.0);
@@ -528,13 +724,19 @@ fn mark_placed(
             continue;
         }
         let color = if entity.kind == SPAWN { spawn } else { other };
-        let (sin, cos) = entity.facing.to_radians().sin_cos();
-        let front =
-            [0, 1, 2].map(|axis| entity.position[axis] + [-sin, 0.0, -cos][axis] * MARK_FACING);
-        if let Some(([x, y], _)) = camera.pictured(front, size) {
+        if let Some(([x, y], _)) = camera.pictured(place::tip(entity), size) {
             let to = egui::pos2(x, y);
             painter.line_segment([at, to], egui::Stroke::new(4.0, dark));
             painter.line_segment([at, to], egui::Stroke::new(2.0, color));
+            // The tip of the chosen one's line is dragged to turn it.
+            if chosen == Some(entity.id.as_str()) {
+                painter.circle(
+                    to,
+                    TIP_SIZE,
+                    egui::Color32::WHITE,
+                    egui::Stroke::new(1.5, dark),
+                );
+            }
         }
         painter.circle(at, MARK_SIZE, color, egui::Stroke::new(1.5, dark));
         if chosen == Some(entity.id.as_str()) {
@@ -561,6 +763,13 @@ fn mark_placed(
             }
         }
     }
+}
+
+/// Rings the spot at `at` in the picture, where the next thing goes.
+fn mark_spot(painter: &egui::Painter, at: egui::Pos2) {
+    let dark = egui::Color32::from_black_alpha(200);
+    painter.circle_stroke(at, SPOT_SIZE, egui::Stroke::new(4.0, dark));
+    painter.circle_stroke(at, SPOT_SIZE, egui::Stroke::new(2.0, egui::Color32::WHITE));
 }
 
 /// Opens a window on `level`, the level of the game called `name`, and lets
@@ -1176,13 +1385,14 @@ mod tests {
         }
 
         // The camera starts at 0, 5, 22 looking 0.2 radians down along -Z:
-        // it looks at the ground 5 / tan(0.2) metres ahead.
+        // it looks at the ground 5 / tan(0.2) metres ahead, and the spawn
+        // lands on the half-metre grid.
         let output = click_on(&mut editor, &context, "place", 1.0);
         let [placed] = editor.map.entities() else {
             panic!("{:?}", editor.map);
         };
         assert_eq!(placed.kind, "spawn");
-        assert_eq!(placed.position, [0.0, 0.0, -2.7]);
+        assert_eq!(placed.position, [0.0, 0.0, -2.5]);
         assert_eq!(placed.facing, 0.0);
         let id = placed.id.clone();
         // It is chosen, listed first and can be changed on the right.
@@ -1211,25 +1421,13 @@ mod tests {
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(
             text.contains(&format!(
-                "[[entity]]\nid = \"{id}\"\ntype = \"spawn\"\nposition = [0.0, 0.0, -2.7]\nfacing = 0.0\n"
+                "[[entity]]\nid = \"{id}\"\ntype = \"spawn\"\nposition = [0.0, 0.0, -2.5]\nfacing = 0.0\n"
             )),
             "{text}"
         );
         let (_, output) = panel_frame(&mut editor, &context, 2.0, Vec::new());
         assert!(words(&output).contains("Saved."));
 
-        // Looking at the sky, things go a little ahead of the camera, facing
-        // the way it does; and never off the tenth of a metre.
-        editor.camera = FlyCamera {
-            position: [1.23, 3.0, 4.0],
-            yaw: TAU / 4.0,
-            pitch: 0.4,
-            speed: 8.0,
-        };
-        assert_eq!(editor.camera.place_spot(), ([-3.8, 0.0, 4.0], 90.0));
-        // Looking down at the ground far away is the same.
-        editor.camera.pitch = -0.02;
-        assert_eq!(editor.camera.place_spot(), ([-3.8, 0.0, 4.0], 90.0));
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1448,6 +1646,284 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// A key or button pressed for one tick.
+    fn tap(editor: &mut Editor, input: &mut Input, what: impl Into<fossps_input::Button>) {
+        let what = what.into();
+        input.press(what);
+        editor.tick(input.tick(), STEP);
+        input.release(what);
+        editor.tick(input.tick(), STEP);
+    }
+
+    #[test]
+    fn keys_and_a_gamepad_place_carry_turn_and_put_back_where_the_camera_looks() {
+        let folder = scratch("carry");
+        let (mut editor, mut input) = editor_in(&folder);
+        let place = |editor: &Editor, id: &str| editor.map.get(id).unwrap().position;
+
+        // A places a spawn where the camera looks, on the grid, and it is
+        // chosen.
+        tap(&mut editor, &mut input, GamepadButton::GamepadSouth);
+        let id = editor.map.entities()[0].id.clone();
+        assert_eq!(place(&editor, &id), [0.0, 0.0, -2.5]);
+        assert_eq!(editor.panels.chosen_placed(), Some(id.as_str()));
+        assert!(editor.aiming, "the spot the camera looks at is ringed");
+
+        // RB turns it a step to the right; Z, twice, a step to the left.
+        tap(&mut editor, &mut input, GamepadButton::RightBumper);
+        assert_eq!(editor.map.get(&id).unwrap().facing, -15.0);
+        tap(&mut editor, &mut input, Key::Z);
+        tap(&mut editor, &mut input, Key::Z);
+        assert_eq!(editor.map.get(&id).unwrap().facing, 15.0);
+        tap(&mut editor, &mut input, GamepadButton::LeftBumper);
+        tap(&mut editor, &mut input, Key::C);
+        assert_eq!(editor.map.get(&id).unwrap().facing, 15.0);
+
+        // Y and G change what things snap to, round and back.
+        tap(&mut editor, &mut input, GamepadButton::GamepadNorth);
+        assert_eq!(editor.snap.words(), "Snap: 1 m, 15°");
+        for _ in 0..4 {
+            tap(&mut editor, &mut input, Key::G);
+        }
+        assert_eq!(editor.snap, Snap::default());
+
+        // X picks up what the camera looks at, and it goes where the camera
+        // looks from then on.
+        tap(&mut editor, &mut input, GamepadButton::GamepadWest);
+        assert_eq!(
+            editor.held.as_ref().map(|held| held.id.as_str()),
+            Some(&*id)
+        );
+        assert_eq!(place(&editor, &id), [0.0, 0.0, -2.5]);
+        editor.camera.position[0] = 3.0;
+        editor.tick(input.tick(), STEP);
+        assert_eq!(place(&editor, &id), [3.0, 0.0, -2.5]);
+        let mut frame = Frame::new(1.0);
+        editor.frame(&mut frame);
+        assert!(
+            editor.status.contains("Carrying spawn"),
+            "{}",
+            editor.status
+        );
+        // B puts it back where it was.
+        tap(&mut editor, &mut input, GamepadButton::GamepadEast);
+        assert_eq!(editor.held, None);
+        assert_eq!(place(&editor, &id), [0.0, 0.0, -2.5]);
+
+        // The camera now looks well to the side of it: F brings what is
+        // chosen, and F again puts it down there.
+        assert_eq!(editor.camera.aimed_at(&editor.map), None);
+        tap(&mut editor, &mut input, Key::F);
+        assert_eq!(place(&editor, &id), [3.0, 0.0, -2.5]);
+        editor.camera.position[0] = 2.0;
+        editor.tick(input.tick(), STEP);
+        tap(&mut editor, &mut input, Key::F);
+        assert_eq!(editor.held, None);
+        editor.camera.position[0] = -6.0;
+        editor.tick(input.tick(), STEP);
+        assert_eq!(place(&editor, &id), [2.0, 0.0, -2.5]);
+
+        // Something carried up high stays as high, and P puts it down too
+        // without placing another.
+        editor.map.get_mut(&id).unwrap().position[1] = 3.0;
+        tap(&mut editor, &mut input, Key::F);
+        assert_eq!(place(&editor, &id)[1], 3.0);
+        tap(&mut editor, &mut input, Key::P);
+        assert_eq!(editor.held, None);
+        assert_eq!(editor.map.entities().len(), 1);
+        // With nothing carried, P places another, of the same type.
+        tap(&mut editor, &mut input, Key::P);
+        assert_eq!(editor.map.entities().len(), 2);
+
+        // All of it is saved a moment after the last change.
+        editor.tick(input.tick(), SAVE_AFTER + 0.1);
+        assert_eq!(Map::load(&folder).unwrap(), editor.map);
+
+        // Something carried that a save from outside took away is let go.
+        tap(&mut editor, &mut input, Key::F);
+        let carried = editor.held.clone().unwrap().id;
+        editor.map.remove(&carried);
+        editor.tick(input.tick(), STEP);
+        assert_eq!(editor.held, None);
+
+        // Esc and B stop placing by clicking.
+        editor.panels.placing = true;
+        tap(&mut editor, &mut input, Key::Escape);
+        assert!(!editor.panels.placing);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// The left mouse button pressed at `from`, moved to `to` and let go,
+    /// over frames starting at `time`, with `modifiers` held.
+    fn drag(
+        editor: &mut Editor,
+        context: &egui::Context,
+        [from, to]: [egui::Pos2; 2],
+        time: f64,
+        modifiers: egui::Modifiers,
+    ) {
+        let frame = |editor: &mut Editor, time: f64, events: Vec<egui::Event>| {
+            #[allow(clippy::cast_precision_loss)]
+            let size = egui::vec2(SCREEN[0] as f32, SCREEN[1] as f32);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(time),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut frame = Frame::new(1.0)
+                .for_window(Some(SCREEN), fossps_ui::DrawBuffer::default())
+                .with_panels(context.clone(), input);
+            editor.frame(&mut frame);
+            frame.take_panels().unwrap().textures_delta.clear();
+        };
+        frame(
+            editor,
+            time,
+            vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::PointerMoved(from),
+                button(from, true),
+            ],
+        );
+        for step in 1..=5_u8 {
+            let at = from + (to - from) * (f32::from(step) / 5.0);
+            frame(
+                editor,
+                time + 0.05 * f64::from(step),
+                vec![egui::Event::PointerMoved(at)],
+            );
+        }
+        frame(
+            editor,
+            time + 0.3,
+            vec![
+                button(to, false),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_click_places_and_a_drag_moves_lifts_and_turns_in_the_picture() {
+        let folder = scratch("drag");
+        let (mut editor, mut input) = editor_in(&folder);
+        let context = panel_context();
+        let _ = panel_frame(&mut editor, &context, 0.0, Vec::new());
+        let (_, output) = panel_frame(&mut editor, &context, 0.1, Vec::new());
+        let shown = words(&output);
+        for expected in [
+            "Click in the picture to place",
+            "Snap: 0.5 m, 15°",
+            "Move: drag a mark",
+            "X carries what you look at",
+        ] {
+            assert!(shown.contains(expected), "no {expected:?} in:\n{shown}");
+        }
+        // Where a point of the level is in the picture.
+        let at = |editor: &Editor, point: [f32; 3]| {
+            let ([x, y], _) = editor.camera.pictured(point, [1280.0, 720.0]).unwrap();
+            egui::pos2(x, y)
+        };
+        let none = egui::Modifiers::NONE;
+
+        // A click on the ground does nothing until clicks place.
+        let ground = at(&editor, [2.1, 0.0, 1.2]);
+        let _ = click(&mut editor, &context, ground, 0.5);
+        assert!(editor.map.is_empty());
+        let _ = click_on(&mut editor, &context, "placing", 1.0);
+        assert!(editor.panels.placing);
+        let _ = click(&mut editor, &context, ground, 1.5);
+        let [first] = editor.map.entities() else {
+            panic!("{:?}", editor.map);
+        };
+        assert_eq!((first.position, first.facing), ([2.0, 0.0, 1.0], 0.0));
+        let first = first.id.clone();
+        assert_eq!(editor.panels.chosen_placed(), Some(first.as_str()));
+        let elsewhere = at(&editor, [-3.0, 0.0, 4.2]);
+        let _ = click(&mut editor, &context, elsewhere, 2.0);
+        assert_eq!(editor.map.entities().len(), 2);
+        let second = editor.panels.chosen_placed().unwrap().to_owned();
+        assert_eq!(editor.map.get(&second).unwrap().position, [-3.0, 0.0, 4.0]);
+        // A click on a mark chooses it, and places nothing on top of it.
+        let mark = at(&editor, [2.0, 0.0, 1.0]);
+        let _ = click(&mut editor, &context, mark, 2.5);
+        assert_eq!(editor.map.entities().len(), 2);
+        assert_eq!(editor.panels.chosen_placed(), Some(first.as_str()));
+        // The sky is nowhere to put anything.
+        let _ = click(&mut editor, &context, egui::pos2(640.0, 30.0), 3.0);
+        assert_eq!(editor.map.entities().len(), 2);
+        // The snap button changes the grid: the next lands on whole metres.
+        let _ = click_on(&mut editor, &context, "snap", 3.5);
+        assert_eq!(editor.snap.words(), "Snap: 1 m, 15°");
+        let third = at(&editor, [-5.4, 0.0, -2.6]);
+        let _ = click(&mut editor, &context, third, 4.0);
+        let third = editor.panels.chosen_placed().unwrap().to_owned();
+        assert_eq!(editor.map.get(&third).unwrap().position, [-5.0, 0.0, -3.0]);
+        editor.snap = Snap::default();
+        // Esc turns placing off again, as the button does.
+        tap(&mut editor, &mut input, Key::Escape);
+        assert!(!editor.panels.placing);
+        let _ = click(&mut editor, &context, ground + egui::vec2(60.0, 0.0), 4.5);
+        assert_eq!(editor.map.entities().len(), 3);
+
+        // The second mark is dragged over the ground, which chooses it: let
+        // go where 5.2, 0, -2.9 is, it stands on the grid beside that.
+        let from = at(&editor, [-3.0, 0.0, 4.0]);
+        let to = at(&editor, [5.2, 0.0, -2.9]);
+        drag(&mut editor, &context, [from, to], 5.0, none);
+        assert_eq!(editor.panels.chosen_placed(), Some(second.as_str()));
+        assert_eq!(editor.map.get(&second).unwrap().position, [5.0, 0.0, -3.0]);
+        assert_eq!(editor.drag, None, "let go, nothing is dragged");
+        assert_eq!(editor.map.get(&first).unwrap().position, [2.0, 0.0, 1.0]);
+        // With Ctrl held it leaves the grid.
+        let from = at(&editor, [5.0, 0.0, -3.0]);
+        let to = at(&editor, [5.33, 0.0, -3.0]);
+        let ctrl = egui::Modifiers::COMMAND;
+        drag(&mut editor, &context, [from, to], 6.0, ctrl);
+        let [x, y, z] = editor.map.get(&second).unwrap().position;
+        assert!((x - 5.33).abs() < 0.03 && y == 0.0 && (z + 3.0).abs() < 0.03);
+        // With Alt held it goes up and down, and not along the ground.
+        let before = editor.map.get(&second).unwrap().position;
+        let from = at(&editor, before);
+        let to = at(&editor, [before[0], 2.1, before[2]]);
+        drag(&mut editor, &context, [from, to], 7.0, egui::Modifiers::ALT);
+        let after = editor.map.get(&second).unwrap().position;
+        assert_eq!(after, [before[0], 2.0, before[2]]);
+
+        // The tip of the chosen one's line, a metre ahead of it, turns it:
+        // dragged round to its right (+X), it faces a quarter to the right.
+        let from = at(&editor, [after[0], 2.0, after[2] - 1.0]);
+        let to = at(&editor, [after[0] + 2.0, 2.0, after[2] + 0.2]);
+        drag(&mut editor, &context, [from, to], 8.0, none);
+        assert_eq!(editor.map.get(&second).unwrap().facing, -90.0);
+        assert_eq!(editor.map.get(&second).unwrap().position, after);
+        // The tip of one that is not chosen is not a handle: pressed
+        // there, so near its mark, the drag moves it and turns nothing.
+        let from = at(&editor, [2.0, 0.0, 0.0]);
+        let to = at(&editor, [3.5, 0.0, 1.0]);
+        drag(&mut editor, &context, [from, to], 9.0, none);
+        assert_eq!(editor.map.get(&first).unwrap().facing, 0.0);
+        assert_eq!(editor.map.get(&first).unwrap().position, [3.5, 0.0, 2.0]);
+        assert_eq!(editor.panels.chosen_placed(), Some(first.as_str()));
+        // A drag that starts on a panel moves nothing in the picture.
+        let row = editor.panels.rows[0].1.center();
+        let to = at(&editor, [-3.0, 0.0, 4.0]);
+        drag(&mut editor, &context, [row, to], 10.0, none);
+        assert_eq!(editor.map.get(&first).unwrap().position, [3.5, 0.0, 2.0]);
+        // Nor does one that starts on bare ground.
+        let from = at(&editor, [-3.0, 0.0, 4.0]);
+        let to = at(&editor, [3.5, 0.0, 2.0]);
+        drag(&mut editor, &context, [from, to], 11.0, none);
+        assert_eq!(editor.map.get(&first).unwrap().position, [3.5, 0.0, 2.0]);
+
+        // Everything dragged is in the file a moment later.
+        assert!(editor.unsaved.is_some());
+        editor.tick(input.tick(), SAVE_AFTER + 0.1);
+        assert_eq!(Map::load(&folder).unwrap(), editor.map);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[test]
     fn a_mark_is_drawn_where_the_camera_sees_what_is_placed() {
         let camera = FlyCamera {
@@ -1640,6 +2116,17 @@ mod tests {
             ring.iter().all(|&part| part > 200) && light(ring) > light(outside) + 60,
             "{ring:?} beside {outside:?}"
         );
+        // The tip of its line, a metre to its left as it is turned a
+        // quarter that way, is the white handle that turns it.
+        let ([x, y], _) = editor.camera.pictured([-1.0, 0.0, 0.0], size).unwrap();
+        assert!(
+            pixel(x, y).iter().all(|&part| part > 200),
+            "{:?}",
+            pixel(x, y)
+        );
+        // The tip of one that is not chosen is only the end of a line.
+        let ([x, y], _) = editor.camera.pictured([3.0, 0.0, 9.0], size).unwrap();
+        assert!(green(pixel(x, y - 1.0)), "{:?}", pixel(x, y - 1.0));
         // A spawn point that is not chosen has no ring.
         let place = editor.map.get("b").unwrap().position;
         let ([x, y], _) = editor.camera.pictured(place, size).unwrap();
@@ -1661,6 +2148,36 @@ mod tests {
                 assert!(!green(seen), "{seen:?}");
             }
         }
+
+        // Placing with keys or a gamepad rings the spot the camera looks
+        // at, where the next thing goes: the floor there was not white.
+        let (spot, _) = editor.camera.place_spot(0.0, editor.snap);
+        let ([x, y], _) = editor.camera.pictured(spot, size).unwrap();
+        // Looked for at its top (the chosen zone's ring is just below it),
+        // a pixel either way.
+        editor.aiming = true;
+        let ringed = draw(&mut editor, &mut headless, 1.4, Vec::new());
+        if let Some(folder) = std::env::var_os("FOSSPS_SAVE_PICTURES") {
+            std::fs::write(std::path::Path::new(&folder).join("aiming.rgba"), &ringed).unwrap();
+        }
+        let lightest = |picture: &[u8]| {
+            (-2_i8..=2)
+                .map(|down| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let at = ((y - SPOT_SIZE + f32::from(down)).round() as usize
+                        * SCREEN[0] as usize
+                        + x.round() as usize)
+                        * 4;
+                    picture[at..at + 3]
+                        .iter()
+                        .map(|&part| i32::from(part))
+                        .sum::<i32>()
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let (before, after) = (lightest(&shown), lightest(&ringed));
+        assert!(after > before + 100 && after > 700, "{before} to {after}");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1764,7 +2281,7 @@ mod tests {
         for (name, columns, rows) in [
             ("list", 4..240, 4..600),
             ("inspector", 1000..1276, 4..600),
-            ("how to fly", 4..1276, 684..716),
+            ("how to fly", 4..1276, 644..716),
         ] {
             let (mut plain, mut bright, mut all) = (0, 0, 0);
             for y in rows.clone() {

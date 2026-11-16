@@ -23,6 +23,21 @@ pub(crate) struct SceneView {
     before: Option<Mat4>,
     /// How many frames have been drawn, for the camera shift.
     frame: u32,
+    /// How many sizes larger than usual textures are read; see [`sharper`].
+    sharper: f32,
+}
+
+/// How many sizes larger than it otherwise would the graphics card should
+/// read a texture when a scene `render` pixels wide is upscaled to `output`.
+///
+/// A scene drawn small picks small, blurry copies of its textures, which
+/// upscaling cannot make sharp again. FSR's manual gives the rule: the
+/// base-2 logarithm of how much smaller the scene is drawn, and one more.
+fn sharper(render: u32, output: u32) -> f32 {
+    // Sizes are far below the point where f32 stops being exact.
+    #[allow(clippy::cast_precision_loss)]
+    let ratio = output.max(1) as f32 / render.max(1) as f32;
+    ratio.log2().max(0.0) + 1.0
 }
 
 impl SceneView {
@@ -38,6 +53,11 @@ impl SceneView {
         let upscale = Upscale::new(gpu, output, upscaling)?;
         let render = upscale.as_ref().map_or(output, |upscale| upscale.render);
         Ok(Self {
+            sharper: if upscale.is_some() {
+                sharper(render.width, output.width)
+            } else {
+                0.0
+            },
             target: SceneTarget::new(gpu, render)?,
             upscale,
             before: None,
@@ -115,6 +135,8 @@ impl SceneView {
             clip: shifted(&steady, 2.0 * jitter.0 / width, -2.0 * jitter.1 / height),
             steady,
             before: self.before.unwrap_or(steady),
+            eye: camera.position,
+            sharper: self.sharper,
         };
         let cut = self.before.is_none();
         self.before = Some(steady);
@@ -146,5 +168,21 @@ impl SceneView {
                 .map_err(RenderError::Upscaler)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sharper;
+
+    #[test]
+    fn a_scene_drawn_smaller_reads_larger_textures() {
+        // Drawn full size and only smoothed: one size larger, as FSR asks.
+        assert_eq!(sharper(1920, 1920), 1.0);
+        // Half as wide: one more.
+        assert_eq!(sharper(960, 1920), 2.0);
+        assert!((sharper(1280, 1920) - 1.585).abs() < 1e-3);
+        // Nothing to divide by is not a reason to fail.
+        assert!(sharper(0, 0).is_finite());
     }
 }

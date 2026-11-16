@@ -8,6 +8,9 @@ use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::swapchain::COLOUR;
 
+/// What the renderer is doing when it makes a [`SceneTarget`]'s images.
+pub(crate) const DOING: &str = "making the images the scene is drawn into";
+
 /// The whole of a depth image.
 pub(crate) const DEPTH: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     aspect_mask: vk::ImageAspectFlags::DEPTH,
@@ -31,10 +34,12 @@ impl Picture {
         }
     }
 
-    /// Fills in `self` with an image of `extent` pixels.
+    /// Fills in `self` with an image of `extent` pixels, with as many
+    /// smaller copies of itself as `range` has levels.
     ///
     /// On failure, what was created so far is left in `self` for
-    /// [`destroy`](Self::destroy) to clean up.
+    /// [`destroy`](Self::destroy) to clean up, and the error says the
+    /// renderer was `doing` this.
     pub(crate) fn create(
         &mut self,
         gpu: &Gpu,
@@ -42,8 +47,8 @@ impl Picture {
         format: vk::Format,
         usage: vk::ImageUsageFlags,
         range: vk::ImageSubresourceRange,
+        doing: &'static str,
     ) -> Result<(), RenderError> {
-        let doing = "making the images the scene is drawn into";
         let device = gpu.device();
         // SAFETY: the device is alive, and each object is created from valid
         // settings and stored in `self` straight away. The memory is as
@@ -55,7 +60,7 @@ impl Picture {
                         .image_type(vk::ImageType::TYPE_2D)
                         .format(format)
                         .extent(extent.into())
-                        .mip_levels(1)
+                        .mip_levels(range.level_count)
                         .array_layers(1)
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .usage(usage),
@@ -176,6 +181,7 @@ impl SceneTarget {
             Self::FORMAT,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             COLOUR,
+            DOING,
         )?;
         // Sampled as well, because upscaling and later effects read the depth.
         target.depth.create(
@@ -184,6 +190,7 @@ impl SceneTarget {
             Self::DEPTH_FORMAT,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             DEPTH,
+            DOING,
         )?;
         // Copied out by the tests, which check the numbers.
         target.motion.create(
@@ -194,6 +201,7 @@ impl SceneTarget {
                 | vk::ImageUsageFlags::SAMPLED
                 | vk::ImageUsageFlags::TRANSFER_SRC,
             COLOUR,
+            DOING,
         )?;
         Ok(target)
     }

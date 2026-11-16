@@ -944,6 +944,7 @@ dependencies = [
  "egui-winit",
  "flate2",
  "fossps-assets",
+ "fossps-audio",
  "fossps-input",
  "fossps-mode",
  "fossps-net",

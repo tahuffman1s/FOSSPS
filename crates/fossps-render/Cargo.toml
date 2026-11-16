@@ -13,7 +13,8 @@ ash = { version = "0.38", default-features = false, features = ["loaded", "std",
 ash-window = "0.13"
 raw-window-handle = { version = "0.6", features = ["std"] }
 log = "0.4"
-# The scenes the renderer draws. Without its image decoders until textures are drawn.
+# The scenes the renderer draws. Without its image decoders: whoever reads a
+# file decodes its pictures, and the renderer is handed the pixels.
 fossps-assets = { path = "../fossps-assets", default-features = false }
 # The list of boxes and text the HUD and menus ask for, and the trait text is measured through.
 fossps-ui = { path = "../fossps-ui" }
