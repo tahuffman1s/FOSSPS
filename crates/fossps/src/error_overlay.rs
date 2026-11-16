@@ -53,7 +53,7 @@ struct Line {
 
 /// What text is measured with: the font it is drawn in when there is a
 /// window, and a guess on a server, where nothing is drawn.
-fn measure() -> Box<dyn TextMeasure> {
+pub(crate) fn measure() -> Box<dyn TextMeasure> {
     #[cfg(feature = "window")]
     {
         Box::new(fossps_render::Font::bundled())

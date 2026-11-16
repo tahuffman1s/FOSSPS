@@ -46,6 +46,8 @@ mod output {
         fn play(&mut self, play: Play) -> Playing;
         fn stop(&mut self, playing: Playing);
         fn set_listener(&mut self, listener: Listener);
+        /// Sets how loud everything is, from 0 (silent) to 1 (full).
+        fn set_volume(&mut self, volume: f32);
     }
 
     impl Voices for Mixer {
@@ -59,6 +61,10 @@ mod output {
 
         fn set_listener(&mut self, listener: Listener) {
             Mixer::set_listener(self, listener);
+        }
+
+        fn set_volume(&mut self, volume: f32) {
+            Mixer::set_volume(self, volume);
         }
     }
 
@@ -88,6 +94,13 @@ mod output {
         /// Puts the ears at `position`, facing `yaw`: the player's eyes.
         pub(crate) fn listen_from(&mut self, position: [f32; 3], yaw: f32) {
             self.voices.set_listener(Listener { position, yaw });
+        }
+
+        /// Sets how loud everything is, from 0 (silent) to 1 (full): the
+        /// player's own volume setting.
+        #[cfg_attr(not(feature = "window"), allow(dead_code))]
+        pub(crate) fn set_volume(&mut self, volume: f32) {
+            self.voices.set_volume(volume);
         }
 
         /// Does what a frame asked for, in the order it was asked.
@@ -153,6 +166,9 @@ pub(crate) struct LazySpeakers {
     speakers: Option<fossps_audio::Speakers>,
     /// Where the ears are, to tell the speakers once they are open.
     listener: fossps_audio::Listener,
+    /// How loud the player wants everything, to tell the speakers once
+    /// they are open. `None` until a volume is set: full.
+    volume: Option<f32>,
     /// When to next try a device that is not working.
     retry_at: Option<std::time::Instant>,
 }
@@ -167,12 +183,16 @@ impl LazySpeakers {
     /// device went away and it is time to try.
     fn ready(&mut self) -> &mut fossps_audio::Speakers {
         let listener = self.listener;
+        let volume = self.volume;
         let now = std::time::Instant::now();
         let retry_at = &mut self.retry_at;
         let speakers = self.speakers.get_or_insert_with(|| {
             // Says why in the log when there is nothing to play through.
             let mut speakers = fossps_audio::Speakers::open_or_silent();
             speakers.set_listener(listener);
+            if let Some(volume) = volume {
+                speakers.set_volume(volume);
+            }
             *retry_at = Some(now + Self::RETRY_EVERY);
             speakers
         });
@@ -181,6 +201,9 @@ impl LazySpeakers {
             if speakers.reconnect().is_ok() {
                 log::info!("Sound is playing again.");
                 speakers.set_listener(listener);
+                if let Some(volume) = volume {
+                    speakers.set_volume(volume);
+                }
             }
         }
         speakers
@@ -203,6 +226,13 @@ impl Voices for LazySpeakers {
         self.listener = listener;
         if let Some(speakers) = &mut self.speakers {
             speakers.set_listener(listener);
+        }
+    }
+
+    fn set_volume(&mut self, volume: f32) {
+        self.volume = Some(volume);
+        if let Some(speakers) = &mut self.speakers {
+            speakers.set_volume(volume);
         }
     }
 }

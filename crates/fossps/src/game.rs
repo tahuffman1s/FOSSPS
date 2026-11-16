@@ -3,6 +3,7 @@
 use fossps_input::{ActionSetId, InputFrame, Rumble};
 use fossps_ui::{DrawBuffer, Ui};
 
+use crate::settings::Settings;
 use crate::sound_output::SoundAsk;
 
 /// A game the engine can run.
@@ -40,7 +41,17 @@ const NO_WINDOW: [u32; 2] = [1920, 1080];
 #[derive(Debug)]
 pub struct Frame {
     alpha: f32,
+    /// How long the frame before this one took, in seconds.
+    seconds: f32,
     screen: [u32; 2],
+    /// Where the mouse pointer is, when it is free and over the window.
+    pointer: Option<[f32; 2]>,
+    /// Whether the main mouse button is held.
+    pointer_down: bool,
+    /// The player's own size for the HUD and menus.
+    ui_scale: f32,
+    /// The player's settings to put into effect, when they have changed.
+    settings: Option<Settings>,
     ui: DrawBuffer,
     title: Option<String>,
     close: bool,
@@ -106,7 +117,12 @@ impl Frame {
     pub(crate) fn new(alpha: f32) -> Self {
         Self {
             alpha,
+            seconds: 0.0,
             screen: NO_WINDOW,
+            pointer: None,
+            pointer_down: false,
+            ui_scale: 1.0,
+            settings: None,
             ui: DrawBuffer::default(),
             title: None,
             close: false,
@@ -157,6 +173,82 @@ impl Frame {
     #[must_use]
     pub fn alpha(&self) -> f32 {
         self.alpha
+    }
+
+    /// How long the frame before this one took, in seconds: what a
+    /// [`Ui`] is updated with, and what anything shown that moves by
+    /// itself is moved by. Gameplay belongs in [`Game::tick`], which has
+    /// its own fixed step.
+    ///
+    /// A game on a server draws no frames; there this is 0.
+    #[must_use]
+    pub fn delta_seconds(&self) -> f32 {
+        self.seconds
+    }
+
+    /// Where the mouse pointer is, in pixels from the top-left corner of
+    /// the window: what a menu's [`UiInput`](fossps_ui::UiInput) takes as
+    /// its `pointer`.
+    ///
+    /// `None` while the mouse is captured to look around with, while the
+    /// pointer is outside the window, and on a server.
+    #[must_use]
+    pub fn pointer(&self) -> Option<[f32; 2]> {
+        self.pointer
+    }
+
+    /// Whether the main mouse button is held: what a menu's
+    /// [`UiInput`](fossps_ui::UiInput) takes as its `pointer_down`.
+    ///
+    /// A click on a menu is not an action, because a pointer is something
+    /// only a mouse has; everything a click can do, the menu actions do
+    /// from a gamepad or keyboard. False while the mouse is captured.
+    #[must_use]
+    pub fn pointer_down(&self) -> bool {
+        self.pointer_down
+    }
+
+    /// The size the player chose for the HUD and menus in the settings
+    /// menu: 1 is the designed size. Give it to
+    /// [`Ui::set_ui_scale`] so a game's own HUD grows and shrinks with
+    /// the engine's menus.
+    #[must_use]
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// Says how long the frame before this one took, and where the free
+    /// mouse pointer is and whether its main button is held.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn with_pointer(
+        mut self,
+        seconds: f32,
+        pointer: Option<[f32; 2]>,
+        pointer_down: bool,
+    ) -> Self {
+        self.seconds = seconds;
+        self.pointer = pointer;
+        self.pointer_down = pointer_down;
+        self
+    }
+
+    /// Sets the player's own size for the HUD and menus, for the game to read.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn set_ui_scale(&mut self, scale: f32) {
+        self.ui_scale = scale;
+    }
+
+    /// Puts the player's settings into effect: how loud the speakers are
+    /// and how the view turns.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn apply_settings(&mut self, settings: Settings) {
+        self.settings = Some(settings);
+    }
+
+    /// The settings to put into effect, if they changed this frame.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(crate) fn take_settings(&mut self) -> Option<Settings> {
+        self.settings.take()
     }
 
     /// The size of the window in pixels, `[width, height]`: what a

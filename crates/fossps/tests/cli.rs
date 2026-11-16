@@ -25,6 +25,7 @@ fn fossps(folder: &Path, args: &[&str]) -> Output {
         .current_dir(folder)
         // Never the controls of whoever runs the tests.
         .env("FOSSPS_BINDINGS", folder.join("bindings.toml"))
+        .env("FOSSPS_SETTINGS", folder.join("settings.toml"))
         .output()
         .unwrap()
 }
@@ -40,7 +41,7 @@ fn controls_makes_the_file_then_shows_what_the_player_changed_in_it() {
     let said = stdout(&output);
     assert!(said.starts_with("Your controls:\n"), "{said}");
     assert!(
-        said.contains("\n  jump             Space, GamepadSouth\n"),
+        said.contains("\n  jump               Space, GamepadSouth\n"),
         "{said}"
     );
     assert!(
@@ -75,15 +76,15 @@ fn controls_makes_the_file_then_shows_what_the_player_changed_in_it() {
     assert!(output.status.success(), "{}", stderr(&output));
     let said = stdout(&output);
     assert!(
-        said.contains("\n  jump             F, GamepadSouth  (changed by you)\n"),
+        said.contains("\n  jump               F, GamepadSouth  (changed by you)\n"),
         "{said}"
     );
     assert!(
-        said.contains("\n  melee            nothing  (changed by you)\n"),
+        said.contains("\n  melee              nothing  (changed by you)\n"),
         "{said}"
     );
     assert!(
-        said.contains("\n  reload           R, GamepadWest\n"),
+        said.contains("\n  reload             R, GamepadWest\n"),
         "{said}"
     );
     assert!(
@@ -413,7 +414,7 @@ fn check_presses_every_action_of_a_new_game_and_says_so() {
     assert!(!stderr(&output).contains("Jump number 3"));
     let said = stdout(&output);
     assert!(
-        said.contains("Each of the 15 actions was also pressed, held and let go"),
+        said.contains("Each of the 21 actions was also pressed, held and let go"),
         "{said}"
     );
     assert!(!said.contains("Nothing was pressed"), "{said}");

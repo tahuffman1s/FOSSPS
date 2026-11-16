@@ -184,6 +184,14 @@ impl Input {
         &self.map
     }
 
+    /// Changes what `action` is multiplied by from the next tick on, with
+    /// everything that is held staying held: see
+    /// [`ActionMap::set_sensitivity`]. This is for a settings menu, where
+    /// the player is holding the very button that changes it.
+    pub fn set_sensitivity(&mut self, action: ActionId, sensitivity: [f32; 2]) {
+        self.map.set_sensitivity(action, sensitivity);
+    }
+
     /// Replaces the action map. Ids from the old map must be looked up again.
     ///
     /// The live action set stays the one in the same position, or becomes
@@ -504,6 +512,9 @@ impl Input {
             }
 
             let pressed = axis != [0.0, 0.0];
+            let [across, along] = action.sensitivity;
+            let axis = [axis[0] * across, axis[1] * along];
+            let delta = [delta[0] * across, delta[1] * along];
             *state = ActionState {
                 pressed,
                 just_pressed: pressed && (!state.pressed || repressed),
@@ -765,6 +776,25 @@ mod tests {
         let frame = input.tick();
         assert!(close(frame.axis2d(movement)[0], 0.5));
         assert!(close(frame.axis2d(look)[0], 0.25));
+    }
+
+    #[test]
+    fn sensitivity_scales_mouse_and_stick_and_can_swap_up_and_down() {
+        let mut r = rig();
+        r.input.press(Key::Space);
+        r.input.tick();
+        // Changed while a key is held, as a settings menu does.
+        r.input.set_sensitivity(r.look, [2.0, -0.5]);
+        r.input.move_mouse(10.0, 4.0);
+        r.input.set_stick(Stick::RightStick, StickAxis::Y, 1.0);
+        let frame = r.input.tick();
+        assert_eq!(frame.delta(r.look), [20.0, -2.0]);
+        assert!(close(frame.axis2d(r.look)[1], -0.5));
+        assert!(frame.pressed(r.jump) && !frame.just_pressed(r.jump));
+        // No other action is touched, and nonsense is ignored.
+        assert_eq!(r.input.map().sensitivity(r.movement), [1.0, 1.0]);
+        r.input.set_sensitivity(r.look, [f32::NAN, 1.0]);
+        assert_eq!(r.input.map().sensitivity(r.look), [2.0, -0.5]);
     }
 
     #[test]
@@ -1221,7 +1251,8 @@ mod tests {
         s.input.set_active_set(s.menu);
         s.input.set_map(s.input.map().clone());
         assert_eq!(s.input.active_set(), s.menu);
-        s.input.set_map(ActionMap::default_fps());
+        // A map with only the one set.
+        s.input.set_map(ActionMap::new());
         assert_eq!(s.input.active_set(), ActionMap::GAMEPLAY);
     }
 }

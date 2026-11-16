@@ -274,6 +274,13 @@ declare game: {
     --- buttons "jump", "crouch", "sprint", "fire", "aim", "reload", "interact",
     --- "melee", "grenade", "next_weapon", "previous_weapon", "scoreboard" and
     --- "pause". Action names are lower case with underscores.
+    ---
+    --- "pause" opens the menu every game has. While it is open, the actions
+    --- above all read as let go, and the menu's own are heard instead:
+    --- "menu_move", "menu_confirm", "menu_back", "menu_previous_tab",
+    --- "menu_next_tab" and "menu_close". Escape goes back one screen, and
+    --- closes the menu from its first screen; "menu_close" (P, or Start on
+    --- a gamepad) closes it from anywhere.
     input: {
         --- True while the action is held down, or its stick is off centre.
         --- Example: if game.input.pressed("sprint") then speed = 8 end

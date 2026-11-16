@@ -16,6 +16,8 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::game::{Frame, Game};
 use crate::gamepad::Gamepads;
 use crate::pace::{FramePacer, WATCH};
+use crate::pause::PauseMenu;
+use crate::settings::Settings;
 use crate::sound_output::{LazySpeakers, SoundOutput};
 use crate::tick::TickClock;
 use crate::translate;
@@ -108,12 +110,53 @@ pub struct Config {
     /// # Ok::<(), fossps::level::LevelError>(())
     /// ```
     pub level: Option<fossps_assets::Scene>,
+    /// Whether the engine's pause menu is put over the game: the `pause`
+    /// action (Escape, or Start on a gamepad) opens it, and it holds the
+    /// player's settings and the way out. The game keeps running under
+    /// it; only the player's input stops reaching it.
+    ///
+    /// On unless a game says otherwise. It needs the `pause` action and
+    /// the `menu` action set of [`ActionMap::default_fps`]; a game with
+    /// other controls gets no menu. Turn it off for a game that has its
+    /// own:
+    ///
+    /// ```
+    /// let config = fossps::Config {
+    ///     pause_menu: false,
+    ///     ..fossps::Config::default()
+    /// };
+    /// ```
+    pub pause_menu: bool,
+    /// What the player has chosen: how loud, how fast the view turns and
+    /// which way up, and how big the HUD and menus are. The pause menu's
+    /// settings screen changes them while the game runs.
+    ///
+    /// They hold from the first tick, with the pause menu or without it.
+    /// The turning speed and the swap of up and down are applied to the
+    /// action named `look`, before the game reads it.
+    /// [`settings::load`](crate::settings::load) reads the player's own
+    /// file:
+    ///
+    /// ```no_run
+    /// let file = fossps::settings::file();
+    /// let config = fossps::Config {
+    ///     settings: file.as_deref().map_or_else(Default::default, |file| {
+    ///         fossps::settings::load(file).0
+    ///     }),
+    ///     settings_file: file,
+    ///     ..fossps::Config::default()
+    /// };
+    /// ```
+    pub settings: Settings,
+    /// Where the pause menu saves the settings the player changes. With
+    /// `None` they last until the game is closed.
+    pub settings_file: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
     /// A 1280x720 window, 60 ticks per second, vsync on, at most 400 frames
-    /// per second, FSR upscaling at Quality, the standard FPS controls and
-    /// no level.
+    /// per second, FSR upscaling at Quality, the standard FPS controls, no
+    /// level, and the pause menu with a new player's settings, saved nowhere.
     fn default() -> Self {
         Self {
             title: "FOSSPS".to_owned(),
@@ -125,6 +168,9 @@ impl Default for Config {
             upscaling: Upscaling::default(),
             actions: ActionMap::default_fps(),
             level: None,
+            pause_menu: true,
+            settings: Settings::default(),
+            settings_file: None,
         }
     }
 }
@@ -188,7 +234,13 @@ impl std::error::Error for AppError {
 /// Fails if the window system cannot be reached, the window cannot be created,
 /// or no graphics card here can draw with Vulkan 1.3. The error's message says
 /// what to do about it.
-pub fn run(config: Config, game: impl Game) -> Result<(), AppError> {
+pub fn run(mut config: Config, game: impl Game) -> Result<(), AppError> {
+    let game = if config.pause_menu {
+        let file = config.settings_file.take();
+        PauseMenu::over(game, &config.actions, config.settings, file)
+    } else {
+        PauseMenu::off(game, config.settings)
+    };
     start(config, game, false)
 }
 
@@ -206,10 +258,22 @@ fn start(config: Config, game: impl Game, editing: bool) -> Result<(), AppError>
         log::warn!("{gap}");
     }
     let event_loop = EventLoop::new().map_err(AppError::EventLoop)?;
+    // The player's settings hold from the first tick, menu or no menu.
+    let look = config.actions.action("look").ok();
+    let mut input = Input::new(config.actions.clone());
+    if let Some(look) = look {
+        input.set_sensitivity(look, config.settings.look());
+    }
+    let mut sound = SoundOutput::new(LazySpeakers::default());
+    sound.set_volume(config.settings.gain());
     let mut app = App {
         clock: TickClock::new(config.tick_rate),
         pacer: FramePacer::new(config.max_fps, Instant::now()),
-        input: Input::new(config.actions.clone()),
+        input,
+        look,
+        pointer: None,
+        pointer_down: false,
+        pointer_tapped: false,
         gamepads: Gamepads::new(),
         config,
         game,
@@ -224,7 +288,7 @@ fn start(config: Config, game: impl Game, editing: bool) -> Result<(), AppError>
         last_frame: Instant::now(),
         last_view: None,
         ui: fossps_ui::DrawBuffer::default(),
-        sound: SoundOutput::new(LazySpeakers::default()),
+        sound,
         #[cfg(feature = "editor")]
         panels: None,
         error: None,
@@ -240,6 +304,17 @@ struct App<G> {
     /// Whether this is the editor: see [`run_editor`].
     editing: bool,
     input: Input,
+    /// The action the player's turning speed is applied to, if the game
+    /// has one by that name.
+    look: Option<fossps_input::ActionId>,
+    /// Where the mouse pointer is over the window, in pixels from its
+    /// top-left corner.
+    pointer: Option<[f32; 2]>,
+    /// Whether the main mouse button is held.
+    pointer_down: bool,
+    /// Whether it was pressed since the last frame, so that a click that
+    /// came and went during one slow frame is still seen.
+    pointer_tapped: bool,
     clock: TickClock,
     /// Holds frames back to the frame rate limit.
     pacer: FramePacer,
@@ -475,8 +550,16 @@ impl<G: Game> App<G> {
             let size = window.inner_size();
             [size.width, size.height]
         });
-        let mut frame =
-            Frame::new(self.clock.alpha()).for_window(screen, std::mem::take(&mut self.ui));
+        // A captured mouse turns the view; it points at nothing.
+        let tapped = std::mem::take(&mut self.pointer_tapped);
+        let (pointer, pointer_down) = if self.captured {
+            (None, false)
+        } else {
+            (self.pointer, self.pointer_down || tapped)
+        };
+        let mut frame = Frame::new(self.clock.alpha())
+            .for_window(screen, std::mem::take(&mut self.ui))
+            .with_pointer(elapsed.as_secs_f32(), pointer, pointer_down);
         #[cfg(feature = "editor")]
         if let (Some(panels), Some(window)) = (&mut self.panels, &self.window) {
             let input = panels.state.take_egui_input(window);
@@ -517,6 +600,12 @@ impl<G: Game> App<G> {
         // The ears are where the eyes are.
         if let Some(view) = frame.view() {
             self.sound.listen_from(view.position, view.yaw);
+        }
+        if let Some(settings) = frame.take_settings() {
+            self.sound.set_volume(settings.gain());
+            if let Some(look) = self.look {
+                self.input.set_sensitivity(look, settings.look());
+            }
         }
         self.sound.handle(frame.take_sounds());
         if let Some(set) = frame.action_set() {
@@ -626,6 +715,8 @@ impl<G: Game> ApplicationHandler for App<G> {
                 } else {
                     self.release_mouse();
                     self.input.release_all();
+                    self.pointer_down = false;
+                    self.pointer_tapped = false;
                     self.gamepads.stop_rumble();
                 }
             }
@@ -657,8 +748,22 @@ impl<G: Game> ApplicationHandler for App<G> {
                     self.input.press(key);
                 }
             }
+            // In pixels, as the window's size is, so a menu can tell what
+            // the pointer is over.
+            #[allow(clippy::cast_possible_truncation)]
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = Some([position.x as f32, position.y as f32]);
+            }
+            WindowEvent::CursorLeft { .. } => self.pointer = None,
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                if button == winit::event::MouseButton::Left {
+                    // Letting go always counts, so a menu never sees the
+                    // button stuck down.
+                    self.pointer_down =
+                        pressed && !self.captured && self.mouse_mode() == MouseMode::Pointer;
+                    self.pointer_tapped |= self.pointer_down;
+                }
                 // In the editor the right button is held to look around, as
                 // in the viewports of other editors, and the cursor comes
                 // back when it is let go.

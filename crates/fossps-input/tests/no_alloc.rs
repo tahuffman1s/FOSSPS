@@ -5,7 +5,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fossps_input::{ActionMap, GamepadButton, Input, Key, MouseMode, MouseWheel, Stick, StickAxis};
+use fossps_input::{ActionMap, GamepadButton, Input, Key, MouseWheel, Stick, StickAxis};
 
 /// Counts every allocation made by the process.
 struct Counting;
@@ -33,10 +33,9 @@ static GLOBAL: Counting = Counting;
 // thread would add its own allocations to the count.
 #[test]
 fn feeding_events_and_ticking_never_allocates() {
-    let mut map = ActionMap::default_fps();
+    let map = ActionMap::default_fps();
     let fire = map.action("fire").unwrap();
-    let menu = map.add_set("menu", MouseMode::Pointer).unwrap();
-    map.button("back", ["Escape", "GamepadEast"]).unwrap();
+    let menu = map.set("menu").unwrap();
     let mut input = Input::new(map);
     let mut shots = 0_u32;
 

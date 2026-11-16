@@ -21,8 +21,15 @@ pub const FILE_VARIABLE: &str = "FOSSPS_BINDINGS";
 /// `None` when the computer does not say where settings go (no home folder).
 #[must_use]
 pub fn file() -> Option<PathBuf> {
+    player_file(FILE_VARIABLE, "bindings.toml")
+}
+
+/// Where a file of the player's own is kept: the file the environment
+/// variable `variable` names, or else `name` in the `fossps` folder of the
+/// place this system keeps settings.
+pub(crate) fn player_file(variable: &str, name: &str) -> Option<PathBuf> {
     let set = |name: &str| env::var_os(name).filter(|value| !value.is_empty());
-    if let Some(path) = set(FILE_VARIABLE) {
+    if let Some(path) = set(variable) {
         return Some(PathBuf::from(path));
     }
     let settings = if cfg!(target_os = "windows") {
@@ -36,7 +43,7 @@ pub fn file() -> Option<PathBuf> {
             _ => PathBuf::from(set("HOME")?).join(".config"),
         }
     };
-    Some(settings.join("fossps").join("bindings.toml"))
+    Some(settings.join("fossps").join(name))
 }
 
 /// Gives `actions` the bindings in the file at `path`, and returns what the
@@ -82,6 +89,13 @@ pub fn load(path: &Path, actions: &mut ActionMap) -> Vec<String> {
 ///
 /// Fails if the folder cannot be made or the file cannot be written.
 pub fn save(path: &Path, actions: &ActionMap, defaults: &ActionMap) -> io::Result<()> {
+    write_whole(path, &actions.write_bindings(defaults))
+}
+
+/// Writes `text` to the file at `path`, making its folder if needed. The
+/// file is written beside itself and then moved into place, so there is
+/// never half a file where the old one was.
+pub(crate) fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     if let Some(folder) = path
         .parent()
         .filter(|folder| !folder.as_os_str().is_empty())
@@ -91,7 +105,7 @@ pub fn save(path: &Path, actions: &ActionMap, defaults: &ActionMap) -> io::Resul
     let mut beside = path.as_os_str().to_owned();
     beside.push(".part");
     let beside = PathBuf::from(beside);
-    fs::write(&beside, actions.write_bindings(defaults))
+    fs::write(&beside, text)
         .and_then(|()| fs::rename(&beside, path))
         .inspect_err(|_| {
             let _ = fs::remove_file(&beside);

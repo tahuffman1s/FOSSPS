@@ -904,6 +904,15 @@ fn controls() -> Result<(), String> {
 fn player_config() -> Config {
     let mut config = Config::default();
     cli::use_player_controls(&mut config.actions);
+    // What the pause menu's settings screen saved the last time.
+    config.settings_file = fossps::settings::file();
+    if let Some(file) = &config.settings_file {
+        let (settings, problems) = fossps::settings::load(file);
+        config.settings = settings;
+        for problem in problems {
+            log::warn!("{problem}");
+        }
+    }
     config
 }
 
@@ -911,12 +920,11 @@ fn player_config() -> Config {
 fn demo() -> Result<(), String> {
     log::info!(
         "This is the input demo. Click the window to capture the mouse, then use \
-         keyboard, mouse or a gamepad. Escape or Start pauses: the cursor comes back \
-         and the game hears nothing until you press it again."
+         keyboard, mouse or a gamepad. Escape or Start opens the menu every game has: \
+         the cursor comes back and the game hears nothing until you close it."
     );
-    let mut config = player_config();
+    let config = player_config();
     let demo = InputDemo::new(config.actions.clone());
-    config.actions.clone_from(demo.actions());
     play(config, demo)
 }
 

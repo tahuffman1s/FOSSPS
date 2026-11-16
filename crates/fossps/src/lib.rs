@@ -45,11 +45,14 @@ pub mod online;
 mod pace;
 #[cfg(feature = "cli")]
 pub mod package;
+#[cfg(feature = "window")]
+mod pause;
 pub mod player;
 pub mod press;
 pub mod scaffold;
 mod script_game;
 pub mod server;
+pub mod settings;
 mod sound_output;
 pub mod sounds;
 #[cfg(feature = "window")]
