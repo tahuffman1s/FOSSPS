@@ -34,7 +34,7 @@ cargo build
 cargo test
 cargo run -- new my-game      # creates a game in the folder my-game
 cargo run -- run my-game      # plays it (the first "run" is cargo's)
-cargo run -- check my-game    # tests its script without opening a window
+cargo run -- check my-game    # tests its script without opening a window, pressing every action
 cargo run -- serve my-game    # runs it as a server, with no window (Ctrl-C stops it)
 cargo run -- join 192.168.1.20  # joins the server at that address (none: this computer)
 cargo run -- demo             # opens the input demo window

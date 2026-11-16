@@ -17,11 +17,13 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use fossps::Upscaling;
 use fossps::bench::Bench;
 use fossps::cli::{self, quoted};
+use fossps::input::ActionKind;
 use fossps::level::{self, LEVEL_FILE};
 use fossps::map::MAP_FILE;
 use fossps::online::{DEFAULT_PORT, FoundServer, JoinedGame, LocalGame, SEARCH_TIME, find_servers};
 use fossps::package;
 use fossps::player;
+use fossps::press::{self, Pressed};
 use fossps::scaffold::{self, NewGame};
 use fossps::script::ENTRY_SCRIPT;
 use fossps::script::mode::Phase;
@@ -101,8 +103,9 @@ enum Command {
     },
     /// Test a game's script and level without opening a window
     #[command(
-        after_help = "Loads main.luau, starts the game and runs one second of it with nothing \
-                      pressed.\nAnything the script prints is shown first. Prints any script error and fails if there was one, so it can be \
+        after_help = "Loads main.luau, starts the game, runs one second of it and a pretend \
+                      match,\nand presses every action in turn so code that reads input is \
+                      run too.\nAnything the script prints is shown first. Prints any script error and fails if there was one, so it can be \
                       used by scripts,\nautomated checks and AI assistants. The game's level, \
                       level.glb, is loaded too,\nand a level that cannot be loaded fails the \
                       check with what to change."
@@ -408,8 +411,8 @@ fn open(folder: &Path, config: &Config, verb: &str) -> Result<ScriptGame, String
 }
 
 /// `fossps check`: runs a second of the game and a pretend match with no
-/// window and nothing pressed, and loads the game's level. Fails if the
-/// script has a mistake or the level cannot be loaded.
+/// window, presses every action in turn, and loads the game's level. Fails
+/// if the script has a mistake or the level cannot be loaded.
 fn check(folder: &Path) -> Result<(), String> {
     /// One second of game time.
     const TICKS: u32 = 60;
@@ -424,6 +427,7 @@ fn check(folder: &Path) -> Result<(), String> {
     let mut input = fossps::input::Input::new(config.actions.clone());
     let step = 1.0 / TICKS as f32;
     let mut played = false;
+    let mut pressed = Pressed::default();
     // A script that fails to load never runs, so there is nothing to tick.
     if game.host().last_error().is_none() {
         for _ in 0..TICKS {
@@ -438,6 +442,26 @@ fn check(folder: &Path) -> Result<(), String> {
             waited += 1;
         }
         played = game.host().mode().phase() == Phase::Playing;
+        // Every action in turn, so code that only runs on input runs too:
+        // while the round is on, when a press is most likely to do something.
+        let mut seen = game.host().mistakes_logged();
+        pressed = press::every_action(&mut input, |action, frame| {
+            game.tick(frame, step);
+            // A mistake that was already being made before this tick is
+            // not this action's doing.
+            if game.host().mistakes_logged() > seen {
+                seen = game.host().mistakes_logged();
+                // The error itself was printed just above this.
+                eprintln!(
+                    "That happened while the check was {} \"{}\".",
+                    match config.actions.kind(action) {
+                        Some(ActionKind::Button) | None => "pressing",
+                        Some(ActionKind::Axis1D | ActionKind::Axis2D) => "pushing",
+                    },
+                    config.actions.name(action)
+                );
+            }
+        });
         game.host_mut().player_killed(Some(first), second);
         game.host_mut().player_killed(None, first);
         game.tick(input.tick(), step);
@@ -489,9 +513,20 @@ fn check(folder: &Path) -> Result<(), String> {
         );
     }
     println!(
-        "Nothing was pressed, so code that only runs on input was not run. \
-         Read that code carefully, and try it by playing with `fossps run`."
+        "Each of the {} actions was also pressed, held and let go, one at a time, with \
+         every key, button and stick it is bound to: sticks were pushed all the way round \
+         and the mouse was moved. Code that only runs on input was run, with no errors. \
+         Two actions held together were not tried, and neither was code that needs more \
+         than a press, such as a shot that has to hit someone: read that code carefully, \
+         and try it by playing with `fossps run`.",
+        pressed.actions
     );
+    if !pressed.unbound.is_empty() {
+        println!(
+            "Not pressed, because nothing is bound to them: {}.",
+            pressed.unbound.join(", ")
+        );
+    }
     if let Some(level) = level {
         println!(
             "{LEVEL_FILE} is fine: it loaded with {}. Nothing was drawn, so look at it \
