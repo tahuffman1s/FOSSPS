@@ -3,15 +3,16 @@
 //!
 //! The level is a small arena to block a first map out from: a chequered
 //! floor 32 m on a side with a wall around it, a red end and a blue end,
-//! cover of three heights and two platforms with ramps. Its middle, where
-//! players start until levels have spawn points (#171), is left clear.
+//! cover of three heights and two platforms with ramps. Players start at
+//! one of three spawn points at each end, looking at the other end. Its
+//! middle is left clear.
 //!
 //! To change the level, change it here, then write the file again:
 //! `FOSSPS_WRITE_STARTER_LEVEL=1 cargo test -p fossps starter_level`.
 
 use std::fmt::Write as _;
 
-use fossps_assets::{Instance, Material, Mesh, MeshPart, Scene, Transform};
+use fossps_assets::{Instance, Marker, Material, Mesh, MeshPart, Scene, Transform};
 
 use crate::standin::{block, face, tile};
 
@@ -25,6 +26,11 @@ const HALF: f32 = 16.0;
 const WALL_HEIGHT: f32 = 3.0;
 /// How thick that wall is, in metres.
 const WALL_THICK: f32 = 0.5;
+/// How far from the middle each end's spawn points are, in metres: between
+/// that end's low wall and the wall around the level.
+const SPAWN_OUT: f32 = 14.0;
+/// How far apart the spawn points at one end are, in metres.
+const SPAWN_APART: f32 = 6.0;
 
 const LIGHT_FLOOR: [f32; 4] = [0.46, 0.47, 0.49, 1.0];
 const DARK_FLOOR: [f32; 4] = [0.34, 0.35, 0.37, 1.0];
@@ -226,13 +232,34 @@ pub(crate) fn scene() -> Scene {
             extras: None,
         })
         .collect();
+
+    // Where players start: three at each end, behind that end's low wall
+    // and looking over it at the other end. Named as Blender names copies.
+    for (number, x) in [0.0, -SPAWN_APART, SPAWN_APART].into_iter().enumerate() {
+        let copy = if number == 0 {
+            String::new()
+        } else {
+            format!(".{number:03}")
+        };
+        for (team, [x, z], turned) in [
+            ("red", [x, -SPAWN_OUT], true),
+            // Adding zero keeps the middle one from being written as "-0".
+            ("blue", [-x + 0.0, SPAWN_OUT], false),
+        ] {
+            scene.markers.push(Marker {
+                name: Some(format!("spawn.{team}{copy}")),
+                transform: stand([x, z], [1.0; 3], turned),
+                extras: None,
+            });
+        }
+    }
     scene
 }
 
 /// Writes `scene` as a glTF Binary file: its shapes with their surface
 /// directions, each shape's one colour, and where the shapes stand, by name.
-/// That is all the starter level has; textures, lights and markers are not
-/// written.
+/// Its markers follow, by name, with where they stand. That is all the
+/// starter level has; textures and lights are not written.
 pub(crate) fn glb(scene: &Scene) -> Vec<u8> {
     /// What glTF calls 32-bit floats and 32-bit whole numbers.
     const FLOAT: u32 = 5126;
@@ -323,18 +350,22 @@ pub(crate) fn glb(scene: &Scene) -> Vec<u8> {
             )
         })
         .collect();
-    let nodes: Vec<String> = scene
-        .instances
-        .iter()
-        .map(|instance| {
-            format!(
-                "{{\"name\":\"{}\",\"mesh\":{},\"matrix\":{}}}",
-                instance.name.as_deref().unwrap_or_default(),
-                instance.mesh,
-                list(instance.transform.as_flattened())
-            )
-        })
-        .collect();
+    let shapes = scene.instances.iter().map(|instance| {
+        format!(
+            "{{\"name\":\"{}\",\"mesh\":{},\"matrix\":{}}}",
+            instance.name.as_deref().unwrap_or_default(),
+            instance.mesh,
+            list(instance.transform.as_flattened())
+        )
+    });
+    let markers = scene.markers.iter().map(|marker| {
+        format!(
+            "{{\"name\":\"{}\",\"matrix\":{}}}",
+            marker.name.as_deref().unwrap_or_default(),
+            list(marker.transform.as_flattened())
+        )
+    });
+    let nodes: Vec<String> = shapes.chain(markers).collect();
     let every_node: Vec<String> = (0..nodes.len()).map(|node| node.to_string()).collect();
 
     let mut json = format!(
@@ -453,22 +484,63 @@ mod tests {
             let name = instance.name.as_deref().unwrap();
             let (least, most) = reach(&scene, instance);
             if name.starts_with("Floor") {
-                // Where the physics has the ground until levels are solid (#64).
+                // Height zero, where a game with no level has its floor.
                 assert_eq!((least[1], most[1]), (0.0, 0.0));
                 assert_eq!((least[0], most[2]), (-HALF, HALF));
                 continue;
             }
             assert_eq!(least[1], 0.0, "{name} stands on the floor");
             assert!(most[1] <= WALL_HEIGHT, "{name}");
-            // Players start in the middle, facing north.
+            // The middle is open ground, where the two ends meet.
             let clear = 3.0;
             let over_middle =
                 least[0] < clear && most[0] > -clear && least[2] < clear && most[2] > -clear;
-            assert!(!over_middle, "{name} is where players start");
+            assert!(!over_middle, "{name} is in the middle");
             let inside = HALF + WALL_THICK;
             assert!(least[0] >= -inside && most[0] <= inside, "{name}");
             assert!(least[2] >= -inside && most[2] <= inside, "{name}");
         }
+    }
+
+    #[test]
+    fn players_start_at_either_end_with_room_to_stand_and_a_floor_to_land_on() {
+        let (built, scene) = (scene(), loaded());
+        assert_eq!(scene.markers, built.markers);
+        let names: Vec<_> = scene
+            .markers
+            .iter()
+            .map(|marker| marker.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "spawn.red",
+                "spawn.blue",
+                "spawn.red.001",
+                "spawn.blue.001",
+                "spawn.red.002",
+                "spawn.blue.002"
+            ]
+        );
+        // Nothing stands within a metre of a spawn point, the floor aside.
+        for marker in &scene.markers {
+            let [x, y, z, _] = marker.transform[3];
+            assert_eq!(y, 0.0);
+            assert_eq!(z.abs(), SPAWN_OUT);
+            for instance in &scene.instances {
+                let name = instance.name.as_deref().unwrap();
+                let (least, most) = reach(&scene, instance);
+                let near = least[0] < x + 1.0
+                    && most[0] > x - 1.0
+                    && least[2] < z + 1.0
+                    && most[2] > z - 1.0;
+                assert!(name.starts_with("Floor") || !near, "{name} is at {x}, {z}");
+            }
+        }
+        // And a player started at each one lands.
+        let walked = crate::online::try_walking(&scene);
+        assert_eq!(walked.spawn_points, 6);
+        assert_eq!(walked.problems, Vec::<String>::new());
     }
 
     #[test]

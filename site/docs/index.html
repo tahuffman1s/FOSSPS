@@ -38,7 +38,7 @@
   <table>
     <thead><tr><th scope="col">You can</th><th scope="col">Not yet</th></tr></thead>
     <tbody>
-      <tr><td>Make a game with one command and play it</td><td>Solid levels: your level is drawn, but players walk through its walls</td></tr>
+      <tr><td>Make a game with one command and walk around its level: solid walls, ramps and spawn points</td><td>Your level on a joined player's screen: they are shown a test floor, and stopped by walls they cannot see</td></tr>
       <tr><td>Change the script and see the running game update</td><td>Scripts in more than one file</td></tr>
       <tr><td>Write a game mode: teams, scores, rounds, your own rules</td><td>Weapons and kills in a running match, and a scoreboard on screen</td></tr>
       <tr><td>Serve a game and have others on your network join it and walk around</td><td>Seeing the other players</td></tr>
@@ -64,7 +64,7 @@
       <tr><td><code>fossps run</code></td><td>Plays the game in its level, the <code>level.glb</code> in the game's folder (a glTF Binary file, which Blender exports). It loads the script again every time you save it.</td></tr>
       <tr><td><code>fossps run --open</code></td><td>Plays the game and lets others on your network join it, with no separate server.</td></tr>
       <tr><td><code>fossps edit</code></td><td>Opens the game's level to fly around, over a grid with lines a metre apart. Hold the right mouse button to look; <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly, or use a gamepad's sticks. A list on the left names everything in the level: click a name to see where it is and how big it is, double-click to fly to it. Nothing can be changed there yet.</td></tr>
-      <tr><td><code>fossps check</code></td><td>Tests the game without opening a window: runs a second of it and a pretend match, loads its level, and fails if the script has a mistake or the level cannot be read.</td></tr>
+      <tr><td><code>fossps check</code></td><td>Tests the game without opening a window: runs a second of it and a pretend match, loads its level and starts a player at each of its spawn points, and fails if the script has a mistake or the level cannot be read.</td></tr>
       <tr><td><code>fossps serve</code></td><td>Runs the game as a server, with no window, until <kbd>Ctrl</kbd>+<kbd>C</kbd>. <code>--port</code> picks another port than UDP 24680.</td></tr>
       <tr><td><code>fossps join</code></td><td>Finds a game on your network and joins it. Give an address to join one elsewhere: <code>fossps join 192.168.1.20</code>.</td></tr>
       <tr><td><code>fossps servers</code></td><td>Lists the games being served on your network.</td></tr>

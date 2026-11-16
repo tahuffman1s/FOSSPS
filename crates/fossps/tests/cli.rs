@@ -374,6 +374,36 @@ fn check_passes_a_new_game_without_a_window() {
         "{}",
         stdout(&output)
     );
+    // And a player was stood at each place the level has to start from.
+    assert!(
+        stdout(&output).contains(
+            "Players can walk it: one was started at each of its 6 spawn points and landed"
+        ),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn check_warns_about_a_level_with_nothing_to_stand_on_and_still_passes() {
+    let folder = scratch("check-empty-level");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    // A level that loads and has nothing in it.
+    fs::write(
+        folder.join("game/level.glb"),
+        r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[]}]}"#,
+    )
+    .unwrap();
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(
+        said.contains("Warning: level.glb has no shapes in it, so there is nothing to stand on"),
+        "{said}"
+    );
+    assert!(!said.contains("Players can walk it"), "{said}");
 }
 
 /// A new game whose level was replaced by something that is not one.
@@ -579,7 +609,11 @@ fn a_player_joins_a_running_serve_and_walks() {
     // The server may still be starting: each try asks for five seconds.
     let mut tries = 0;
     let mut joined = loop {
-        let mut joined = JoinedGame::connect(&address, &actions, 60).unwrap();
+        // The player has the game too, so walks the level the server has.
+        let level = fossps::level::load(&folder).unwrap().unwrap();
+        let mut joined = JoinedGame::connect(&address, &actions, 60)
+            .unwrap()
+            .with_level(&level);
         match joined.wait_until_joined(|| {}) {
             Ok(_) => break joined,
             Err(error) if tries == 5 => panic!("{error}"),
@@ -595,8 +629,12 @@ fn a_player_joins_a_running_serve_and_walks() {
         std::thread::sleep(step);
     }
 
+    // Players start 14 m from the middle at either end, looking at the other
+    // end, and the one in the middle of an end has a low wall 3 m ahead.
     let here = joined.player().position;
-    assert!(here[2] < -2.0, "{here:?}");
+    let out = here[2].abs();
+    assert!(out > 5.0 && out < 12.5, "{here:?}");
+    assert!(here[1].abs() < 0.05, "on the floor: {here:?}");
     assert!(joined.closed().is_none());
 }
 
