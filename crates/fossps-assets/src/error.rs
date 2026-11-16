@@ -84,6 +84,20 @@ pub enum AssetError {
         /// The level or model file.
         file: String,
     },
+    /// A skeleton has more bones moving points than one skin may have.
+    TooManyJoints {
+        /// The level or model file.
+        file: String,
+        /// The skeleton, as messages call it: its name in quotes, or its number.
+        skin: String,
+        /// How many bones it has that move points.
+        joints: usize,
+    },
+    /// The file's animations would take more memory than one file may.
+    TooMuchAnimation {
+        /// The level or model file.
+        file: String,
+    },
 }
 
 impl AssetError {
@@ -198,6 +212,21 @@ impl fmt::Display for AssetError {
                 "{file} has no scene in it, so there is nothing to show. \
                  In your 3D tool, make sure the objects are in the scene before exporting \
                  (in Blender, untick Include > Limit to > Selected Objects)."
+            ),
+            Self::TooManyJoints { file, skin, joints } => write!(
+                f,
+                "The skeleton {skin} in {file} has {joints} bones that move points, and FOSSPS \
+                 reads at most {} in one skeleton. In Blender, untick Deform on bones that only \
+                 steer other bones (controls and IK targets) and tick Data > Armature > \
+                 Export Deformation Bones Only in the glTF export options.",
+                crate::scene::MAX_JOINTS
+            ),
+            Self::TooMuchAnimation { file } => write!(
+                f,
+                "{file} holds more animation than FOSSPS reads from one file ({} MiB once unpacked). \
+                 Export fewer animations in each file, or bake them with fewer keys \
+                 (in Blender's glTF export options, raise Animation > Sampling Rate).",
+                crate::rig::ANIMATION_BYTES / (1024 * 1024)
             ),
         }
     }

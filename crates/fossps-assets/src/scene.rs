@@ -26,6 +26,13 @@ pub struct Scene {
     pub lights: Vec<Light>,
     /// Named places with no shape, such as spawn points.
     pub markers: Vec<Marker>,
+    /// The file's objects as a tree, for skins and animations to move.
+    /// Empty when the file has neither, as a level usually has not.
+    pub nodes: Vec<Node>,
+    /// The skeletons of rigged meshes, such as characters and weapons.
+    pub skins: Vec<Skin>,
+    /// The animation clips, in the file's order.
+    pub animations: Vec<Animation>,
     /// Things in the file that were skipped or changed, worded for its author.
     pub warnings: Vec<String>,
 }
@@ -43,6 +50,7 @@ pub struct Mesh {
 ///
 /// Each list has one entry per corner point; `positions` and `normals` are
 /// always filled and the optional lists, when present, are the same length.
+/// `joints` and `weights` are present together or not at all.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeshPart {
     /// Where each corner point is, in metres.
@@ -60,6 +68,12 @@ pub struct MeshPart {
     pub uv1: Option<Vec<[f32; 2]>>,
     /// A colour painted on each point (red, green, blue, alpha; linear).
     pub colors: Option<Vec<[f32; 4]>>,
+    /// The four joints of a [`Skin`] that pull each point, strongest first,
+    /// as positions in [`Skin::joints`]. Present on rigged meshes.
+    pub joints: Option<Vec<[u16; 4]>>,
+    /// How strongly each of those joints pulls. The four add up to 1, and a
+    /// joint that does not pull has weight 0 and is listed as joint 0.
+    pub weights: Option<Vec<[f32; 4]>>,
     /// The triangles: every three numbers are three points, listed
     /// anticlockwise when seen from the front.
     pub indices: Vec<u32>,
@@ -93,6 +107,9 @@ pub struct Bounds {
 }
 
 /// One placement of a mesh in the scene.
+///
+/// In a file with skins or animations, the [`Node`] whose `instance` is this
+/// one says what moves it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
     /// Which of the scene's meshes is placed here.
@@ -117,6 +134,166 @@ pub struct Marker {
     pub transform: Transform,
     /// The custom properties set in the 3D tool, as JSON text.
     pub extras: Option<String>,
+}
+
+/// The most joints one [`Skin`] may have.
+///
+/// A joint's number then fits in a byte and a skin's matrices in one small,
+/// fixed-size block on the graphics card.
+pub const MAX_JOINTS: usize = 256;
+
+/// One object in the file's tree, kept so skins and animations can move it.
+///
+/// Parents come before their children in [`Scene::nodes`], so one pass from
+/// the front works out where everything stands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    /// The name given in the 3D tool. For a joint, this is the bone's name.
+    pub name: Option<String>,
+    /// The node this one hangs from, which is earlier in the list, or `None`
+    /// at the top of the tree.
+    pub parent: Option<u32>,
+    /// Where it sits relative to its parent when nothing is animated.
+    pub rest: Pose,
+    /// The [`Instance`] this node places, if it has a mesh.
+    pub instance: Option<u32>,
+    /// The [`Skin`] that bends that instance. When set, the instance's points
+    /// are placed by the skin's joints alone and its own `transform` is not used.
+    pub skin: Option<u32>,
+}
+
+/// Where a node sits relative to its parent: scaled, then turned, then moved.
+///
+/// These are the three things an animation changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pose {
+    /// How far it is moved, in metres.
+    pub translation: [f32; 3],
+    /// How it is turned: a unit quaternion (x, y, z, w).
+    pub rotation: [f32; 4],
+    /// How much it is stretched along each axis.
+    pub scale: [f32; 3],
+}
+
+impl Default for Pose {
+    /// Not moved, turned or stretched.
+    fn default() -> Self {
+        Self {
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }
+    }
+}
+
+impl Pose {
+    /// The pose as a matrix.
+    ///
+    /// Only adds and multiplies, so every computer gets the same answer.
+    #[must_use]
+    pub fn transform(&self) -> Transform {
+        let [x, y, z, w] = self.rotation;
+        let [sx, sy, sz] = self.scale;
+        let [tx, ty, tz] = self.translation;
+        [
+            [
+                (1.0 - 2.0 * (y * y + z * z)) * sx,
+                2.0 * (x * y + z * w) * sx,
+                2.0 * (x * z - y * w) * sx,
+                0.0,
+            ],
+            [
+                2.0 * (x * y - z * w) * sy,
+                (1.0 - 2.0 * (x * x + z * z)) * sy,
+                2.0 * (y * z + x * w) * sy,
+                0.0,
+            ],
+            [
+                2.0 * (x * z + y * w) * sz,
+                2.0 * (y * z - x * w) * sz,
+                (1.0 - 2.0 * (x * x + y * y)) * sz,
+                0.0,
+            ],
+            [tx, ty, tz, 1.0],
+        ]
+    }
+}
+
+/// The skeleton of a rigged mesh.
+///
+/// A point of the mesh follows up to four joints. Where joint `j` puts a
+/// point is the joint node's place in the scene, times
+/// `joints[j].inverse_bind`, times the point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Skin {
+    /// The name given in the 3D tool (in Blender, the armature's).
+    pub name: Option<String>,
+    /// The joints, in the order [`MeshPart::joints`] numbers them.
+    /// Between 1 and [`MAX_JOINTS`] of them.
+    pub joints: Vec<Joint>,
+}
+
+/// One joint (bone) of a [`Skin`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Joint {
+    /// Which of the scene's nodes is this joint.
+    pub node: u32,
+    /// Takes a point of the mesh to where it sits relative to this joint
+    /// in the pose the mesh was rigged in.
+    pub inverse_bind: Transform,
+}
+
+/// One animation clip, such as a walk cycle or a reload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animation {
+    /// The name given in the 3D tool (in Blender, the action's).
+    pub name: Option<String>,
+    /// How long it lasts in seconds: the time of its last key.
+    pub duration: f32,
+    /// What it moves. A node's translation, rotation and scale each have at
+    /// most one track; whatever has no track stays at the node's rest pose.
+    pub tracks: Vec<Track>,
+}
+
+/// How one node's translation, rotation or scale changes during an [`Animation`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Track {
+    /// Which of the scene's nodes it moves.
+    pub node: u32,
+    /// How to fill in the time between keys.
+    pub interpolation: Interpolation,
+    /// When each key is, in seconds from the start of the clip. There is at
+    /// least one, none is negative and each is later than the one before.
+    pub times: Vec<f32>,
+    /// The value at each key.
+    pub keys: Keys,
+}
+
+/// The keys of a [`Track`].
+///
+/// There is one value per time, except with [`Interpolation::CubicSpline`],
+/// where there are three: the slope coming in, the value, and the slope going out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Keys {
+    /// Where the node is moved to, as [`Pose::translation`].
+    Translation(Vec<[f32; 3]>),
+    /// How the node is turned, as [`Pose::rotation`]. Values are unit
+    /// quaternions; the slopes of a cubic spline are not.
+    Rotation(Vec<[f32; 4]>),
+    /// How the node is stretched, as [`Pose::scale`].
+    Scale(Vec<[f32; 3]>),
+}
+
+/// How a [`Track`] fills in the time between two keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpolation {
+    /// Holds each key's value until the next key.
+    Step,
+    /// Moves in a straight line from each key to the next.
+    Linear,
+    /// Follows a smooth curve through the keys (glTF's cubic Hermite spline),
+    /// shaped by the slopes stored either side of each value.
+    CubicSpline,
 }
 
 /// A light placed in the file.

@@ -11,7 +11,8 @@ use crate::files::Origin;
 use crate::material::{extras, material, texture};
 use crate::math::{IDENTITY, combine, forward, mirrors, position};
 use crate::mesh::{PartContext, part};
-use crate::scene::{Instance, Light, LightKind, Marker, Material, Mesh, Scene, Transform};
+use crate::rig::{NOT_PLACED, Rig, rest};
+use crate::scene::{Instance, Light, LightKind, Marker, Material, Mesh, Node, Scene, Transform};
 
 /// The glTF extensions a file may need and still be read.
 const READABLE_EXTENSIONS: &[&str] = &[
@@ -111,6 +112,8 @@ impl Scene {
             document.materials().len(),
             document.textures().len(),
             document.images().len(),
+            document.nodes().len(),
+            document.skins().len(),
         ];
         if most.iter().any(|&length| length >= u32::MAX as usize) {
             return Err(AssetError::damaged(
@@ -134,9 +137,25 @@ impl Scene {
 
         let tangents = options.tangents && textures;
         read_meshes(name, &document, &buffers, tangents, &mut scene)?;
-        place_nodes(name, &document, &mut scene)?;
+        let (node_of, skinned) = place_nodes(name, &document, &mut scene)?;
+        let rig = Rig {
+            file: name,
+            buffers: &buffers,
+            node_of: &node_of,
+        };
+        rig.skins(&skinned, document.skins().len(), &mut scene)?;
+        rig.animations(&document, &mut scene)?;
 
-        if document.animations().len() > 0 {
+        // The skeletons and clips are read for the engine to use; until it
+        // does (#256 plays clips, #257 draws bent meshes), a model's author
+        // is told why it stands still.
+        if !scene.skins.is_empty() {
+            scene.warnings.push(
+                "The file has skinned (rigged) meshes, which are not animated yet; they are shown in their rest pose."
+                    .to_owned(),
+            );
+        }
+        if !scene.animations.is_empty() {
             scene.warnings.push(
                 "The file has animations, which are not played yet; everything is shown in its rest pose."
                     .to_owned(),
@@ -413,7 +432,16 @@ fn read_meshes(
 }
 
 /// Walks the scene's objects and records where each mesh, light and marker stands.
-fn place_nodes(file: &str, document: &gltf::Document, scene: &mut Scene) -> Result<(), AssetError> {
+///
+/// In a file with skins or animations the objects are also kept as
+/// [`Scene::nodes`]. Gives back where each glTF node went in that list, and
+/// the nodes whose mesh has a skin, for [`Rig`] to finish.
+#[allow(clippy::type_complexity)]
+fn place_nodes<'a>(
+    file: &str,
+    document: &'a gltf::Document,
+    scene: &mut Scene,
+) -> Result<(Vec<u32>, Vec<(u32, gltf::Skin<'a>)>), AssetError> {
     let Some(root) = document
         .default_scene()
         .or_else(|| document.scenes().next())
@@ -424,10 +452,16 @@ fn place_nodes(file: &str, document: &gltf::Document, scene: &mut Scene) -> Resu
     };
     // glTF asks for a tree; a file that reuses an object could otherwise loop for ever.
     let mut visited = vec![false; document.nodes().len()];
-    let mut skinned = false;
-    let mut queue: VecDeque<(gltf::Node<'_>, Transform)> =
-        root.nodes().map(|node| (node, IDENTITY)).collect();
-    while let Some((node, parent)) = queue.pop_front() {
+    // A level has thousands of objects and nothing that moves them, so the
+    // tree is only kept for files that do.
+    let rigged = document.skins().len() > 0 || document.animations().len() > 0;
+    let mut node_of = vec![NOT_PLACED; document.nodes().len()];
+    let mut skinned = Vec::new();
+    // Parents leave the queue before their children, which is the order
+    // `Scene::nodes` promises.
+    let mut queue: VecDeque<(gltf::Node<'_>, Transform, Option<u32>)> =
+        root.nodes().map(|node| (node, IDENTITY, None)).collect();
+    while let Some((node, parent, parent_node)) = queue.pop_front() {
         match visited.get_mut(node.index()) {
             Some(seen) if !*seen => *seen = true,
             _ => {
@@ -446,7 +480,22 @@ fn place_nodes(file: &str, document: &gltf::Document, scene: &mut Scene) -> Resu
         let transform = combine(&parent, &node.transform().matrix());
         let name = node.name().map(str::to_owned);
         let extras = extras(node.extras());
-        skinned |= node.skin().is_some();
+        let kept = if rigged {
+            let index = number(scene.nodes.len());
+            if let Some(slot) = node_of.get_mut(node.index()) {
+                *slot = index;
+            }
+            scene.nodes.push(Node {
+                name: name.clone(),
+                parent: parent_node,
+                rest: rest(file, &node)?,
+                instance: None,
+                skin: None,
+            });
+            Some(index)
+        } else {
+            None
+        };
 
         if let Some(light) = node.light() {
             scene.lights.push(Light {
@@ -473,6 +522,14 @@ fn place_nodes(file: &str, document: &gltf::Document, scene: &mut Scene) -> Resu
             .mesh()
             .and_then(|mesh| u32::try_from(mesh.index()).ok());
         if let Some(mesh) = mesh {
+            if let Some(kept) = kept
+                && let Some(placed) = scene.nodes.last_mut()
+            {
+                placed.instance = Some(number(scene.instances.len()));
+                if let Some(skin) = node.skin() {
+                    skinned.push((kept, skin));
+                }
+            }
             scene.instances.push(Instance {
                 mesh,
                 transform,
@@ -487,13 +544,7 @@ fn place_nodes(file: &str, document: &gltf::Document, scene: &mut Scene) -> Resu
                 extras,
             });
         }
-        queue.extend(node.children().map(|child| (child, transform)));
+        queue.extend(node.children().map(|child| (child, transform, kept)));
     }
-    if skinned {
-        scene.warnings.push(
-            "The file has skinned (rigged) meshes, which are not animated yet; they are shown in their rest pose."
-                .to_owned(),
-        );
-    }
-    Ok(())
+    Ok((node_of, skinned))
 }

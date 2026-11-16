@@ -44,6 +44,21 @@ fn main() -> ExitCode {
             image.height
         );
     }
+    for skin in &scene.skins {
+        println!(
+            "  skeleton {}: {} bones",
+            skin.name.as_deref().unwrap_or("(unnamed)"),
+            skin.joints.len()
+        );
+    }
+    for animation in &scene.animations {
+        println!(
+            "  animation {}: {:.2} s, {} tracks",
+            animation.name.as_deref().unwrap_or("(unnamed)"),
+            animation.duration,
+            animation.tracks.len()
+        );
+    }
     for warning in &scene.warnings {
         println!("warning: {warning}");
     }

@@ -9,6 +9,8 @@ use base64::Engine as _;
 
 use crate::{AssetError, LightKind, LoadOptions, Scene};
 
+mod rig;
+
 /// A glTF file under construction: its data block and the lists describing it.
 #[derive(Default)]
 struct Builder {
@@ -216,6 +218,9 @@ fn a_triangle_reads_the_same_from_gltf_and_glb() {
     assert_eq!(scene.instances.len(), 1);
     assert_eq!(scene.instances[0].mesh, 0);
     assert!(!scene.instances[0].mirrored);
+    // Nothing moves, so no tree of objects is kept.
+    assert!(scene.nodes.is_empty() && scene.skins.is_empty() && scene.animations.is_empty());
+    assert_eq!((&part.joints, &part.weights), (&None, &None));
 }
 
 #[test]

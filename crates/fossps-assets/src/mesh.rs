@@ -60,6 +60,14 @@ pub(crate) fn part(
             Semantic::Tangents => ("tangents", &[Dimensions::Vec4], &float),
             Semantic::TexCoords(0 | 1) => ("UV map", &[Dimensions::Vec2], &unit),
             Semantic::Colors(0) => ("colours", &[Dimensions::Vec3, Dimensions::Vec4], &unit),
+            Semantic::Joints(set) if set < INFLUENCE_SETS => (
+                "bone numbers",
+                &[Dimensions::Vec4],
+                &[DataType::U8, DataType::U16],
+            ),
+            Semantic::Weights(set) if set < INFLUENCE_SETS => {
+                ("bone weights", &[Dimensions::Vec4], &unit)
+            }
             // Not read, so not checked.
             _ => continue,
         };
@@ -120,6 +128,26 @@ pub(crate) fn part(
         .read_colors(0)
         .map(|colors| colors.into_rgba_f32().collect());
 
+    let mut sets: Vec<Pulls> = Vec::new();
+    for set in 0..INFLUENCE_SETS {
+        match (reader.read_joints(set), reader.read_weights(set)) {
+            (Some(joints), Some(weights)) => {
+                sets.push((joints.into_u16().collect(), weights.into_f32().collect()))
+            }
+            (None, None) => break,
+            _ => {
+                return Err(AssetError::damaged(
+                    file,
+                    format!(
+                        "mesh \"{mesh}\" has bone numbers without bone weights, or weights without numbers"
+                    ),
+                ));
+            }
+        }
+    }
+    let more = primitive.get(&Semantic::Joints(INFLUENCE_SETS)).is_some();
+    let (mut joints, mut weights) = strongest_four(context, &sets, more, warnings)?.unzip();
+
     let normals = if let Some(normals) = normals.take() {
         normals
     } else {
@@ -130,6 +158,8 @@ pub(crate) fn part(
         uv0 = uv0.map(|list| unweld(&list, &indices));
         uv1 = uv1.map(|list| unweld(&list, &indices));
         colors = colors.map(|list| unweld(&list, &indices));
+        joints = joints.map(|list| unweld(&list, &indices));
+        weights = weights.map(|list| unweld(&list, &indices));
         let Ok(corners) = u32::try_from(positions.len()) else {
             return Err(AssetError::damaged(
                 file,
@@ -155,9 +185,98 @@ pub(crate) fn part(
         uv0,
         uv1,
         colors,
+        joints,
+        weights,
         indices,
         material: context.material,
     }))
+}
+
+/// For each point, four bone numbers and how strongly each of them pulls.
+type Pulls = (Vec<[u16; 4]>, Vec<[f32; 4]>);
+
+/// How many sets of four bones per point are read (`JOINTS_0` and `JOINTS_1`).
+const INFLUENCE_SETS: u32 = 2;
+
+/// Cuts the bones pulling each point down to the four strongest and makes
+/// their weights add up to 1. `None` if the part has no bone weights.
+///
+/// `sets` holds the bone numbers and weights of each set the file has, and
+/// `more` says the file has further sets that were not read.
+fn strongest_four(
+    context: &PartContext<'_>,
+    sets: &[Pulls],
+    more: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Pulls>, AssetError> {
+    let PartContext { file, mesh, .. } = *context;
+    let Some((first, _)) = sets.first() else {
+        return Ok(None);
+    };
+    let mut joints = Vec::with_capacity(first.len());
+    let mut weights = Vec::with_capacity(first.len());
+    let (mut loose, mut cut) = (0usize, 0usize);
+    for point in 0..first.len() {
+        let mut pulls = [(0u16, 0.0f32); 4 * INFLUENCE_SETS as usize];
+        let mut used = 0;
+        let listed = sets
+            .iter()
+            .filter_map(|(joints, weights)| Some((joints.get(point)?, weights.get(point)?)))
+            .flat_map(|(joints, weights)| joints.iter().zip(weights));
+        for (&joint, &weight) in listed {
+            if !weight.is_finite() || weight < 0.0 {
+                return Err(AssetError::damaged(
+                    file,
+                    format!("mesh \"{mesh}\" has a bone weight that is negative or not a number"),
+                ));
+            }
+            if weight > 0.0
+                && let Some(slot) = pulls.get_mut(used)
+            {
+                *slot = (joint, weight);
+                used += 1;
+            }
+        }
+        let pulls = pulls.get_mut(..used).unwrap_or_default();
+        // Strongest first; equal weights keep the file's order, so the
+        // result is the same on every computer.
+        pulls.sort_by(|a, b| b.1.total_cmp(&a.1));
+        cut += usize::from(used > 4);
+        let mut kept = ([0u16; 4], [0.0f32; 4]);
+        let mut total = 0.0;
+        for (slot, &(joint, weight)) in pulls.iter().take(4).enumerate() {
+            kept.0[slot] = joint;
+            kept.1[slot] = weight;
+            total += weight;
+        }
+        if !total.is_finite() {
+            return Err(AssetError::damaged(
+                file,
+                format!("mesh \"{mesh}\" has bone weights too large to use"),
+            ));
+        }
+        if total > 0.0 {
+            kept.1 = kept.1.map(|weight| weight / total);
+        } else {
+            loose += 1;
+            kept.1[0] = 1.0;
+        }
+        joints.push(kept.0);
+        weights.push(kept.1);
+    }
+    if loose > 0 {
+        warnings.push(format!(
+            "Mesh \"{mesh}\" has {loose} points that no bone moves; they follow the skeleton's first bone. \
+             In Blender, weight-paint them, or parent the mesh to the armature with automatic weights."
+        ));
+    }
+    if cut > 0 || more {
+        warnings.push(format!(
+            "Mesh \"{mesh}\" has points pulled by more than four bones; the four strongest are kept. \
+             To choose which yourself, in Blender's Weight Paint mode use Weights > Limit Total with a limit of 4."
+        ));
+    }
+    Ok(Some((joints, weights)))
 }
 
 /// Makes sure `accessor` holds the kind of data its role needs.

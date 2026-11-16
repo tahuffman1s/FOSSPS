@@ -3,7 +3,8 @@
 //! Levels and models are [glTF 2.0](https://www.khronos.org/gltf/) files
 //! (`.glb` or `.gltf`), which Blender and most other 3D tools export.
 //! [`Scene::load`] turns one into plain data: shapes, where they stand,
-//! materials and pictures. Nothing here talks to a graphics card, so a
+//! materials and pictures, and for rigged models their skeletons
+//! ([`Skin`]) and animation clips ([`Animation`]). Nothing here talks to a graphics card, so a
 //! dedicated server reads the same files for collision.
 //!
 //! ```no_run
@@ -28,6 +29,7 @@ mod load;
 mod material;
 mod math;
 mod mesh;
+mod rig;
 mod scene;
 #[cfg(test)]
 mod tests;
@@ -35,6 +37,7 @@ mod tests;
 pub use error::AssetError;
 pub use load::LoadOptions;
 pub use scene::{
-    AlphaMode, Bounds, Filter, Image, Instance, Light, LightKind, Marker, Material, Mesh, MeshPart,
-    Sampler, Scene, Texture, TextureRef, TextureTransform, Transform, Wrap,
+    AlphaMode, Animation, Bounds, Filter, Image, Instance, Interpolation, Joint, Keys, Light,
+    LightKind, MAX_JOINTS, Marker, Material, Mesh, MeshPart, Node, Pose, Sampler, Scene, Skin,
+    Texture, TextureRef, TextureTransform, Track, Transform, Wrap,
 };
