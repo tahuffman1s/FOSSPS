@@ -15,7 +15,6 @@ window = [
     "dep:winit",
     "dep:gilrs",
     "dep:fossps-render",
-    "dep:fossps-assets",
     # The pictures a level's materials use are decoded only where they are drawn.
     "fossps-assets/textures",
 ]
@@ -37,9 +36,10 @@ fossps-physics = { path = "../fossps-physics" }
 # The HUD and menus a game hands over each frame. No dependencies of its own.
 fossps-ui = { path = "../fossps-ui" }
 fossps-render = { path = "../fossps-render", optional = true }
-# Reads a game's `level.glb`. Its `textures` feature, which decodes the
-# pictures in it, is switched on by `window`.
-fossps-assets = { path = "../fossps-assets", optional = true, default-features = false }
+# Reads a game's `level.glb`, for the server too: players collide with its
+# shapes. Its `textures` feature, which decodes the pictures in it, is
+# switched on by `window`, so a dedicated server links no image decoders.
+fossps-assets = { path = "../fossps-assets", default-features = false }
 log = "0.4"
 # Reads a game's `map.toml`. The same reader the bindings file uses.
 toml = { version = "1.2", default-features = false, features = ["parse", "std"] }
