@@ -235,7 +235,7 @@ mod tests {
             let actions = ActionMap::default_fps();
             let script = ScriptGame::open(folder, &actions).unwrap();
             assert!(script.host().last_error().is_none());
-            let game = LocalGame::start(script, &actions, 60).unwrap();
+            let game = LocalGame::start(script, None, &actions, 60).unwrap();
             Self {
                 game,
                 input: Input::new(actions),

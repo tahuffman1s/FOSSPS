@@ -11,13 +11,7 @@ default = ["window", "cli", "editor"]
 # Opens a window, draws into it and reads keyboard, mouse and gamepads. A
 # dedicated server builds without it and links no windowing, graphics or
 # gamepad libraries.
-window = [
-    "dep:winit",
-    "dep:gilrs",
-    "dep:fossps-render",
-    "dep:fossps-assets",
-    "fossps-audio/device",
-]
+window = ["dep:winit", "dep:gilrs", "dep:fossps-render", "fossps-audio/device"]
 # Edit mode, `fossps edit`: a game's level with a fly camera and a ground
 # grid, in the same program. A build for players only can leave it out, and
 # a dedicated server never has it.
@@ -40,9 +34,10 @@ fossps-audio = { path = "../fossps-audio", default-features = false }
 # The HUD and menus a game hands over each frame. No dependencies of its own.
 fossps-ui = { path = "../fossps-ui" }
 fossps-render = { path = "../fossps-render", optional = true }
-# Reads a game's `level.glb`. Without its `textures` feature, as nothing draws
+# Reads a game's `level.glb`, for the server too: players collide with its
+# shapes. Without its `textures` feature, as nothing draws
 # textures yet (#59).
-fossps-assets = { path = "../fossps-assets", optional = true, default-features = false }
+fossps-assets = { path = "../fossps-assets", default-features = false }
 log = "0.4"
 # Reads a game's `map.toml`. The same reader the bindings file uses.
 toml = { version = "1.2", default-features = false, features = ["parse", "std"] }

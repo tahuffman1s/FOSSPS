@@ -38,7 +38,6 @@ mod error_overlay;
 mod game;
 #[cfg(feature = "window")]
 mod gamepad;
-#[cfg(feature = "window")]
 pub mod level;
 pub mod map;
 pub mod online;
@@ -61,7 +60,6 @@ mod tick;
 #[cfg(feature = "window")]
 mod translate;
 
-#[cfg(feature = "window")]
 pub use fossps_assets as assets;
 pub use fossps_audio as audio;
 pub use fossps_input as input;

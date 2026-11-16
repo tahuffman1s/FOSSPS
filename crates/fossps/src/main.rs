@@ -554,6 +554,10 @@ fn check(folder: &Path) -> Result<(), String> {
              with `fossps edit`.",
             level::summary(&level)
         );
+        print!(
+            "{}",
+            cli::walked(&fossps::online::try_walking(&level, game.map()))
+        );
     }
     if !game.map().is_empty() {
         println!(
@@ -651,30 +655,38 @@ fn start(
     name: &str,
     others_may_join: bool,
 ) -> Result<(), String> {
+    // The level that is drawn is the level that is walked.
+    let level = config.level.as_ref();
     let game = if others_may_join {
-        let game = LocalGame::open(game, name, DEFAULT_PORT, &config.actions, config.tick_rate)
-            .map_err(|error| {
-                format!(
-                    "The game could not be opened for others to join: {error}\nIf another \
-                     game is already open or served on this computer, close it first. To \
-                     play alone, leave out `--open`."
-                )
-            })?;
+        let game = LocalGame::open(
+            game,
+            level,
+            name,
+            DEFAULT_PORT,
+            &config.actions,
+            config.tick_rate,
+        )
+        .map_err(|error| {
+            format!(
+                "The game could not be opened for others to join: {error}\nIf another \
+                 game is already open or served on this computer, close it first. To \
+                 play alone, leave out `--open`."
+            )
+        })?;
         log::info!(
             "Open for others to join. {}",
             cli::how_to_join(DEFAULT_PORT, fossps::online::lan_address())
         );
         game
     } else {
-        LocalGame::start(game, &config.actions, config.tick_rate).map_err(|error| {
+        LocalGame::start(game, level, &config.actions, config.tick_rate).map_err(|error| {
             format!(
                 "The game could not start: {error}\nIt is played over this computer's own \
                  network (127.0.0.1), which a firewall or security program may be blocking."
             )
         })?
     };
-    let title = config.title.clone();
-    play(config, game.with_title(title))
+    play(config, game)
 }
 
 /// A packaged game started by its player: plays the game in the pack at
@@ -774,7 +786,6 @@ fn join(address: &str) -> Result<(), String> {
         u32::from(id) + 1
     );
     config.title = format!("{address} | FOSSPS");
-    let mut game = game.with_title(config.title.clone());
     fossps::run(config, &mut game).map_err(|error| error.to_string())?;
     // The window closing by itself needs a reason; the player closing it does not.
     game.closed().map_or(Ok(()), |error| Err(error.to_string()))
