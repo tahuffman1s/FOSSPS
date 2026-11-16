@@ -487,6 +487,10 @@ impl<G: Game> App<G> {
         if let Some(output) = frame.take_panels() {
             self.show_panels(output);
         }
+        #[cfg(feature = "editor")]
+        if let (Some(shown), Some(renderer)) = (frame.grid(), &mut self.renderer) {
+            renderer.set_grid(shown);
+        }
         self.ui = frame.take_ui();
         if let Some(renderer) = &mut self.renderer {
             renderer.set_ui(self.ui.draw());
@@ -661,8 +665,12 @@ impl<G: Game> ApplicationHandler for App<G> {
                 let pressed = state == ElementState::Pressed;
                 // In the editor the right button is held to look around, as
                 // in the viewports of other editors, and the cursor comes
-                // back when it is let go.
-                if self.editing && button == winit::event::MouseButton::Right {
+                // back when it is let go. Not while the level is played
+                // from the editor: there the button is the game's.
+                if self.editing
+                    && button == winit::event::MouseButton::Right
+                    && self.mouse_mode() == MouseMode::Pointer
+                {
                     if pressed {
                         self.capture_mouse();
                     } else {

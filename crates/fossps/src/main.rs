@@ -102,7 +102,10 @@ enum Command {
                       turn it and Y changes the snap; P, F, Esc, Z, C and G do the same.\n\nWhat \
                       is placed is saved in\nmap.toml in the game's folder as you go, with no save button, \
                       and a game that is\nrunning picks it up. The level file itself is never \
-                      changed."
+                      changed.\n\nF5, or Select on a gamepad, plays the level from where the \
+                      camera is: you drop to\nthe floor and the game runs as `fossps run` runs \
+                      it. The same key or button comes\nback to editing, with the camera and \
+                      the map as you left them."
     )]
     Edit {
         /// The game's folder. Leave it out to edit the game in the folder you are in
