@@ -57,13 +57,31 @@ The engine draws a HUD and menus over the picture: boxes with round corners and 
 
 A game's level is the `level.glb` in its folder: one glTF Binary file, which Blender exports (File > Export > glTF 2.0, format glTF Binary). `fossps run` and `fossps edit` load and draw it, a packaged game carries it, and `fossps new` puts a small arena there to start from. `fossps check` loads it too and says what to change in the export when it cannot be read; a game with a level that does not load is not started or packaged. A game with no `level.glb` is shown the engine's test floor. The level is drawn in its materials' flat colours, without textures or lights yet (#59). It is not solid yet: players stand on a flat floor at height 0 and walk through walls (#64). A player who joins someone else's game sees the test floor, not that game's level (#177), and a saved level is picked up at the next start, not while the game runs (#229).
 
-`fossps edit`, run in a game's folder, is the start of the editor: it opens the level to fly around, with a grid on the ground (a line every metre, a stronger one every ten, the X axis red and the Z axis blue). Hold the right mouse button to look around; W, A, S and D fly where you look, E and Q go up and down, Shift flies faster and the mouse wheel changes the speed. On a gamepad the sticks fly and look, the triggers go down and up, pressing the left stick flies faster and the d-pad changes the speed. A panel on the left lists everything in the level (its objects, markers such as spawn points, and lights) by the names they were given in Blender; click a name and a panel on the right says where it is, how big it is, which way it is turned, its colours and its custom properties, and a double click flies the camera to it. The panels are for the mouse. Nothing can be placed or changed yet (#40 onwards), and what is chosen is not yet marked in the picture (#231). The editor is the `editor` Cargo feature of the `fossps` crate, on by default; the dedicated server is built without it.
+`fossps edit`, run in a game's folder, is the start of the editor: it opens the level to fly around, with a grid on the ground (a line every metre, a stronger one every ten, the X axis red and the Z axis blue). Hold the right mouse button to look around; W, A, S and D fly where you look, E and Q go up and down, Shift flies faster and the mouse wheel changes the speed. On a gamepad the sticks fly and look, the triggers go down and up, pressing the left stick flies faster and the d-pad changes the speed. A panel on the left lists everything in the level (its objects, markers such as spawn points, and lights) by the names they were given in Blender; click a name and a panel on the right says where it is, how big it is, which way it is turned, its colours and its custom properties, and a double click flies the camera to it. The panels are for the mouse. What is chosen in the level file is not yet marked in the picture (#231).
+
+What the editor places goes in a text file beside the level, `map.toml`, and the level file itself is never written, so it keeps opening in Blender. "Place a spawn here" puts a spawn point on the ground where the camera looks; chosen in the list, its type (`spawn`, or any word of your own such as `zone` or `objective`), name, position and facing can be changed on the right, and it can be removed. Each placed thing is marked in the picture by a dot, a line the way it faces and its name, drawn over walls so it can be found. There is no save button: the file is written a moment after each change. It lists each entity with an ID that never changes, its type, position, facing and any properties, under a format version:
+
+```toml
+version = 1
+
+[[entity]]
+id = "k7f3q2xa"
+type = "spawn"
+name = "Red spawn"
+position = [4.0, 0.0, -12.5]
+facing = 180.0
+
+[entity.properties]
+team = "red"
+```
+
+IDs are made by chance and entities are written in ID order, so two people who each place something get changes that merge. The file can be written by hand as well: the open editor and a game that is running (`fossps run`, `fossps serve`) read it again when it is saved, and say which line to fix when it has a mistake, keeping the map they had. `fossps check` reads it too, and a packaged game carries it. So far the running game uses one thing from it: players come into the world at its `spawn` entities (away from other players, any team at any point), or in the middle of the level when it has none. Scripts cannot read the map yet, things are placed with a button and numbers rather than by clicking and dragging in the picture, properties are added in the file rather than in the editor, and there is no undo (#41, #52). The editor is the `editor` Cargo feature of the `fossps` crate, on by default; the dedicated server is built without it.
 
 `fossps controls` shows which key and button does what, and makes the text file that changes it: `bindings.toml` in the `fossps` folder of your settings (`~/.config` on Linux, `%APPDATA%` on Windows, `~/Library/Application Support` on macOS). Every action is listed there as a comment; take the `#` away from a line, edit it (`jump = ["F", "GamepadSouth"]`) and save, and every game played with FOSSPS uses it from its next start. A line with a mistake is skipped with a message saying which line and why, and the game still starts; a key that ends up doing two things gets a warning. There is no controls screen inside a game yet (#112).
 
 ## Scripting
 
-A game is a folder with a `main.luau` in it, and its level beside it as `level.glb`. `fossps new my-game` creates one that already plays, and `fossps run` plays the game in the folder you are in (or `fossps run my-game` from outside it). The engine runs `main.luau`, and loads it again every time you save it, without restarting:
+A game is a folder with a `main.luau` in it, its level beside it as `level.glb`, and what is placed in the level as `map.toml`. `fossps new my-game` creates one that already plays, and `fossps run` plays the game in the folder you are in (or `fossps run my-game` from outside it). The engine runs `main.luau`, and loads it again every time you save it, without restarting:
 
 ```lua
 game.onStart(function()

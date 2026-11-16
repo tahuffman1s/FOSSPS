@@ -907,6 +907,7 @@ dependencies = [
  "flate2",
  "fossps-assets",
  "fossps-input",
+ "fossps-mode",
  "fossps-net",
  "fossps-pack",
  "fossps-physics",
@@ -916,6 +917,7 @@ dependencies = [
  "gilrs",
  "log",
  "tar",
+ "toml",
  "winit",
 ]
 
