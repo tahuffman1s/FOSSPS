@@ -76,7 +76,6 @@ pub fn find_game(folder: &Path, command: &str) -> Result<(), String> {
 ///
 /// Fails with a message for the person if the level is there but cannot be
 /// loaded.
-#[cfg(feature = "window")]
 pub fn load_level(folder: &Path) -> Result<Option<fossps_assets::Scene>, String> {
     use crate::level::LEVEL_FILE;
 
@@ -88,12 +87,33 @@ pub fn load_level(folder: &Path) -> Result<Option<fossps_assets::Scene>, String>
             }
         }
         None => log::info!(
-            "This game has no {LEVEL_FILE}, so it is shown the engine's test floor. To give \
+            "This game has no {LEVEL_FILE}, so it is played on the engine's test floor. To give \
              it a level, export one from Blender or another 3D tool as glTF Binary (.glb) \
              and save it as {LEVEL_FILE} in the game's folder."
         ),
     }
     Ok(level)
+}
+
+/// What `fossps check` says after trying a level out for walking: that a
+/// player can start at every spawn point, or what to change, a line each.
+#[must_use]
+pub fn walked(check: &crate::online::WalkCheck) -> String {
+    if check.problems.is_empty() {
+        let places = match check.spawn_points {
+            1 => "its one spawn point".to_owned(),
+            many => format!("each of its {many} spawn points"),
+        };
+        return format!(
+            "Players can walk it: one was started at {places} and landed on the floor every \
+             time. They stood still there, so walk it yourself with `fossps run`.\n"
+        );
+    }
+    check
+        .problems
+        .iter()
+        .map(|problem| format!("Warning: {problem}\n"))
+        .collect()
 }
 
 /// Checks that `folder` is a folder, or says what a command wants instead.
@@ -142,6 +162,15 @@ fn no_game_in(folder: &Path, command: &str) -> String {
 pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String> {
     let config = ServerConfig::default();
     let game = open_game(folder, &config.actions, command)?;
+    // Before the port is opened: a server whose players would walk through
+    // the level's walls is not worth joining.
+    let level = load_level(folder).map_err(|error| {
+        format!(
+            "{error}\nThe server was not started, because the level could not be loaded. \
+             Export it again, then run `{command}` again. To serve the game on the engine's \
+             test floor meanwhile, move the level's file out of the game's folder."
+        )
+    })?;
     let mut game = HostedGame::open(game, &format!("0.0.0.0:{port}"), config.tick_rate)
         .map_err(|error| {
             format!(
@@ -151,6 +180,16 @@ pub fn serve_game(folder: &Path, command: &str, port: u16) -> Result<(), String>
             )
         })?
         .named(&game_name(folder));
+    if let Some(level) = &level {
+        game = game.with_level(level);
+        log::info!(
+            "Players walk {}: {}.",
+            crate::level::LEVEL_FILE,
+            crate::level::summary(level)
+        );
+    }
+    // Only the level's shapes are kept, for players to collide with.
+    drop(level);
     let stop = StopSignal::on_ctrl_c().map_err(|error| error.to_string())?;
 
     log::info!(

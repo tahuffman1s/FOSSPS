@@ -25,6 +25,10 @@
 //!     let game = ScriptGame::open("my-game", &config.actions)?;
 //!     let address = format!("0.0.0.0:{DEFAULT_PORT}");
 //!     let mut hosted = HostedGame::open(game, &address, config.tick_rate)?;
+//!     // Players walk the game's level, if it has one.
+//!     if let Some(level) = fossps::level::load("my-game".as_ref())? {
+//!         hosted = hosted.with_level(&level);
+//!     }
 //!     serve(&config, &mut hosted, &StopSignal::on_ctrl_c()?);
 //!     Ok(())
 //! }
@@ -33,8 +37,10 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
+use fossps_assets::{Marker, Scene};
 use fossps_input::{ActionId, ActionMap, InputFrame};
 use fossps_mode::{SpawnPoint, Stander, choose_spawn};
 use fossps_net::{
@@ -46,7 +52,8 @@ pub use fossps_net::{FoundServer, lan_address};
 use fossps_physics::{Level, MoveInput, MoveSettings, Player};
 
 use crate::game::{Frame, Game};
-use crate::map::Map;
+use crate::map::{MAP_FILE, Map};
+use crate::scaffold::LEVEL_FILE;
 use crate::script_game::ScriptGame;
 
 /// The UDP port a server opens and a player joins when none is named.
@@ -68,70 +75,305 @@ pub const SEARCH_TIME: Duration = Duration::from_secs(1);
 /// How long to wait between looks at the socket while joining.
 const JOIN_POLL: Duration = Duration::from_millis(5);
 
-/// How many ticks pass between changes to the window's title.
-const TITLE_EVERY: u32 = 15;
+/// What a marker in a level is called to be a place players start: `spawn`,
+/// or anything that begins with it, such as `spawn.001` or `Spawn Red`.
+const SPAWN_NAME: &str = "spawn";
+
+/// How long a player started at a spawn point is given to land when a level
+/// is tried out, in ticks: three seconds, a fall of some 40 m.
+const LANDING_TICKS: u32 = 180;
+
+/// A player's first snapshot puts them this near a spawn point, in metres
+/// across the ground, if that is where the server started them.
+const AT_SPAWN: f32 = 0.5;
 
 /// What a server and its players must agree on to work out the same moves.
+///
+/// Cheap to copy: the level's shapes are shared, not copied.
 #[derive(Debug, Clone)]
 struct World {
-    level: Level,
+    level: Arc<Level>,
+    /// Where players may start. Never empty.
+    spawns: Arc<[SpawnPoint]>,
+    /// Which way a player starting at each of `spawns` faces.
+    facing: Arc<[f32]>,
     rules: MoveSettings,
+    /// Ticks in one second.
+    tick_rate: u32,
     /// Seconds in one tick.
     step: f32,
 }
 
 impl World {
-    /// A flat floor, 1 km on a side, at height zero.
+    /// A flat floor, 1 km on a side, at height zero, with players starting
+    /// at its middle.
     fn flat(tick_rate: u32) -> Self {
         let r = FLOOR_REACH;
         let corners = [[-r, 0.0, -r], [r, 0.0, -r], [r, 0.0, r], [-r, 0.0, r]];
         let [a, b, c, d] = corners;
+        Self::new(
+            Level::from_triangles(&[[a, b, c], [a, c, d]]),
+            &[],
+            tick_rate,
+        )
+    }
+
+    /// The world of a game's level: every shape in it is solid, and players
+    /// start at its spawn markers, or at its middle if it has none.
+    fn from_level(level: &Scene, tick_rate: u32) -> Self {
+        let spawns: Vec<&Marker> = spawn_markers(level).collect();
+        Self::new(Level::from_scene(level), &spawns, tick_rate)
+    }
+
+    fn new(level: Level, markers: &[&Marker], tick_rate: u32) -> Self {
+        let mut spawns: Vec<SpawnPoint> = markers
+            .iter()
+            .map(|marker| SpawnPoint {
+                position: position_of(marker),
+                team: None,
+            })
+            .collect();
+        let mut facing: Vec<f32> = markers.iter().map(|marker| yaw_of(marker)).collect();
+        if spawns.is_empty() {
+            spawns.push(SpawnPoint {
+                position: [0.0; 3],
+                team: None,
+            });
+            facing.push(0.0);
+        }
         Self {
-            level: Level::from_triangles(&[[a, b, c], [a, c, d]]),
+            level: Arc::new(level),
+            spawns: spawns.into(),
+            facing: facing.into(),
             rules: MoveSettings::default(),
+            tick_rate,
             step: 1.0 / tick_rate.max(1) as f32,
         }
     }
 
-    /// A player where everyone comes into the world when the map has no
-    /// spawn points: the middle of the level.
-    fn spawn(&self) -> Player {
-        Player::at([0.0, 0.0, 0.0], &self.rules)
+    /// The world of a game with `level`, or the flat floor of a game with
+    /// none. What is wrong for walking with the level and the spawn points
+    /// in `map` is logged.
+    fn of(level: Option<&Scene>, map: &Map, tick_rate: u32) -> Self {
+        let Some(level) = level else {
+            return Self::flat(tick_rate);
+        };
+        let world = Self::from_level(level, tick_rate);
+        for problem in world.problems(level, map) {
+            log::warn!("{problem}");
+        }
+        world
     }
 
-    /// A player about to come into the world, at one of `map`'s spawn
-    /// points: one nobody in `standing` is on, and far from them all. With
-    /// no spawn points in the map, in the middle of the level.
+    /// A player about to come into the world. Where players start is one
+    /// rule everywhere: at the spawn points in `map` if it has any, else
+    /// at the level's spawn markers, else in the middle of the level. Of
+    /// those the one furthest from `others` is taken, or one nearly as
+    /// good; `seed` settles the choice and should differ from one call to
+    /// the next.
     ///
     /// Every spawn point is for anyone, and everyone else counts as an
     /// enemy to keep away from, until teams reach the running game (#171).
-    /// `seed` should differ from one call to the next.
     fn spawn_in<'a>(
         &self,
         map: &Map,
-        standing: impl Iterator<Item = &'a Player>,
+        others: impl Iterator<Item = &'a Player>,
         seed: u32,
     ) -> Player {
-        let points: Vec<SpawnPoint> = map
+        let mut standers = [Stander {
+            position: [0.0; 3],
+            enemy: true,
+        }; MAX_PLAYERS];
+        let mut count = 0;
+        for (stander, other) in standers.iter_mut().zip(others) {
+            stander.position = other.position;
+            count += 1;
+        }
+        let placed: Vec<SpawnPoint> = map
             .spawns()
             .map(|spawn| SpawnPoint {
                 position: spawn.position,
                 team: None,
             })
             .collect();
-        if points.is_empty() {
-            return self.spawn();
+        let points: &[SpawnPoint] = if placed.is_empty() {
+            &self.spawns
+        } else {
+            &placed
+        };
+        let chosen = choose_spawn(points, None, &standers[..count], seed)
+            .and_then(|point| points.get(point))
+            .map_or([0.0; 3], |point| point.position);
+        Player::at(chosen, &self.rules)
+    }
+
+    /// A player where one may start, before the server has said where this
+    /// one does.
+    fn first(&self) -> Player {
+        let position = self.spawns.first().map_or([0.0; 3], |point| point.position);
+        Player::at(position, &self.rules)
+    }
+
+    /// Which way a player who has just started at `position` faces, if that
+    /// is one of the spawn points: `map`'s if it has any, else the level's.
+    fn facing_at(&self, map: &Map, position: [f32; 3]) -> Option<f32> {
+        let near =
+            |point: [f32; 3]| (point[0] - position[0]).hypot(point[2] - position[2]) <= AT_SPAWN;
+        if map.spawns().next().is_some() {
+            return map
+                .spawns()
+                .find(|spawn| near(spawn.position))
+                .map(|spawn| spawn.facing.to_radians().rem_euclid(TAU))
+                .filter(|yaw| yaw.is_finite());
         }
-        let standers: Vec<Stander> = standing
-            .map(|player| Stander {
-                position: player.position,
-                enemy: true,
-            })
-            .collect();
-        match choose_spawn(&points, None, &standers, seed).and_then(|index| points.get(index)) {
-            Some(point) => Player::at(point.position, &self.rules),
-            None => self.spawn(),
+        self.spawns
+            .iter()
+            .zip(self.facing.iter())
+            .find(|(point, _)| near(point.position))
+            .map(|(_, yaw)| *yaw)
+    }
+
+    /// What is wrong for walking with `level`, which this world was made
+    /// from, and the spawn points in `map`: nothing to stand on, nowhere to
+    /// start, or a start that a player falls from. Each is a sentence for
+    /// the game's maker.
+    fn problems(&self, level: &Scene, map: &Map) -> Vec<String> {
+        if self.level.triangle_count() == 0 {
+            return vec![format!(
+                "{LEVEL_FILE} has no shapes in it, so there is nothing to stand on and players \
+                 fall for ever. Add a floor in your 3D tool and export the level again."
+            )];
         }
+        let mut problems = Vec::new();
+        let starts = starts(level, map);
+        if starts.is_empty() {
+            problems.push(format!(
+                "This game has no spawn points, so players start at the level's middle \
+                 (0, 0, 0). To choose where they start, run `fossps edit` and use \"Place a \
+                 spawn here\", which writes {MAP_FILE}; or add an empty object named `spawn` \
+                 to the level in your 3D tool, turned the way players should look, and \
+                 export it again."
+            ));
+        }
+        let middle = [("the level's middle".to_owned(), [0.0; 3])];
+        let starts = if starts.is_empty() {
+            &middle[..]
+        } else {
+            &starts[..]
+        };
+        let still = MoveInput::default();
+        for (place, position) in starts {
+            let mut player = Player::at(*position, &self.rules);
+            for _ in 0..LANDING_TICKS {
+                player.step(&self.level, &self.rules, &still, self.step);
+                if player.grounded {
+                    break;
+                }
+            }
+            if player.grounded {
+                continue;
+            }
+            let [x, y, z] = position;
+            let seconds = LANDING_TICKS as f32 * self.step;
+            problems.push(format!(
+                "A player who starts at {place} ({x:.1}, {y:.1}, {z:.1}) falls and has not \
+                 landed after {seconds:.0} seconds: there is no floor under it. Move it to \
+                 just above a floor, or put a floor under it."
+            ));
+        }
+        problems
+    }
+}
+
+/// Where players start in a game with `level` and `map`, each with what to
+/// call it: the spawn points in the map if it has any, else the level's
+/// spawn markers. Empty when the game has neither.
+fn starts(level: &Scene, map: &Map) -> Vec<(String, [f32; 3])> {
+    let placed: Vec<_> = map
+        .spawns()
+        .map(|spawn| {
+            let name = if spawn.name.is_empty() {
+                &spawn.id
+            } else {
+                &spawn.name
+            };
+            (
+                format!("the spawn point \"{name}\" in {MAP_FILE}"),
+                spawn.position,
+            )
+        })
+        .collect();
+    if !placed.is_empty() {
+        return placed;
+    }
+    spawn_markers(level)
+        .map(|marker| {
+            (
+                format!(
+                    "the spawn point \"{}\" in {LEVEL_FILE}",
+                    marker.name.as_deref().unwrap_or_default()
+                ),
+                position_of(marker),
+            )
+        })
+        .collect()
+}
+
+/// The markers in `level` that are places for players to start.
+fn spawn_markers(level: &Scene) -> impl Iterator<Item = &Marker> {
+    level.markers.iter().filter(|marker| {
+        marker.name.as_deref().is_some_and(|name| {
+            name.trim_start()
+                .get(..SPAWN_NAME.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(SPAWN_NAME))
+        })
+    })
+}
+
+/// Where `marker` stands.
+fn position_of(marker: &Marker) -> [f32; 3] {
+    let [x, y, z, _] = marker.transform[3];
+    [x, y, z]
+}
+
+/// Which way `marker` faces across the ground, as a player's yaw: 0 faces
+/// -Z and it grows turning left. A marker looks along its own -Z, as a
+/// camera in a glTF file does; one pointing straight up or down faces -Z.
+fn yaw_of(marker: &Marker) -> f32 {
+    let [x, _, z, _] = marker.transform[2];
+    // The marker's -Z is (-x, -z); yaw is the turn left from -Z to it.
+    if x.is_finite() && z.is_finite() && x.hypot(z) > 1.0e-6 {
+        x.atan2(z).rem_euclid(TAU)
+    } else {
+        0.0
+    }
+}
+
+/// What trying a level out for walking found: see [`try_walking`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkCheck {
+    /// How many places for players to start the game has: the `spawn`
+    /// entities in its map file or, when that has none, the level's
+    /// markers whose names begin with `spawn`.
+    pub spawn_points: usize,
+    /// What its maker should change, a sentence each. Empty when a player
+    /// can start at every spawn point and land on something.
+    pub problems: Vec<String>,
+}
+
+/// Tries `level` out for walking, with no window and no server: starts a
+/// player at each spawn point, lets them stand for three seconds and says
+/// which ones never landed. `fossps check` prints what it finds.
+///
+/// The spawn points are the `spawn` entities in `map`
+/// ([`ScriptGame::map`]) if it has any, else the level's markers whose
+/// names begin with `spawn`, else the middle of the level.
+#[must_use]
+pub fn try_walking(level: &Scene, map: &Map) -> WalkCheck {
+    let world = World::from_level(level, 60);
+    WalkCheck {
+        spawn_points: starts(level, map).len(),
+        problems: world.problems(level, map),
     }
 }
 
@@ -149,10 +391,9 @@ pub struct HostedGame {
     world: World,
     /// Who each place on the server is to the script.
     names: [Option<fossps_script::PlayerId>; MAX_PLAYERS],
-    packet: Vec<u8>,
-    /// How many players have been put into the world, so that no two are
-    /// placed by the same chance.
+    /// How many times a player has been put at a spawn point.
     spawned: u32,
+    packet: Vec<u8>,
 }
 
 impl HostedGame {
@@ -169,16 +410,37 @@ impl HostedGame {
     /// When the port cannot be opened, most often because another server
     /// already has it.
     pub fn open(game: ScriptGame, address: &str, tick_rate: u32) -> Result<Self, SocketError> {
-        let world = World::flat(tick_rate);
+        Self::open_in(game, address, World::flat(tick_rate))
+    }
+
+    fn open_in(game: ScriptGame, address: &str, world: World) -> Result<Self, SocketError> {
         Ok(Self {
             game,
             host: UdpHost::bind(address, HostSettings::default())?,
             server: Server::new(world.step, ServerSettings::default()),
             world,
             names: [None; MAX_PLAYERS],
-            packet: Vec::new(),
             spawned: 0,
+            packet: Vec::new(),
         })
+    }
+
+    /// Plays the game in `level`, usually the game's `level.glb` as
+    /// [`level::load`](crate::level::load) reads it: its shapes are solid.
+    /// Without this, players walk a flat floor at height zero.
+    ///
+    /// Players start at the `spawn` entities of the game's map file
+    /// ([`ScriptGame::map`]). When it has none they start at the level's
+    /// markers whose names begin with `spawn` (`spawn`, `spawn.001`,
+    /// `Spawn Red`), and with none of those either, at the level's middle.
+    ///
+    /// Call it before anyone joins. What is wrong with the level for
+    /// walking, such as a spawn point with no floor under it, is logged as
+    /// a warning ([`try_walking`] gives the same list).
+    #[must_use]
+    pub fn with_level(mut self, level: &Scene) -> Self {
+        self.world = World::of(Some(level), self.game.map(), self.world.tick_rate);
+        self
     }
 
     /// Names the game for players looking for one to join
@@ -284,6 +546,10 @@ impl HostedGame {
 impl Game for HostedGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
         self.listen();
+        // Before anyone is told where they are: a player the match brought
+        // into the world, on joining or in the script's last tick, is at
+        // their spawn point in the first snapshot that shows them there.
+        self.place_spawned();
         self.server.tick(&self.world.level, &self.world.rules);
         for id in self.host.players() {
             if self.server.write_snapshot(id, &mut self.packet).is_ok() {
@@ -291,7 +557,6 @@ impl Game for HostedGame {
             }
         }
         self.game.tick(input, step);
-        self.place_spawned();
     }
 
     /// The script's own presenting, such as its rumble, which is for the
@@ -403,10 +668,10 @@ pub struct JoinedGame {
     pitch: f32,
     closed: Option<Closed>,
     packet: Vec<u8>,
-    /// The window's title without where the player is; empty to leave the
-    /// title alone.
-    title: String,
-    ticks: u32,
+    /// The game's map as this side has it, for which way spawn points face.
+    map: Map,
+    /// The player has been turned the way their spawn point faces.
+    faced: bool,
 }
 
 impl JoinedGame {
@@ -426,14 +691,17 @@ impl JoinedGame {
     ///
     /// When the address cannot be read or its name is not known.
     pub fn connect(address: &str, actions: &ActionMap, tick_rate: u32) -> Result<Self, JoinError> {
+        Self::connect_in(address, actions, World::flat(tick_rate))
+    }
+
+    fn connect_in(address: &str, actions: &ActionMap, world: World) -> Result<Self, JoinError> {
         let address = with_port(address);
-        let world = World::flat(tick_rate);
         Ok(Self {
             link: match UdpLink::connect(&address, LinkSettings::default()) {
                 Ok(link) => link,
                 Err(error) => return Err(JoinError::Address { address, error }),
             },
-            client: Client::new(world.spawn(), world.step, ClientSettings::default()),
+            client: Client::new(world.first(), world.step, ClientSettings::default()),
             world,
             controls: Controls::new(actions),
             address,
@@ -441,16 +709,33 @@ impl JoinedGame {
             pitch: 0.0,
             closed: None,
             packet: Vec::new(),
-            title: String::new(),
-            ticks: 0,
+            map: Map::default(),
+            faced: false,
         })
     }
 
-    /// Shows where the player is in the window's title, after `title`.
-    /// A stand-in for seeing the level, until levels are drawn.
+    /// Gives this side the game's map file as the server has it
+    /// ([`ScriptGame::map`]), so the player starts out looking the way
+    /// their spawn point faces. Without it a player started at one of the
+    /// map's spawn points looks north, along -Z.
+    ///
+    /// Call it before the first tick.
     #[must_use]
-    pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.title = title.into();
+    pub fn with_map(mut self, map: Map) -> Self {
+        self.map = map;
+        self
+    }
+
+    /// Walks `level`, which must be the level the server plays
+    /// ([`HostedGame::with_level`]): this side works out the player's moves
+    /// against it without waiting for the server. Without this, or with a
+    /// different level, the player still ends up where the server says, but
+    /// is pulled back each time the two disagree, at a wall for one.
+    ///
+    /// Call it before the first tick.
+    #[must_use]
+    pub fn with_level(mut self, level: &Scene) -> Self {
+        self.world = World::from_level(level, self.world.tick_rate);
         self
     }
 
@@ -550,6 +835,15 @@ impl JoinedGame {
                 LinkEvent::Closed(why) => *closed = Some(why),
             }
         }
+        // The server's first word says where this player starts: look the
+        // way that spawn point faces.
+        if !self.faced && self.client.server_tick() > 0 {
+            self.faced = true;
+            let at = self.client.player().position;
+            if let Some(yaw) = self.world.facing_at(&self.map, at) {
+                self.yaw = yaw;
+            }
+        }
     }
 
     /// What the player is asking for this tick. Turns the view as well.
@@ -587,7 +881,9 @@ impl JoinedGame {
 impl Game for JoinedGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
         self.listen();
-        if self.closed.is_some() || self.link.id().is_none() {
+        // Nothing moves until the server has said where this player starts:
+        // a step taken from a guessed place would be taken back.
+        if self.closed.is_some() || self.link.id().is_none() || !self.faced {
             return;
         }
         let asked = self.read(input, step);
@@ -598,7 +894,6 @@ impl Game for JoinedGame {
             &mut self.packet,
         );
         self.link.send(&self.packet);
-        self.ticks = self.ticks.wrapping_add(1);
     }
 
     fn frame(&mut self, frame: &mut Frame) {
@@ -607,14 +902,6 @@ impl Game for JoinedGame {
             return;
         }
         frame.look_from(self.eye_position(), self.yaw, self.pitch);
-        if !self.title.is_empty() && self.ticks >= TITLE_EVERY {
-            self.ticks = 0;
-            let [x, y, z] = self.client.view_position();
-            frame.set_title(format!(
-                "{} | you are at {x:.1}, {y:.1}, {z:.1}",
-                self.title
-            ));
-        }
     }
 }
 
@@ -628,8 +915,10 @@ pub struct LocalGame {
 }
 
 impl LocalGame {
-    /// Starts `game` and joins it. `actions` and `tick_rate` must be the
-    /// ones the game is then run with.
+    /// Starts `game` and joins it. The player walks `level`, usually the
+    /// game's `level.glb` as [`level::load`](crate::level::load) reads it
+    /// (see [`HostedGame::with_level`]), or a flat floor with `None`.
+    /// `actions` and `tick_rate` must be the ones the game is then run with.
     ///
     /// # Errors
     ///
@@ -637,19 +926,18 @@ impl LocalGame {
     /// cannot be joined through it; neither is expected.
     pub fn start(
         game: ScriptGame,
+        level: Option<&Scene>,
         actions: &ActionMap,
         tick_rate: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::join_own(
-            HostedGame::open(game, "127.0.0.1:0", tick_rate)?,
-            actions,
-            tick_rate,
-        )
+        let world = World::of(level, game.map(), tick_rate);
+        Self::join_own(HostedGame::open_in(game, "127.0.0.1:0", world)?, actions)
     }
 
     /// Starts `game` for other players to join on the UDP port `port`, and
-    /// joins it. `name` is what players looking for a game are shown.
-    /// `actions` and `tick_rate` must be the ones the game is then run with.
+    /// joins it. `name` is what players looking for a game are shown, and
+    /// `level` is as for [`start`](Self::start). `actions` and `tick_rate`
+    /// must be the ones the game is then run with.
     ///
     /// # Errors
     ///
@@ -657,32 +945,29 @@ impl LocalGame {
     /// already has it, or the game cannot be joined through it.
     pub fn open(
         game: ScriptGame,
+        level: Option<&Scene>,
         name: &str,
         port: u16,
         actions: &ActionMap,
         tick_rate: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let hosted = HostedGame::open(game, &format!("0.0.0.0:{port}"), tick_rate)?.named(name);
-        Self::join_own(hosted, actions, tick_rate)
+        let world = World::of(level, game.map(), tick_rate);
+        let hosted = HostedGame::open_in(game, &format!("0.0.0.0:{port}"), world)?.named(name);
+        Self::join_own(hosted, actions)
     }
 
-    /// Joins `hosted` from this program, over this machine's own network.
+    /// Joins `hosted` from this program, over this machine's own network,
+    /// walking the very level the server has.
     fn join_own(
         mut hosted: HostedGame,
         actions: &ActionMap,
-        tick_rate: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let port = hosted.host.local_addr()?.port();
-        let mut joined = JoinedGame::connect(&format!("127.0.0.1:{port}"), actions, tick_rate)?;
+        let address = format!("127.0.0.1:{port}");
+        let mut joined = JoinedGame::connect_in(&address, actions, hosted.world.clone())?
+            .with_map(hosted.game.map().clone());
         joined.wait_until_joined(|| hosted.listen())?;
         Ok(Self { hosted, joined })
-    }
-
-    /// Shows where the player is in the window's title, after `title`.
-    #[must_use]
-    pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.joined = self.joined.with_title(title);
-        self
     }
 
     /// The server's side.
@@ -769,7 +1054,7 @@ mod tests {
             end)"#,
             &actions,
         );
-        let mut game = LocalGame::start(script, &actions, 60).unwrap();
+        let mut game = LocalGame::start(script, None, &actions, 60).unwrap();
         let mut input = Input::new(actions);
         let asked = |game: &mut LocalGame, input: &mut Input| {
             game.tick(input.tick(), 1.0 / 60.0);
@@ -785,6 +1070,206 @@ mod tests {
             Some(Rumble::new(0.2, 0.6, 0.1))
         );
         assert_eq!(asked(&mut game, &mut input), None);
+    }
+
+    /// A marker called `name` at `position`, turned `yaw` radians to the left.
+    fn marker(name: &str, position: [f32; 3], yaw: f32) -> Marker {
+        let (sin, cos) = yaw.sin_cos();
+        let [x, y, z] = position;
+        Marker {
+            name: Some(name.to_owned()),
+            transform: [
+                [cos, 0.0, -sin, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [sin, 0.0, cos, 0.0],
+                [x, y, z, 1.0],
+            ],
+            extras: None,
+        }
+    }
+
+    /// A level that is a floor 20 m on a side at height zero, with `markers`.
+    fn floor_with(markers: Vec<Marker>) -> Scene {
+        use fossps_assets::{Instance, Mesh, MeshPart};
+
+        let mut scene = Scene::default();
+        scene.meshes.push(Mesh {
+            name: None,
+            parts: vec![MeshPart {
+                positions: vec![
+                    [-10.0, 0.0, -10.0],
+                    [10.0, 0.0, -10.0],
+                    [10.0, 0.0, 10.0],
+                    [-10.0, 0.0, 10.0],
+                ],
+                indices: vec![0, 2, 1, 0, 3, 2],
+                ..MeshPart::default()
+            }],
+        });
+        scene.instances.push(Instance {
+            mesh: 0,
+            transform: marker("", [0.0; 3], 0.0).transform,
+            mirrored: false,
+            name: None,
+            extras: None,
+        });
+        scene.markers = markers;
+        scene
+    }
+
+    #[test]
+    fn markers_whose_names_begin_with_spawn_are_where_players_start() {
+        let level = floor_with(vec![
+            marker("Camera Spot", [1.0, 0.0, 1.0], 0.0),
+            marker("spawn", [2.0, 0.0, 3.0], 0.0),
+            marker("Spawn Red", [-4.0, 0.5, 0.0], FRAC_PI_2),
+            marker("respawn timer", [5.0, 0.0, 5.0], 0.0),
+            marker("spawn.001", [0.0, 0.0, -6.0], TAU / 2.0),
+        ]);
+        let world = World::from_level(&level, 60);
+
+        let places: Vec<_> = world.spawns.iter().map(|point| point.position).collect();
+        assert_eq!(
+            places,
+            [[2.0, 0.0, 3.0], [-4.0, 0.5, 0.0], [0.0, 0.0, -6.0]]
+        );
+        // A player looks the way the marker is turned: left is west (-X).
+        assert_eq!(
+            world.facing_at(&Map::default(), [2.0, 0.01, 3.1]),
+            Some(0.0)
+        );
+        let west = world.facing_at(&Map::default(), [-4.0, 0.5, 0.0]).unwrap();
+        assert!((west - FRAC_PI_2).abs() < 1.0e-6, "{west}");
+        let south = world.facing_at(&Map::default(), [0.0, 0.0, -6.0]).unwrap();
+        assert!((south - TAU / 2.0).abs() < 1.0e-6, "{south}");
+        assert_eq!(world.facing_at(&Map::default(), [7.0, 0.0, 7.0]), None);
+        assert_eq!(try_walking(&level, &Map::default()).spawn_points, 3);
+        assert_eq!(
+            try_walking(&level, &Map::default()).problems,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_new_player_is_put_at_a_spawn_point_away_from_the_others() {
+        let level = floor_with(vec![
+            marker("spawn", [-9.0, 0.0, 0.0], 0.0),
+            marker("spawn.001", [9.0, 0.0, 0.0], 0.0),
+        ]);
+        let world = World::from_level(&level, 60);
+        for seed in 0..20 {
+            let first = world.spawn_in(&Map::default(), std::iter::empty(), seed);
+            assert_eq!(first.position[0].abs(), 9.0);
+            let second = world.spawn_in(&Map::default(), std::iter::once(&first), seed);
+            assert_eq!(second.position[0], -first.position[0], "seed {seed}");
+            // The same question has the same answer.
+            assert_eq!(
+                world.spawn_in(&Map::default(), std::iter::once(&first), seed),
+                second
+            );
+        }
+    }
+
+    #[test]
+    fn a_level_with_no_spawn_points_starts_players_at_its_middle_and_says_so() {
+        let level = floor_with(vec![marker("Camera Spot", [1.0, 0.0, 1.0], 0.0)]);
+        let world = World::from_level(&level, 60);
+        assert_eq!(
+            world
+                .spawn_in(&Map::default(), std::iter::empty(), 7)
+                .position,
+            [0.0; 3]
+        );
+
+        let walked = try_walking(&level, &Map::default());
+        assert_eq!(walked.spawn_points, 0);
+        assert_eq!(walked.problems.len(), 1, "{:?}", walked.problems);
+        let said = &walked.problems[0];
+        assert!(
+            said.starts_with(
+                "This game has no spawn points, so players start at the level's middle"
+            ),
+            "{said}"
+        );
+        assert!(said.contains("an empty object named `spawn`"), "{said}");
+    }
+
+    #[test]
+    fn a_spawn_point_with_no_floor_under_it_is_named() {
+        let level = floor_with(vec![
+            marker("spawn", [0.0, 2.0, 0.0], 0.0),
+            marker("spawn.ledge", [30.0, 0.0, 0.5], 0.0),
+        ]);
+        let walked = try_walking(&level, &Map::default());
+        assert_eq!(walked.problems.len(), 1, "{:?}", walked.problems);
+        let said = &walked.problems[0];
+        assert!(
+            said.starts_with(
+                "A player who starts at the spawn point \"spawn.ledge\" in level.glb \
+                 (30.0, 0.0, 0.5) falls and has not landed after 3 seconds"
+            ),
+            "{said}"
+        );
+        assert!(said.contains("put a floor under it"), "{said}");
+    }
+
+    #[test]
+    fn spawn_points_in_the_map_file_are_used_instead_of_the_levels_markers() {
+        let level = floor_with(vec![marker("spawn", [-9.0, 0.0, 0.0], 0.0)]);
+        let world = World::from_level(&level, 60);
+        let map = Map::parse(
+            "map.toml",
+            "version = 1\n\n\
+             [[entity]]\nid = \"aaaa\"\ntype = \"spawn\"\nname = \"Blue spawn\"\n\
+             position = [5.0, 0.0, 5.0]\nfacing = 90.0\n\n\
+             [[entity]]\nid = \"bbbb\"\ntype = \"spawn\"\nposition = [50.0, 0.0, 0.0]\n\n\
+             [[entity]]\nid = \"cccc\"\ntype = \"zone\"\nposition = [1.0, 0.0, 1.0]\n",
+        )
+        .unwrap();
+
+        // With an empty map the level's marker is where players start.
+        let empty = Map::default();
+        assert_eq!(
+            world.spawn_in(&empty, std::iter::empty(), 3).position,
+            [-9.0, 0.0, 0.0]
+        );
+        assert_eq!(world.facing_at(&empty, [-9.0, 0.0, 0.0]), Some(0.0));
+
+        // With spawn points in the map, only they are.
+        for seed in 0..20 {
+            let x = world.spawn_in(&map, std::iter::empty(), seed).position[0];
+            assert!(x == 5.0 || x == 50.0, "{x}");
+        }
+        let west = world.facing_at(&map, [5.0, 0.0, 5.2]).unwrap();
+        assert!((west - FRAC_PI_2).abs() < 1.0e-6, "{west}");
+        assert_eq!(world.facing_at(&map, [-9.0, 0.0, 0.0]), None);
+
+        // The walk is tried from the map's points, and the one off the
+        // floor is named by its file; one with no name goes by its id.
+        let walked = try_walking(&level, &map);
+        assert_eq!(walked.spawn_points, 2);
+        assert_eq!(walked.problems.len(), 1, "{:?}", walked.problems);
+        assert!(
+            walked.problems[0].starts_with(
+                "A player who starts at the spawn point \"bbbb\" in map.toml (50.0, 0.0, 0.0) \
+                 falls"
+            ),
+            "{}",
+            walked.problems[0]
+        );
+    }
+
+    #[test]
+    fn a_level_with_nothing_in_it_has_nothing_to_stand_on() {
+        let mut level = Scene::default();
+        level.markers.push(marker("spawn", [0.0; 3], 0.0));
+        let walked = try_walking(&level, &Map::default());
+        assert_eq!(walked.problems.len(), 1, "{:?}", walked.problems);
+        assert!(
+            walked.problems[0].starts_with("level.glb has no shapes in it"),
+            "{}",
+            walked.problems[0]
+        );
     }
 
     #[test]
