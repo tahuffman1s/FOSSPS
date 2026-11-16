@@ -26,6 +26,7 @@ use fossps::press::{self, Pressed};
 use fossps::scaffold::{self, NewGame};
 use fossps::script::ENTRY_SCRIPT;
 use fossps::script::mode::Phase;
+use fossps::sounds::SOUNDS_FOLDER;
 use fossps::{Config, Game, ScriptGame};
 
 use crate::demo::InputDemo;
@@ -406,8 +407,9 @@ fn open(folder: &Path, config: &Config, verb: &str) -> Result<ScriptGame, String
 }
 
 /// `fossps check`: runs a second of the game and a pretend match with no
-/// window, presses every action in turn, and loads the game's level. Fails
-/// if the script has a mistake or the level cannot be loaded.
+/// window, presses every action in turn, and loads the game's level and its
+/// sounds. Fails if the script has a mistake, or the level or a sound
+/// cannot be loaded.
 fn check(folder: &Path) -> Result<(), String> {
     /// One second of game time.
     const TICKS: u32 = 60;
@@ -419,6 +421,9 @@ fn check(folder: &Path) -> Result<(), String> {
     // Said before the script's own lines; a level with a mistake fails the
     // check at the end, after the script has had its turn.
     let level = cli::load_level(folder).inspect_err(|error| eprintln!("{error}"));
+    // Read before the script runs, so a sound that cannot be played is not
+    // one the script is let play. Each such file is logged as it is found.
+    game.load_sounds();
     let mut input = fossps::input::Input::new(config.actions.clone());
     let step = 1.0 / TICKS as f32;
     let mut played = false;
@@ -475,6 +480,14 @@ fn check(folder: &Path) -> Result<(), String> {
             error.file
         ));
     }
+    let unplayable = game.sounds().problems().len();
+    if unplayable > 0 {
+        return Err(format!(
+            "{unplayable} of the files in the game's {SOUNDS_FOLDER} folder cannot be \
+             played (each is explained above). Fix or remove them, then run `fossps \
+             check` again."
+        ));
+    }
     let Ok(level) = level else {
         return Err(format!(
             "{LEVEL_FILE} could not be loaded (the error is shown above), so the game \
@@ -514,6 +527,14 @@ fn check(folder: &Path) -> Result<(), String> {
             "Not pressed, because nothing is bound to them: {}.",
             pressed.unbound.join(", ")
         );
+    }
+    match game.sounds().own() {
+        0 => {}
+        sounds => println!(
+            "The {sounds} sound files in the {SOUNDS_FOLDER} folder are fine: each one \
+             loaded. Nothing was played, and a sound the script names is only looked up \
+             when that line runs: listen to them by playing with `fossps run`."
+        ),
     }
     if let Some(level) = level {
         println!(

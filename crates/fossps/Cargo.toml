@@ -11,7 +11,13 @@ default = ["window", "cli", "editor"]
 # Opens a window, draws into it and reads keyboard, mouse and gamepads. A
 # dedicated server builds without it and links no windowing, graphics or
 # gamepad libraries.
-window = ["dep:winit", "dep:gilrs", "dep:fossps-render", "dep:fossps-assets"]
+window = [
+    "dep:winit",
+    "dep:gilrs",
+    "dep:fossps-render",
+    "dep:fossps-assets",
+    "fossps-audio/device",
+]
 # Edit mode, `fossps edit`: a game's level with a fly camera and a ground
 # grid, in the same program. A build for players only can leave it out, and
 # a dedicated server never has it.
@@ -27,6 +33,10 @@ fossps-script = { path = "../fossps-script" }
 fossps-net = { path = "../fossps-net" }
 fossps-pack = { path = "../fossps-pack" }
 fossps-physics = { path = "../fossps-physics" }
+# Reads a game's sound files and mixes them. Its `device` feature, which
+# plays through the speakers and links a sound library, comes with `window`:
+# a dedicated server has neither.
+fossps-audio = { path = "../fossps-audio", default-features = false }
 # The HUD and menus a game hands over each frame. No dependencies of its own.
 fossps-ui = { path = "../fossps-ui" }
 fossps-render = { path = "../fossps-render", optional = true }

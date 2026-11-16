@@ -3,10 +3,12 @@
 use std::path::Path;
 
 use fossps_input::{ActionMap, InputFrame};
-use fossps_script::{OpenError, ScriptHost};
+use fossps_script::{AudioCommand, OpenError, ScriptHost};
 
 use crate::error_overlay::ErrorOverlay;
 use crate::game::{Frame, Game};
+use crate::sound_output::SoundAsk;
+use crate::sounds::Sounds;
 
 /// A [`Game`] that runs the `main.luau` in a game folder, with the scripts
 /// it requires, and loads them again whenever one of them is saved.
@@ -32,9 +34,56 @@ pub struct ScriptGame {
     /// Shows the latest script error over the game. Only a game whose
     /// scripts are files that can be fixed and saved has one.
     errors: Option<ErrorOverlay>,
+    /// The sounds the script can play by name.
+    sounds: Sounds,
 }
 
 impl ScriptGame {
+    /// A game running `host`, whose script can play `sounds`.
+    fn new(host: ScriptHost, errors: Option<ErrorOverlay>, sounds: Sounds) -> Self {
+        let mut game = Self {
+            host,
+            errors,
+            sounds,
+        };
+        game.name_sounds();
+        game
+    }
+
+    /// Tells the script which sounds there are.
+    fn name_sounds(&mut self) {
+        self.host.set_sounds(self.sounds.names());
+    }
+
+    /// Gives the game the sounds its script can play, in place of the ones
+    /// it has: a game from a folder starts with the sounds in the folder,
+    /// and a game from text with the starter sounds alone.
+    #[must_use]
+    pub fn with_sounds(mut self, sounds: Sounds) -> Self {
+        self.sounds = sounds;
+        self.name_sounds();
+        self
+    }
+
+    /// The sounds the game's script can play.
+    #[must_use]
+    pub fn sounds(&self) -> &Sounds {
+        &self.sounds
+    }
+
+    /// Reads the game's sound files if they have not been read, as the
+    /// first frame of a game with a window does, and logs the ones that
+    /// cannot be played. A server never needs to.
+    pub fn load_sounds(&mut self) {
+        if self.sounds.load() {
+            for problem in self.sounds.problems() {
+                log::warn!("{problem}");
+            }
+            // A sound that did not load is not one the script can play.
+            self.name_sounds();
+        }
+    }
+
     /// Opens the game in `folder`. The script reads input through `actions`,
     /// which should be the same actions the engine is started with.
     ///
@@ -46,10 +95,12 @@ impl ScriptGame {
     ///
     /// Fails if `folder` has no `main.luau` or the file cannot be read.
     pub fn open(folder: impl AsRef<Path>, actions: &ActionMap) -> Result<Self, OpenError> {
-        Ok(Self {
-            host: ScriptHost::open(folder, actions.clone())?,
-            errors: Some(ErrorOverlay::default()),
-        })
+        let folder = folder.as_ref();
+        Ok(Self::new(
+            ScriptHost::open(folder, actions.clone())?,
+            Some(ErrorOverlay::default()),
+            Sounds::in_folder(folder),
+        ))
     }
 
     /// Runs `source` as the game's `main.luau` with no file behind it and no
@@ -58,10 +109,11 @@ impl ScriptGame {
     /// `last_error`.
     #[must_use]
     pub fn from_source(source: impl Into<String>, actions: &ActionMap) -> Self {
-        Self {
-            host: ScriptHost::from_source(source, actions.clone()),
-            errors: None,
-        }
+        Self::new(
+            ScriptHost::from_source(source, actions.clone()),
+            None,
+            Sounds::starter(),
+        )
     }
 
     /// Runs a game whose scripts are given as text, as a packaged game does.
@@ -74,10 +126,11 @@ impl ScriptGame {
         scripts: impl IntoIterator<Item = (String, String)>,
         actions: &ActionMap,
     ) -> Self {
-        Self {
-            host: ScriptHost::from_sources(scripts, actions.clone()),
-            errors: None,
-        }
+        Self::new(
+            ScriptHost::from_sources(scripts, actions.clone()),
+            None,
+            Sounds::starter(),
+        )
     }
 
     /// The script host, for example to read its latest error.
@@ -96,12 +149,29 @@ impl ScriptGame {
 impl Game for ScriptGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
         self.host.poll_reload();
+        // A sound file added, saved or removed while the game runs.
+        if self.sounds.poll() {
+            self.name_sounds();
+        }
         self.host.tick(input, step);
     }
 
     fn frame(&mut self, frame: &mut Frame) {
         if let Some(rumble) = self.host.take_rumble() {
             frame.rumble(rumble);
+        }
+        // A frame means someone is here to listen.
+        self.load_sounds();
+        while let Some(command) = self.host.take_sound() {
+            match command {
+                AudioCommand::Play(request) => match self.sounds.play(&request) {
+                    Some(play) => frame.sound(SoundAsk::Play(request.id, play)),
+                    // Its file went between the script asking and now.
+                    None => log::warn!("The sound \"{}\" is no longer there.", request.name),
+                },
+                AudioCommand::Stop(id) => frame.sound(SoundAsk::Stop(id)),
+                AudioCommand::StopAll => frame.sound(SoundAsk::StopAll),
+            }
         }
         // Last, so it is on top of anything the game draws.
         if let Some(errors) = &mut self.errors {
