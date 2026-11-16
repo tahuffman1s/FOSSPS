@@ -1,12 +1,15 @@
 //! The editor's panels: what is in the level on the left, what is known
 //! about the chosen thing on the right, and how to fly along the bottom.
 //!
-//! They are made with `egui` and are for the mouse. Nothing in them can be
-//! changed yet; they show what the level file holds.
+//! They are made with `egui` and are for the mouse. What the level file
+//! holds is shown and cannot be changed; what is placed in the map file can
+//! be added, changed and removed.
 
 use std::fmt::Write as _;
 
 use fossps_assets::{Bounds, LightKind, Scene, Transform};
+
+use crate::map::{self, MAP_FILE, Map};
 
 /// How wide the two side panels start out, in `egui` points.
 const LIST_WIDTH: f32 = 260.0;
@@ -274,17 +277,50 @@ pub(crate) fn context() -> egui::Context {
 }
 
 /// What the person asked for in the panels this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct Asked {
-    /// Fly the camera to this one of the entities.
-    pub(crate) fly_to: Option<usize>,
+    /// Fly the camera to see something with this middle that reaches this
+    /// far from it, in metres.
+    pub(crate) fly_to: Option<([f32; 3], f32)>,
+    /// The map was changed and needs saving.
+    pub(crate) changed: bool,
+}
+
+/// What is chosen: something in the level file, by its place in the list of
+/// them, or something placed in the map, by its ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pick {
+    Level(usize),
+    Placed(String),
+}
+
+/// How far something placed in the map reaches, for flying to it: about a
+/// player's height.
+const PLACED_REACH: f32 = 1.0;
+
+/// What a placed entity goes by in the list: its name, or its type.
+pub(crate) fn placed_name(entity: &map::Entity) -> &str {
+    if entity.name.trim().is_empty() {
+        entity.kind.as_str()
+    } else {
+        entity.name.as_str()
+    }
 }
 
 /// The panels and what they show.
 pub(crate) struct LevelPanels {
     entities: Vec<Entity>,
-    /// Which of them is chosen, and shown in the inspector.
-    selected: Option<usize>,
+    /// What is chosen, and shown in the inspector.
+    selected: Option<Pick>,
+    /// The chosen placed entity's type as it is being typed: the entity
+    /// keeps its last whole type while the field is empty.
+    type_text: String,
+    /// The ID of the entity `type_text` was last filled in from.
+    typed_for: String,
+    /// The type the next thing placed gets: the last one placed or chosen.
+    next_type: String,
+    /// How many rows of the list were placed entities, last frame.
+    placed_rows: usize,
     /// What the list is called: the level's file, or that it is a stand-in.
     title: &'static str,
     /// Said under the title when the game has no level of its own.
@@ -294,6 +330,9 @@ pub(crate) struct LevelPanels {
     /// Where each listed row was drawn last frame, for tests to click on.
     #[cfg(test)]
     pub(crate) rows: Vec<(usize, egui::Rect)>,
+    /// Where the buttons and fields were drawn last frame, by what they do.
+    #[cfg(test)]
+    pub(crate) spots: Vec<(&'static str, egui::Rect)>,
 }
 
 impl LevelPanels {
@@ -302,6 +341,10 @@ impl LevelPanels {
         Self {
             entities: entities(scene),
             selected: None,
+            type_text: String::new(),
+            typed_for: String::new(),
+            next_type: map::SPAWN.to_owned(),
+            placed_rows: 0,
             title: if stand_in {
                 "Stand-in level"
             } else {
@@ -314,24 +357,77 @@ impl LevelPanels {
             warnings: scene.warnings.clone(),
             #[cfg(test)]
             rows: Vec::new(),
+            #[cfg(test)]
+            spots: Vec::new(),
         }
     }
 
-    /// Everything listed.
+    /// Notes where a button or field was drawn, for tests to click on.
+    #[cfg(test)]
+    fn mark(&mut self, what: &'static str, response: &egui::Response) {
+        self.spots.push((what, response.rect));
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
+    fn mark(&mut self, _what: &'static str, _response: &egui::Response) {}
+
+    /// Where the button or field called `what` was drawn last frame.
+    #[cfg(test)]
+    pub(crate) fn spot(&self, what: &str) -> egui::Pos2 {
+        self.spots
+            .iter()
+            .find(|(name, _)| *name == what)
+            .map(|(_, rect)| rect.center())
+            .unwrap_or_else(|| panic!("nothing called {what:?} was drawn"))
+    }
+
+    /// The ID of the placed entity that is chosen, if one is.
+    pub(crate) fn chosen_placed(&self) -> Option<&str> {
+        match &self.selected {
+            Some(Pick::Placed(id)) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Everything in the level file that is listed.
+    #[cfg(test)]
     pub(crate) fn entities(&self) -> &[Entity] {
         &self.entities
     }
 
-    /// Which entity is chosen.
+    /// Which row of the list is chosen: placed entities come first.
     #[cfg(test)]
     pub(crate) fn selected(&self) -> Option<usize> {
-        self.selected
+        match &self.selected {
+            Some(Pick::Level(index)) => Some(self.placed_rows + index),
+            Some(Pick::Placed(_)) | None => None,
+        }
     }
 
     /// Draws the panels into `ui`, which covers the window, with `status`
     /// (the camera's speed and place) in the bottom corner.
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, status: &str) -> Asked {
+    ///
+    /// `map` is what is placed in the level, which the panels change;
+    /// `saved` says how saving it went, and `spot` is where the next thing
+    /// placed goes and how far it is turned to the left, in degrees.
+    pub(crate) fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        status: &str,
+        map: &mut Map,
+        saved: &str,
+        spot: ([f32; 3], f32),
+    ) -> Asked {
         let mut asked = Asked::default();
+        // Something else may have saved the map without what was chosen.
+        if let Some(Pick::Placed(id)) = &self.selected
+            && map.get(id).is_none()
+        {
+            self.selected = None;
+        }
+        #[cfg(test)]
+        self.spots.clear();
         egui::Panel::bottom(egui::Id::new("fossps how to fly")).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(KEYS);
@@ -344,27 +440,59 @@ impl LevelPanels {
         egui::Panel::left(egui::Id::new("fossps level list"))
             .resizable(true)
             .default_size(LIST_WIDTH)
-            .show(ui, |ui| self.list(ui, &mut asked));
+            .show(ui, |ui| self.list(ui, &mut asked, map, saved, spot));
         egui::Panel::right(egui::Id::new("fossps inspector"))
             .resizable(true)
             .default_size(INSPECTOR_WIDTH)
-            .show(ui, |ui| self.inspector(ui, &mut asked));
+            .show(ui, |ui| self.inspector(ui, &mut asked, map));
         asked
     }
 
-    /// The list of everything in the level. A click chooses one and a
-    /// double click flies to it.
-    fn list(&mut self, ui: &mut egui::Ui, asked: &mut Asked) {
+    /// The list of everything placed in the map and everything in the
+    /// level. A click chooses one and a double click flies to it.
+    fn list(
+        &mut self,
+        ui: &mut egui::Ui,
+        asked: &mut Asked,
+        map: &mut Map,
+        saved: &str,
+        spot: ([f32; 3], f32),
+    ) {
         ui.heading(self.title);
         ui.weak(count_words(&self.entities));
         if let Some(hint) = self.hint {
             ui.label(hint);
         }
         ui.separator();
+        ui.strong(MAP_FILE);
+        ui.weak(if map.is_empty() {
+            "Nothing placed yet".to_owned()
+        } else {
+            map.summary()
+        });
+        let place = ui
+            .button(format!("Place a {} here", self.next_type))
+            .on_hover_text(
+                "Puts one on the ground where the camera looks. Change what it is on the \
+                 right; the next one placed is the same.",
+            );
+        self.mark("place", &place);
+        if place.clicked()
+            && let Some(id) = map.place(&self.next_type, spot.0, spot.1)
+        {
+            self.selected = Some(Pick::Placed(id.to_owned()));
+            asked.changed = true;
+        }
+        if !saved.is_empty() {
+            ui.add(egui::Label::new(egui::RichText::new(saved).weak()).wrap());
+        }
+        ui.separator();
         #[cfg(test)]
         self.rows.clear();
         let row_height = ui.spacing().interact_size.y;
-        let total = self.entities.len();
+        let placed = map.entities().len();
+        self.placed_rows = placed;
+        let total = placed + self.entities.len();
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             row_height,
@@ -372,21 +500,39 @@ impl LevelPanels {
             |ui, rows| {
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                     for row in rows {
-                        let Some(entity) = self.entities.get(row) else {
-                            continue;
-                        };
-                        let chosen = self.selected == Some(row);
-                        let button = egui::Button::selectable(chosen, entity.name.as_str())
-                            .right_text(egui::RichText::new(entity.kind.word()).weak())
+                        // Placed entities first: they are what is worked on.
+                        let (name, word, pick, middle, reach) =
+                            if let Some(entity) = map.entities().get(row) {
+                                (
+                                    placed_name(entity),
+                                    entity.kind.as_str(),
+                                    Pick::Placed(entity.id.clone()),
+                                    entity.position,
+                                    PLACED_REACH,
+                                )
+                            } else if let Some(entity) = self.entities.get(row - placed) {
+                                (
+                                    entity.name.as_str(),
+                                    entity.kind.word(),
+                                    Pick::Level(row - placed),
+                                    entity.middle,
+                                    entity.reach,
+                                )
+                            } else {
+                                continue;
+                            };
+                        let chosen = self.selected.as_ref() == Some(&pick);
+                        let button = egui::Button::selectable(chosen, name)
+                            .right_text(egui::RichText::new(word).weak())
                             .truncate();
                         let response = ui.add(button);
                         #[cfg(test)]
                         self.rows.push((row, response.rect));
                         if response.clicked() {
-                            self.selected = Some(row);
+                            self.selected = Some(pick);
                         }
                         if response.double_clicked() {
-                            asked.fly_to = Some(row);
+                            asked.fly_to = Some((middle, reach));
                         }
                     }
                 });
@@ -394,12 +540,148 @@ impl LevelPanels {
         );
     }
 
+    /// What can be changed about the placed entity with this ID.
+    fn placed_inspector(&mut self, ui: &mut egui::Ui, asked: &mut Asked, map: &mut Map, id: &str) {
+        let Some(entity) = map.get_mut(id) else {
+            return;
+        };
+        if self.typed_for != id {
+            self.type_text.clone_from(&entity.kind);
+            id.clone_into(&mut self.typed_for);
+        }
+        ui.heading(placed_name(entity));
+        ui.weak(format!("placed in {MAP_FILE}"));
+        ui.separator();
+        let mut marks: Vec<(&'static str, egui::Response)> = Vec::new();
+        let mut changed = false;
+        egui::Grid::new(egui::Id::new("fossps placed"))
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.weak("Type");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.type_text)
+                        .char_limit(map::LONGEST_WORD)
+                        .desired_width(f32::INFINITY),
+                );
+                if field.changed() {
+                    // Kept as it was while the field is empty or mid-word.
+                    if map::is_type(&self.type_text) {
+                        entity.kind.clone_from(&self.type_text);
+                        self.next_type.clone_from(&self.type_text);
+                        changed = true;
+                    }
+                } else if !field.has_focus() && self.type_text != entity.kind {
+                    self.type_text.clone_from(&entity.kind);
+                }
+                marks.push(("type", field));
+                ui.end_row();
+
+                ui.weak("Name");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut entity.name)
+                        .char_limit(map::LONGEST_TEXT)
+                        .hint_text("none")
+                        .desired_width(f32::INFINITY),
+                );
+                changed |= field.changed();
+                marks.push(("name", field));
+                ui.end_row();
+
+                ui.weak("Position");
+                ui.horizontal(|ui| {
+                    for (axis, what) in ["x", "y", "z"].into_iter().enumerate() {
+                        let field = ui.add(
+                            egui::DragValue::new(&mut entity.position[axis])
+                                .speed(0.05)
+                                .range(-map::FURTHEST..=map::FURTHEST)
+                                .max_decimals(3)
+                                .suffix(" m"),
+                        );
+                        changed |= field.changed();
+                        marks.push((what, field));
+                    }
+                });
+                ui.end_row();
+
+                ui.weak("Turned");
+                let field = ui.add(
+                    egui::DragValue::new(&mut entity.facing)
+                        .speed(1.0)
+                        .range(-180.0..=180.0)
+                        .max_decimals(2)
+                        .suffix("° to the left"),
+                );
+                changed |= field.changed();
+                marks.push(("facing", field));
+                ui.end_row();
+
+                ui.weak("ID");
+                ui.add(egui::Label::new(entity.id.as_str()).wrap())
+                    .on_hover_text("Kept for good, so scripts can refer to it.");
+                ui.end_row();
+            });
+        if !entity.properties.is_empty() {
+            ui.separator();
+            ui.weak("Properties");
+            for (name, value) in &entity.properties {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(format!("{name} = {value}")).monospace())
+                        .wrap(),
+                );
+            }
+        }
+        ui.separator();
+        let (middle, own_type) = (entity.position, entity.kind.clone());
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            if ui.button("Fly to it").clicked() {
+                asked.fly_to = Some((middle, PLACED_REACH));
+            }
+            let button = ui
+                .button("Remove")
+                .on_hover_text("Takes it out of the map. There is no undo yet.");
+            remove = button.clicked();
+            marks.push(("remove", button));
+        });
+        ui.add_space(8.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "Changes are saved in {MAP_FILE} as you go, and a game that is running \
+                     picks them up. Properties are added in that file for now, under a \
+                     line saying [entity.properties]; a save there shows up here, unless a change made here is waiting to be saved."
+                ))
+                .weak(),
+            )
+            .wrap(),
+        );
+        for (what, response) in &marks {
+            self.mark(what, response);
+        }
+        // The next one placed is the same sort as the one last looked at.
+        if self.next_type != own_type {
+            self.next_type = own_type;
+        }
+        if remove {
+            map.remove(id);
+            self.selected = None;
+            changed = true;
+        }
+        asked.changed |= changed;
+    }
+
     /// What is known about the chosen entity, or about the level if none is.
-    fn inspector(&mut self, ui: &mut egui::Ui, asked: &mut Asked) {
-        let Some((index, entity)) = self
-            .selected
-            .and_then(|index| Some((index, self.entities.get(index)?)))
-        else {
+    fn inspector(&mut self, ui: &mut egui::Ui, asked: &mut Asked, map: &mut Map) {
+        if let Some(Pick::Placed(id)) = self.selected.clone() {
+            self.placed_inspector(ui, asked, map, &id);
+            return;
+        }
+        let chosen = match &self.selected {
+            Some(Pick::Level(index)) => self.entities.get(*index),
+            _ => None,
+        };
+        let Some(entity) = chosen else {
             ui.heading("Nothing chosen");
             ui.label("Click a name in the list on the left to see it here.");
             if !self.warnings.is_empty() {
@@ -452,11 +734,14 @@ impl LevelPanels {
         }
         ui.separator();
         if ui.button("Fly to it").clicked() {
-            asked.fly_to = Some(index);
+            asked.fly_to = Some((entity.middle, entity.reach));
         }
         ui.weak("Or double-click its name in the list.");
         ui.add_space(8.0);
-        ui.weak("These values come from the level file and cannot be changed here yet.");
+        ui.weak(
+            "These values come from the level file, which the editor never writes: \
+             change them in the 3D tool and export the level again.",
+        );
     }
 }
 

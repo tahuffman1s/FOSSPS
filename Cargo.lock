@@ -908,6 +908,7 @@ dependencies = [
  "fossps-assets",
  "fossps-audio",
  "fossps-input",
+ "fossps-mode",
  "fossps-net",
  "fossps-pack",
  "fossps-physics",
@@ -917,6 +918,7 @@ dependencies = [
  "gilrs",
  "log",
  "tar",
+ "toml",
  "winit",
 ]
 

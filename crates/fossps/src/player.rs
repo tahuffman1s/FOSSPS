@@ -13,6 +13,7 @@ use fossps_input::ActionMap;
 use fossps_pack::{EXTENSION, Pack, PackError};
 use fossps_script::ENTRY_SCRIPT;
 
+use crate::map::{MAP_FILE, Map, MapError};
 use crate::scaffold::LEVEL_FILE;
 use crate::script_game::ScriptGame;
 use crate::sounds::Sounds;
@@ -80,6 +81,13 @@ pub enum PlayError {
         /// The script the mistake is in, such as `main.luau`.
         file: String,
     },
+    /// The pack's `map.toml` has a mistake.
+    MapMistake {
+        /// The pack.
+        pack: PathBuf,
+        /// What is wrong with the map file.
+        error: MapError,
+    },
 }
 
 impl fmt::Display for PlayError {
@@ -99,6 +107,13 @@ impl fmt::Display for PlayError {
                  `fossps check`, then package it again. Otherwise, tell the game's maker.",
                 pack.display()
             ),
+            Self::MapMistake { pack, error } => write!(
+                f,
+                "The game in {} cannot start: its map file has a mistake.\n{error}\nIf it \
+                 is your game, fix the map file, try it with `fossps check`, then package \
+                 it again. Otherwise, tell the game's maker.",
+                pack.display()
+            ),
         }
     }
 }
@@ -107,6 +122,7 @@ impl std::error::Error for PlayError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Pack(error) => Some(error),
+            Self::MapMistake { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -125,13 +141,14 @@ const SCRIPT_ENDING: &str = ".luau";
 /// `actions`, which should be the same actions the engine is started with.
 ///
 /// The level is handed over as bytes and not read here, so a server can
-/// open a pack without any level-reading code.
+/// open a pack without any level-reading code. The pack's `map.toml`, if it
+/// has one, is read and placed in the game.
 ///
 /// # Errors
 ///
-/// Fails if the pack cannot be read, holds no `main.luau`, or its script has
-/// a mistake: a packaged game has no file to fix and save, so a script that
-/// does not load is not worth opening a window for.
+/// Fails if the pack cannot be read, holds no `main.luau`, or its script or
+/// its map file has a mistake: a packaged game has no file to fix and save,
+/// so one that does not load is not worth opening a window for.
 pub fn open(pack: &Path, actions: &ActionMap) -> Result<PackedGame, PlayError> {
     let mut opened = Pack::open(pack)?;
     if !opened.contains(ENTRY_SCRIPT) {
@@ -163,6 +180,17 @@ pub fn open(pack: &Path, actions: &ActionMap) -> Result<PackedGame, PlayError> {
             file: error.file.clone(),
         });
     }
+    let game = if opened.contains(MAP_FILE) {
+        let text = opened.read_text(MAP_FILE)?;
+        let name = format!("{MAP_FILE} in {}", pack.display());
+        let map = Map::parse(&name, &text).map_err(|error| PlayError::MapMistake {
+            pack: pack.to_owned(),
+            error,
+        })?;
+        game.with_map(map)
+    } else {
+        game
+    };
     let level = if opened.contains(LEVEL_FILE) {
         Some(opened.read(LEVEL_FILE)?)
     } else {
@@ -277,6 +305,37 @@ mod tests {
         let with = pack(&folder, &[("main.luau", ""), ("level.glb", "the level")]);
         let packed = open(&with, &ActionMap::default()).unwrap();
         assert_eq!(packed.level.as_deref(), Some(b"the level".as_slice()));
+        let _ = fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_packed_game_has_the_map_it_was_packed_with() {
+        let folder = scratch("map");
+        let without = pack(&folder, &[("main.luau", "")]);
+        let packed = open(&without, &ActionMap::default()).unwrap();
+        assert!(packed.game.map().is_empty());
+
+        let map = "version = 1\n[[entity]]\nid = \"a\"\ntype = \"spawn\"\nposition = [1, 0, 2]\n";
+        let with = pack(&folder, &[("main.luau", ""), ("map.toml", map)]);
+        let packed = open(&with, &ActionMap::default()).unwrap();
+        let spawns: Vec<[f32; 3]> = packed.game.map().spawns().map(|e| e.position).collect();
+        assert_eq!(spawns, [[1.0, 0.0, 2.0]]);
+
+        // A map with a mistake stops the game before it starts, and says
+        // where the mistake is.
+        let broken = pack(
+            &folder,
+            &[("main.luau", ""), ("map.toml", "version = 1\nsky = 1\n")],
+        );
+        let said = open(&broken, &ActionMap::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.contains("cannot start: its map file has a mistake"),
+            "{said}"
+        );
+        assert!(said.contains("line 2: \"sky\" is not something"), "{said}");
+        assert!(said.contains("tell the game's maker"), "{said}");
         let _ = fs::remove_dir_all(&folder);
     }
 

@@ -7,6 +7,7 @@ use fossps_script::{AudioCommand, OpenError, ScriptHost};
 
 use crate::error_overlay::ErrorOverlay;
 use crate::game::{Frame, Game};
+use crate::map::{Map, MapError, MapFile};
 use crate::sound_output::SoundAsk;
 use crate::sounds::Sounds;
 
@@ -17,6 +18,9 @@ use crate::sounds::Sounds;
 /// shows it on screen, over the game, until a save loads the script again.
 /// A game run from text has no file to fix, so it shows nothing: its
 /// players did not write it.
+///
+/// A game opened from a folder also has what its `map.toml` places in the
+/// level ([`map`](Self::map)), read again whenever that file is saved.
 ///
 /// ```no_run
 /// use fossps::{Config, ScriptGame};
@@ -36,15 +40,32 @@ pub struct ScriptGame {
     errors: Option<ErrorOverlay>,
     /// The sounds the script can play by name.
     sounds: Sounds,
+    /// What is placed in the level.
+    map: Map,
+    /// The map's file, looked at for saves. Only a game opened from a
+    /// folder has one.
+    map_file: Option<MapFile>,
+    /// Why the map file as it now is could not be read, if it could not.
+    map_error: Option<MapError>,
 }
 
+/// Said after a mistake in a map file, by what the game does about it.
+const NOTHING_PLACED: &str = "The game runs with nothing placed in its level. Fix this and \
+                              save the file: the game picks it up by itself.";
+const KEEPS_MAP: &str = "The game keeps the map it had. Fix this and save the file: the \
+                         game picks it up by itself.";
+
 impl ScriptGame {
-    /// A game running `host`, whose script can play `sounds`.
-    fn new(host: ScriptHost, errors: Option<ErrorOverlay>, sounds: Sounds) -> Self {
+    /// A game running `host` with no files behind it: it has the starter
+    /// sounds, and nothing placed in its level.
+    fn without_files(host: ScriptHost) -> Self {
         let mut game = Self {
             host,
-            errors,
-            sounds,
+            errors: None,
+            sounds: Sounds::starter(),
+            map: Map::default(),
+            map_file: None,
+            map_error: None,
         };
         game.name_sounds();
         game
@@ -91,16 +112,34 @@ impl ScriptGame {
     /// shown on screen, and the game waits for the file to be fixed and
     /// saved.
     ///
+    /// The same goes for a mistake in the game's `map.toml`: it is logged,
+    /// nothing is placed, and the game waits for the file to be fixed and
+    /// saved ([`map_error`](Self::map_error) says what is wrong meanwhile).
+    ///
     /// # Errors
     ///
     /// Fails if `folder` has no `main.luau` or the file cannot be read.
     pub fn open(folder: impl AsRef<Path>, actions: &ActionMap) -> Result<Self, OpenError> {
         let folder = folder.as_ref();
-        Ok(Self::new(
-            ScriptHost::open(folder, actions.clone())?,
-            Some(ErrorOverlay::default()),
-            Sounds::in_folder(folder),
-        ))
+        let host = ScriptHost::open(folder, actions.clone())?;
+        let (map_file, read) = MapFile::open(folder);
+        let (map, map_error) = match read {
+            Ok(map) => (map, None),
+            Err(error) => {
+                log::error!("{error}\n{NOTHING_PLACED}");
+                (Map::default(), Some(error))
+            }
+        };
+        let mut game = Self {
+            host,
+            errors: Some(ErrorOverlay::default()),
+            sounds: Sounds::in_folder(folder),
+            map,
+            map_file: Some(map_file),
+            map_error,
+        };
+        game.name_sounds();
+        Ok(game)
     }
 
     /// Runs `source` as the game's `main.luau` with no file behind it and no
@@ -109,11 +148,7 @@ impl ScriptGame {
     /// `last_error`.
     #[must_use]
     pub fn from_source(source: impl Into<String>, actions: &ActionMap) -> Self {
-        Self::new(
-            ScriptHost::from_source(source, actions.clone()),
-            None,
-            Sounds::starter(),
-        )
+        Self::without_files(ScriptHost::from_source(source, actions.clone()))
     }
 
     /// Runs a game whose scripts are given as text, as a packaged game does.
@@ -126,11 +161,49 @@ impl ScriptGame {
         scripts: impl IntoIterator<Item = (String, String)>,
         actions: &ActionMap,
     ) -> Self {
-        Self::new(
-            ScriptHost::from_sources(scripts, actions.clone()),
-            None,
-            Sounds::starter(),
-        )
+        Self::without_files(ScriptHost::from_sources(scripts, actions.clone()))
+    }
+
+    /// Places `map` in the game's level, as a packaged game does with the
+    /// map it was packed with. It takes the place of any map the game had.
+    #[must_use]
+    pub fn with_map(mut self, map: Map) -> Self {
+        self.map = map;
+        self.map_error = None;
+        self
+    }
+
+    /// What is placed in the game's level: its spawn points, zones and
+    /// objectives. For a game opened from a folder this is its `map.toml`
+    /// as last saved without a mistake.
+    #[must_use]
+    pub fn map(&self) -> &Map {
+        &self.map
+    }
+
+    /// What is wrong with the game's `map.toml` as it now is on disk, if it
+    /// could not be read. The game keeps the map it had.
+    #[must_use]
+    pub fn map_error(&self) -> Option<&MapError> {
+        self.map_error.as_ref()
+    }
+
+    /// Reads the map file again if it was saved since it was last read.
+    fn poll_map(&mut self) {
+        let Some(change) = self.map_file.as_mut().and_then(MapFile::changed) else {
+            return;
+        };
+        match change {
+            Ok(map) => {
+                log::info!("Loaded {} again: {}.", crate::map::MAP_FILE, map.summary());
+                self.map = map;
+                self.map_error = None;
+            }
+            Err(error) => {
+                log::error!("{error}\n{KEEPS_MAP}");
+                self.map_error = Some(error);
+            }
+        }
     }
 
     /// The script host, for example to read its latest error.
@@ -149,6 +222,7 @@ impl ScriptGame {
 impl Game for ScriptGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
         self.host.poll_reload();
+        self.poll_map();
         // A sound file added, saved or removed while the game runs.
         if self.sounds.poll() {
             self.name_sounds();
