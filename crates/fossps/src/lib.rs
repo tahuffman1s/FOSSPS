@@ -50,6 +50,8 @@ pub mod press;
 pub mod scaffold;
 mod script_game;
 pub mod server;
+mod sound_output;
+pub mod sounds;
 #[cfg(feature = "window")]
 mod standin;
 #[cfg(all(test, feature = "window"))]
@@ -59,6 +61,7 @@ mod tick;
 mod translate;
 
 pub use fossps_assets as assets;
+pub use fossps_audio as audio;
 pub use fossps_input as input;
 pub use fossps_input::{ActionId, ActionMap, ActionSetId, InputFrame, MouseMode, Rumble};
 #[cfg(feature = "window")]

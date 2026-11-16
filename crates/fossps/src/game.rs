@@ -3,6 +3,8 @@
 use fossps_input::{ActionSetId, InputFrame, Rumble};
 use fossps_ui::{DrawBuffer, Ui};
 
+use crate::sound_output::SoundAsk;
+
 /// A game the engine can run.
 pub trait Game {
     /// Advances the simulation by one fixed step of `step` seconds.
@@ -45,6 +47,9 @@ pub struct Frame {
     view: Option<View>,
     action_set: Option<ActionSetId>,
     rumble: Option<Rumble>,
+    /// The sounds to start and stop. Empty, and so without memory of its
+    /// own, in a frame that asks for none.
+    sounds: Vec<SoundAsk>,
     /// The editor's panels: what they are made with, and what was made.
     #[cfg(feature = "editor")]
     panels: Option<PanelFrame>,
@@ -108,6 +113,7 @@ impl Frame {
             view: None,
             action_set: None,
             rumble: None,
+            sounds: Vec::new(),
             #[cfg(feature = "editor")]
             panels: None,
         }
@@ -311,6 +317,18 @@ impl Frame {
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(crate) fn rumble_requested(&self) -> Option<Rumble> {
         self.rumble
+    }
+
+    /// Starts or stops a sound for the player at this computer. A game on
+    /// a server has no speakers, so nothing happens there.
+    pub(crate) fn sound(&mut self, ask: SoundAsk) {
+        self.sounds.push(ask);
+    }
+
+    /// The sounds asked for this frame, in order.
+    #[cfg_attr(not(any(feature = "window", test)), allow(dead_code))]
+    pub(crate) fn take_sounds(&mut self) -> Vec<SoundAsk> {
+        std::mem::take(&mut self.sounds)
     }
 
     /// The title requested this frame, if any.

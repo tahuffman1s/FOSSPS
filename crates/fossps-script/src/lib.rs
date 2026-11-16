@@ -28,12 +28,14 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod api;
+mod audio;
 mod error;
 mod host;
 mod keep;
 mod mode_api;
 mod modules;
 
+pub use audio::{AudioCommand, SoundId, SoundRequest};
 pub use error::{OpenError, ScriptError};
 pub use fossps_mode as mode;
 pub use fossps_mode::PlayerId;
