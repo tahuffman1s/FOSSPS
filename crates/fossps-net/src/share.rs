@@ -45,6 +45,19 @@ pub(crate) const WINDOW: u32 = 32;
 /// How long to wait for the pieces asked for before asking again.
 const ASK_AGAIN: Duration = Duration::from_millis(250);
 
+/// How long after the last piece to arrive the rest of what was asked for
+/// is taken to be lost, and asked for again. Pieces of one answer arrive
+/// together, so a lost one costs this and not [`ASK_AGAIN`].
+const QUIET: Duration = Duration::from_millis(50);
+
+/// How long any fetch is given before it counts as too slow.
+const GRACE: Duration = Duration::from_secs(30);
+
+/// The slowest a file may arrive, in bytes a second, on top of [`GRACE`]:
+/// a server cannot keep a player waiting for ever by sending a piece now
+/// and then.
+const SLOWEST: u64 = 32 * 1024;
+
 /// The SHA-256 hash of `bytes`: what a shared file is known by.
 #[must_use]
 pub fn hash_of(bytes: &[u8]) -> [u8; 32] {
@@ -239,6 +252,8 @@ pub(crate) enum Progress {
     Whole,
     /// Every piece is held and the hash is wrong.
     Damaged,
+    /// This machine has no memory left for the file.
+    NoRoom,
 }
 
 /// A file on its way to a player.
@@ -259,6 +274,8 @@ pub(crate) struct Transfer {
     ask_at: Duration,
     /// When a piece last arrived, or the fetch began.
     pub(crate) heard: Duration,
+    /// When the fetch began.
+    began: Duration,
 }
 
 impl Transfer {
@@ -272,15 +289,16 @@ impl Transfer {
         Some(Self {
             slot,
             file,
-            // The system hands zeroed memory over as it is touched, so a
-            // long file that never arrives costs little.
-            bytes: vec![0; len],
+            // Grown as pieces arrive: the length is only the server's
+            // word, and a file that never arrives should cost nothing.
+            bytes: Vec::new(),
             held: vec![0; (file.pieces() as usize).div_ceil(64)],
             count: 0,
             next: 0,
             asked: 0,
             ask_at: now,
             heard: now,
+            began: now,
         })
     }
 
@@ -313,11 +331,17 @@ impl Transfer {
         }
         let start = index as usize * PIECE_BYTES;
         // Every piece is full but the last, which holds what is left.
-        let Some(place) = self
-            .bytes
-            .get_mut(start..(start + PIECE_BYTES).min(self.file.len as usize))
-            .filter(|place| place.len() == piece.len())
-        else {
+        let end = (start + PIECE_BYTES).min(self.file.len as usize);
+        if piece.len() != end - start {
+            return Progress::Nothing;
+        }
+        if self.bytes.len() < end {
+            if self.bytes.try_reserve(end - self.bytes.len()).is_err() {
+                return Progress::NoRoom;
+            }
+            self.bytes.resize(end, 0);
+        }
+        let Some(place) = self.bytes.get_mut(start..end) else {
             return Progress::Nothing;
         };
         place.copy_from_slice(piece);
@@ -337,10 +361,20 @@ impl Transfer {
             };
         }
         // Everything asked for is here: ask for more without waiting.
-        if self.next >= self.asked.saturating_add(WINDOW) {
-            self.ask_at = now;
-        }
+        // Otherwise ask once no more of it comes.
+        self.ask_at = if self.next >= self.asked.saturating_add(WINDOW) {
+            now
+        } else {
+            now.saturating_add(QUIET)
+        };
         Progress::More
+    }
+
+    /// Whether the fetch has gone on longer than the slowest connection
+    /// worth playing on would take.
+    pub(crate) fn overdue(&self, now: Duration) -> bool {
+        let allowed = GRACE.saturating_add(Duration::from_secs(u64::from(self.file.len) / SLOWEST));
+        now.saturating_sub(self.began) > allowed
     }
 
     /// The piece to ask from, when it is time to ask.
@@ -351,5 +385,67 @@ impl Transfer {
         self.ask_at = now.saturating_add(ASK_AGAIN);
         self.asked = self.next;
         Some((self.file.tag(), self.next))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_takes_memory_only_as_it_arrives_and_in_any_order() {
+        let bytes: Vec<u8> = (0..2 * PIECE_BYTES + 100).map(|at| at as u8).collect();
+        let file = SharedFile {
+            len: bytes.len() as u32,
+            hash: hash_of(&bytes),
+        };
+        let now = Duration::ZERO;
+        let mut transfer = Transfer::start(now, 0, file).unwrap();
+        assert!(transfer.bytes().is_empty());
+        assert_eq!(transfer.bytes.capacity(), 0);
+
+        let pieces: Vec<&[u8]> = bytes.chunks(PIECE_BYTES).collect();
+        // The last piece first, then the first, then the middle one.
+        assert_eq!(transfer.take(now, file.tag(), 2, pieces[2]), Progress::More);
+        assert_eq!(transfer.fetched(), PIECE_BYTES as u64);
+        assert_eq!(transfer.take(now, file.tag(), 0, pieces[0]), Progress::More);
+        assert_eq!(
+            transfer.take(now, file.tag(), 0, pieces[0]),
+            Progress::Nothing
+        );
+        assert_eq!(
+            transfer.take(now, file.tag(), 1, pieces[1]),
+            Progress::Whole
+        );
+        assert_eq!(transfer.bytes(), bytes);
+
+        // The longest file a player takes costs nothing to start on.
+        let longest = SharedFile {
+            len: MAX_SHARED_BYTES as u32,
+            hash: [0; 32],
+        };
+        let transfer = Transfer::start(now, 0, longest).unwrap();
+        assert_eq!(transfer.bytes.capacity(), 0);
+        assert!(transfer.held.len() * 64 >= longest.pieces() as usize);
+    }
+
+    #[test]
+    fn a_fetch_is_overdue_after_half_a_minute_and_what_a_slow_link_would_take() {
+        let small = SharedFile {
+            len: 10,
+            hash: [0; 32],
+        };
+        let transfer = Transfer::start(Duration::from_secs(100), 0, small).unwrap();
+        assert!(!transfer.overdue(Duration::from_secs(130)));
+        assert!(transfer.overdue(Duration::from_secs(131)));
+
+        let longest = SharedFile {
+            len: MAX_SHARED_BYTES as u32,
+            hash: [0; 32],
+        };
+        let transfer = Transfer::start(Duration::ZERO, 0, longest).unwrap();
+        // 256 MiB at 32 KiB a second is 8192 seconds.
+        assert!(!transfer.overdue(Duration::from_secs(8222)));
+        assert!(transfer.overdue(Duration::from_secs(8223)));
     }
 }

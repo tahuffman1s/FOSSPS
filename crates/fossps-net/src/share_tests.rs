@@ -414,10 +414,10 @@ fn a_server_that_stops_sending_is_given_up_on() {
 #[test]
 fn a_fetch_longer_than_a_number_lasts_goes_on_and_still_joins() {
     let mut pair = Pair::new();
-    let level = file(200 * PIECE_BYTES);
+    let level = file(2048 * PIECE_BYTES);
     pair.host.share(0, level.clone()).unwrap();
-    // Fifteen pieces in sixteen are lost, so the fetch takes a long while.
-    pair.lose = |sent| sent.wrapping_mul(0x9E37_79B1) >> 28 != 0;
+    // Seven pieces in eight are lost, so the fetch takes a long while.
+    pair.lose = |sent| sent.wrapping_mul(0x9E37_79B1) >> 29 != 0;
     assert_eq!(pair.until_heard(), LinkHeard::Offered);
     assert!(pair.link.fetch(pair.now, 0));
     assert_eq!(pair.until_heard(), LinkHeard::Fetched(0));
@@ -485,4 +485,87 @@ fn a_slot_is_emptied_and_a_file_that_cannot_be_offered_says_why() {
     pair.host.unshare(MAX_SHARED_FILES);
     pair.join(0);
     assert!(pair.link.offer().is_empty());
+}
+
+#[test]
+fn one_lost_piece_is_asked_for_again_within_a_moment() {
+    let mut pair = Pair::new();
+    let level = file(64 * PIECE_BYTES);
+    pair.host.share(0, level.clone()).unwrap();
+    pair.lose = |sent| sent == 5;
+    assert_eq!(pair.until_heard(), LinkHeard::Offered);
+    let began = pair.now;
+    assert!(pair.link.fetch(pair.now, 0));
+    assert_eq!(pair.until_heard(), LinkHeard::Fetched(0));
+    assert_eq!(pair.link.fetched(), Some(&*level));
+    // Three answers and one short wait, not a quarter of a second's.
+    assert!(
+        pair.now - began < Duration::from_millis(120),
+        "{:?}",
+        pair.now - began
+    );
+}
+
+#[test]
+fn a_server_that_sends_a_piece_now_and_then_is_given_up_on() {
+    let mut pair = Pair::new();
+    pair.host.share(0, file(100 * PIECE_BYTES)).unwrap();
+    assert_eq!(pair.until_heard(), LinkHeard::Offered);
+    let began = pair.now;
+    assert!(pair.link.fetch(pair.now, 0));
+    assert_eq!(pair.link.update(pair.now, &mut pair.to_host), None);
+    let Some(Heard::Fetch(fetch)) =
+        pair.host
+            .receive(pair.now, pair.from, &pair.to_host, &mut pair.to_link)
+    else {
+        panic!("expected a fetch");
+    };
+    // One piece every nine seconds: never silent for the ten that end a
+    // stay, and never done.
+    let mut ended = None;
+    for second in 1..200_u32 {
+        pair.now += Duration::from_secs(1);
+        if second % 9 == 0 {
+            assert!(pair.host.write_piece(fetch, second / 9, &mut pair.to_link));
+            assert_eq!(pair.link.receive(pair.now, &pair.to_link), None);
+        }
+        ended = pair.link.update(pair.now, &mut pair.to_host);
+        if ended.is_some() {
+            break;
+        }
+    }
+    assert_eq!(ended, Some(Closed::NeverReady));
+    let waited = pair.now - began;
+    assert!(
+        waited > Duration::from_secs(30) && waited < Duration::from_secs(40),
+        "{waited:?}"
+    );
+    assert!(Closed::NeverReady.to_string().contains("too slowly"));
+}
+
+#[test]
+fn a_server_that_keeps_changing_its_offer_is_given_up_on() {
+    let mut pair = Pair::new();
+    pair.host.share(0, file(500 * PIECE_BYTES)).unwrap();
+    pair.lose = |_| true;
+    assert_eq!(pair.until_heard(), LinkHeard::Offered);
+    assert!(pair.link.fetch(pair.now, 0));
+    let mut offers = 1;
+    let ended = loop {
+        // Each time the player starts on the file, the server swaps it.
+        pair.host
+            .share(0, file(500 * PIECE_BYTES + offers))
+            .unwrap();
+        match pair.until_heard() {
+            LinkHeard::Offered => {
+                offers += 1;
+                assert!(offers < 100, "the player never gave up");
+                assert!(pair.link.fetch(pair.now, 0));
+            }
+            other => break other,
+        }
+    };
+    assert_eq!(ended, LinkHeard::Closed(Closed::NeverReady));
+    assert_eq!(offers, 9);
+    assert_eq!(pair.link.closed(), Some(Closed::NeverReady));
 }

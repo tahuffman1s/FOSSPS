@@ -879,7 +879,8 @@ impl Arrivals {
                 Ok(map) => self.map = Some(map),
                 Err(error) => log::warn!(
                     "The server's map could not be read, so you may start out facing the \
-                     wrong way: {error}"
+                     wrong way: {}",
+                    plain(&error)
                 ),
             }
         }
@@ -894,6 +895,7 @@ impl Arrivals {
                 self.level = Some(level);
             }
             Err(error) => {
+                let error = plain(&error.to_string());
                 self.problem = Some(format!(
                     "the level it plays could not be read on this computer.\n{error}\nIf the \
                      server runs a newer FOSSPS than this, update this copy; otherwise tell \
@@ -913,6 +915,18 @@ impl Arrivals {
             log::info!("{} of {} so far...", size_text(fetched), size_text(whole));
         }
     }
+}
+
+/// The most of an error about a server's file that is shown, in characters.
+const MOST_SHOWN: usize = 600;
+
+/// `text`, which quotes a file a server sent, made safe to show in a
+/// terminal: no control characters but new lines, and not too long.
+fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|letter| *letter == '\n' || !letter.is_control())
+        .take(MOST_SHOWN)
+        .collect()
 }
 
 /// `bytes` as a person reads a file's size: `812 KB`, `12.3 MB`.
@@ -1392,6 +1406,18 @@ pub fn with_port(address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_a_servers_file_says_is_shown_without_control_characters_and_cut_short() {
+        assert_eq!(
+            plain("uses \u{1b}[2J\"a.png\"\r\nnext\u{7}"),
+            "uses [2J\"a.png\"\nnext"
+        );
+        assert_eq!(plain(&"x".repeat(5000)).len(), MOST_SHOWN);
+        assert_eq!(size_text(1), "1 KB");
+        assert_eq!(size_text(42_492), "42 KB");
+        assert_eq!(size_text(12_897_484), "12.3 MB");
+    }
 
     #[test]
     fn a_script_played_alone_rumbles_the_players_gamepad() {

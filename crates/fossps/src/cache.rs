@@ -15,7 +15,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use fossps_net::{SharedFile, hash_of};
 
@@ -24,6 +24,9 @@ pub const FOLDER_VARIABLE: &str = "FOSSPS_CACHE";
 
 /// How many fetched levels are kept. The ones used longest ago go first.
 const KEPT: usize = 8;
+
+/// How old a half-written file is before it is taken to be abandoned.
+const ABANDONED_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// The folder fetched levels are kept in, whether or not it exists yet.
 ///
@@ -108,22 +111,46 @@ pub(crate) fn keep(folder: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Removes all but the [`KEPT`] newest fetched files in `folder`. Nothing
-/// else in the folder is touched.
+/// Whether `name` is what a file is called while it is being written:
+/// the name it will have, the number of the program writing it, `part`.
+fn is_unfinished(name: &str) -> bool {
+    let mut parts = name.split('.');
+    parts.next().is_some_and(is_name)
+        && parts
+            .next()
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.next() == Some("part")
+        && parts.next().is_none()
+}
+
+/// Removes all but the [`KEPT`] newest fetched files in `folder`, and any
+/// file left half-written over an hour ago by a program that was stopped.
+/// Nothing else in the folder is touched.
 fn clear_out(folder: &Path) {
     let Ok(entries) = fs::read_dir(folder) else {
         return;
     };
-    let mut kept: Vec<(SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter(|entry| entry.file_name().to_str().is_some_and(is_name))
-        .filter_map(|entry| {
-            let about = entry.metadata().ok()?;
-            about
-                .is_file()
-                .then(|| Some((about.modified().ok()?, entry.path())))?
-        })
-        .collect();
+    let mut kept: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(about) = entry.metadata() else {
+            continue;
+        };
+        let Ok(written) = about.modified() else {
+            continue;
+        };
+        if !about.is_file() {
+            continue;
+        }
+        if is_name(name) {
+            kept.push((written, entry.path()));
+        } else if is_unfinished(name) && written.elapsed().is_ok_and(|age| age > ABANDONED_AFTER) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
     kept.sort_by(|a, b| b.cmp(a));
     for (_, path) in kept.iter().skip(KEPT) {
         let _ = fs::remove_file(path);
@@ -188,12 +215,27 @@ mod tests {
         for number in 0..KEPT + 3 {
             let path = keep(&folder, format!("level {number}").as_bytes()).unwrap();
             // Each older than the next, whatever the clock's grain.
-            let at = long_ago + std::time::Duration::from_secs(1000 + number as u64);
+            let at = long_ago + Duration::from_secs(1000 + number as u64);
             let kept = fs::OpenOptions::new().write(true).open(&path).unwrap();
             kept.set_modified(at).unwrap();
             paths.push(path);
         }
+        // One file left half-written long ago, one just now.
+        let name = name_of(&hash_of(b"x"));
+        let (stale, fresh) = (
+            folder.join(format!("{name}.123.part")),
+            folder.join(format!("{name}.456.part")),
+        );
+        fs::write(&stale, "half").unwrap();
+        fs::write(&fresh, "half").unwrap();
+        let kept = fs::OpenOptions::new().write(true).open(&stale).unwrap();
+        kept.set_modified(long_ago).unwrap();
+        drop(kept);
+
         keep(&folder, b"the newest").unwrap();
+        assert!(!stale.exists() && fresh.exists());
+        assert!(!is_unfinished("notes.part") && !is_unfinished(&format!("{name}.x.part")));
+        assert!(!is_unfinished(&format!("{name}.1.part.txt")));
         let left = paths.iter().filter(|path| path.exists()).count();
         assert_eq!(left, KEPT - 1);
         assert!(!paths[0].exists() && paths[KEPT + 2].exists());

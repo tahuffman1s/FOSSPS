@@ -79,6 +79,11 @@ const COOKIE_SECONDS: u64 = 8;
 /// lost answer still leaves time for the next.
 const COOKIE_REFRESH: Duration = Duration::from_secs(3);
 
+/// How many times a server may change what it offers while one player is
+/// joining before the player gives up. A map saved while somebody joins
+/// changes it once.
+const MOST_CHANGES: u32 = 8;
+
 /// A gap between two looks at a link longer than this is the game being
 /// busy, and does not count towards giving up on joining.
 const AWAY: Duration = Duration::from_secs(1);
@@ -152,6 +157,11 @@ pub enum Closed {
     Left,
     /// A file the server sent did not arrive as the server described it.
     DamagedFile,
+    /// The server's files came too slowly, or kept changing, for the
+    /// player ever to be ready to join.
+    NeverReady,
+    /// This machine ran out of memory for a file the server sent.
+    NoMemory,
 }
 
 impl fmt::Display for Closed {
@@ -176,6 +186,15 @@ impl fmt::Display for Closed {
             Self::DamagedFile => {
                 "a file the server sent arrived damaged. Try joining again; if it happens \
                  every time, restart the server."
+            }
+            Self::NeverReady => {
+                "the server's level never finished arriving: it came too slowly or kept \
+                 changing. Try joining again; if it happens every time, the connection to \
+                 that server is too slow to play on."
+            }
+            Self::NoMemory => {
+                "this computer ran out of memory for the server's level. Close other \
+                 programs and try joining again."
             }
         })
     }
@@ -615,6 +634,8 @@ pub(crate) struct Link {
     cookie_at: Duration,
     /// When [`update`](Self::update) was last called.
     updated: Duration,
+    /// How many times the server has changed its offer since asking began.
+    changes: u32,
     /// What the server offers, as it last said.
     offer: Offer,
     /// The file being fetched, or the one that last arrived.
@@ -633,6 +654,7 @@ impl Link {
             heard: now,
             cookie_at: now,
             updated: now,
+            changes: 0,
             offer: Offer::default(),
             transfer: None,
         }
@@ -717,15 +739,27 @@ impl Link {
                 self.stage = Stage::Answering { cookie };
                 self.send_at = now;
                 self.started = now;
-                Some(LinkHeard::Offered)
+                Some(self.offer_changed())
             }
             Stage::Answering { .. } => {
                 self.stage = Stage::Answering { cookie };
                 self.send_at = now;
-                changed.then_some(LinkHeard::Offered)
+                changed.then(|| self.offer_changed())
             }
             Stage::Joined { .. } | Stage::Closed(_) => None,
         }
+    }
+
+    /// The server changed its offer after first making it. A server that
+    /// keeps doing so is given up on.
+    fn offer_changed(&mut self) -> LinkHeard {
+        self.changes += 1;
+        if self.changes > MOST_CHANGES {
+            self.transfer = None;
+            self.stage = Stage::Closed(Closed::NeverReady);
+            return LinkHeard::Closed(Closed::NeverReady);
+        }
+        LinkHeard::Offered
     }
 
     /// Takes one piece of the file being fetched.
@@ -746,10 +780,15 @@ impl Link {
                 self.started = now;
                 Some(LinkHeard::Fetched(slot))
             }
-            Progress::Damaged => {
+            ended @ (Progress::Damaged | Progress::NoRoom) => {
+                let why = if ended == Progress::Damaged {
+                    Closed::DamagedFile
+                } else {
+                    Closed::NoMemory
+                };
                 self.transfer = None;
-                self.stage = Stage::Closed(Closed::DamagedFile);
-                Some(LinkHeard::Closed(Closed::DamagedFile))
+                self.stage = Stage::Closed(why);
+                Some(LinkHeard::Closed(why))
             }
         }
     }
@@ -859,7 +898,9 @@ impl Link {
                     self.stage = Stage::Answering { cookie };
                     return None;
                 };
-                if now.saturating_sub(transfer.heard) <= self.settings.timeout {
+                if transfer.overdue(now) {
+                    Closed::NeverReady
+                } else if now.saturating_sub(transfer.heard) <= self.settings.timeout {
                     if now.saturating_sub(self.cookie_at) > COOKIE_REFRESH && now >= self.send_at {
                         // Asked for no more often than joining is.
                         self.send_at = now.saturating_add(self.settings.resend);
@@ -872,8 +913,9 @@ impl Link {
                         writer.u32(first);
                     }
                     return None;
+                } else {
+                    Closed::TimedOut
                 }
-                Closed::TimedOut
             }
             Stage::Joined { .. } => {
                 if now.saturating_sub(self.heard) <= self.settings.timeout {

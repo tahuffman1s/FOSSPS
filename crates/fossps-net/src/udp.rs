@@ -33,7 +33,10 @@ const MOST_DATAGRAMS: usize = 1024;
 /// rest unanswered, to be asked for again: four requests' worth. It keeps
 /// a tick short and caps what a server uploads at about 8 MB a second at
 /// 60 ticks, however many are fetching.
-const MOST_PIECES: u32 = 4 * WINDOW;
+const MOST_PIECES: u32 = MOST_SERVED as u32 * WINDOW;
+
+/// How many askers one `poll` sends pieces to: one request's worth each.
+const MOST_SERVED: usize = 4;
 
 /// Room for one datagram and one byte more, so one that is too long is
 /// seen to be too long instead of being cut to fit.
@@ -117,6 +120,24 @@ struct Budget {
     errors: usize,
     /// Pieces of offered files sent.
     pieces: u32,
+    /// The addresses pieces were sent to.
+    served: [Option<SocketAddr>; MOST_SERVED],
+}
+
+impl Budget {
+    /// Whether `from`, who asked for pieces of a file, is answered: once
+    /// each `poll`, so that one asker cannot take what is sent in a tick
+    /// from everybody else, and not at all once [`MOST_PIECES`] are sent.
+    fn serves(&mut self, from: SocketAddr) -> bool {
+        if self.pieces >= MOST_PIECES || self.served.contains(&Some(from)) {
+            return false;
+        }
+        let Some(place) = self.served.iter_mut().find(|place| place.is_none()) else {
+            return false;
+        };
+        *place = Some(from);
+        true
+    }
 }
 
 /// Something a server's game should act on, from [`UdpHost::poll`].
@@ -279,7 +300,7 @@ impl UdpHost {
                 Some(Heard::Left(id)) => return Some(HostEvent::Left(id, Gone::Quit)),
                 Some(Heard::Fetch(fetch)) => {
                     let mut ahead = 0;
-                    while self.budget.pieces < MOST_PIECES
+                    while (ahead > 0 || self.budget.serves(from))
                         && self.host.write_piece(fetch, ahead, &mut self.outbox)
                     {
                         // A piece that cannot be sent is asked for again.
@@ -728,5 +749,32 @@ pub fn lan_address() -> Option<Ipv4Addr> {
             Some(*here.ip())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_asker_is_sent_one_answer_a_poll_and_a_poll_serves_four() {
+        let asker = |port| SocketAddr::from(([203, 0, 113, 5], port));
+        let mut budget = Budget::default();
+        // The same asker again and again, as someone hogging would.
+        assert!(budget.serves(asker(1)));
+        for _ in 0..100 {
+            assert!(!budget.serves(asker(1)));
+        }
+        // Everybody else still has their turn, up to four in all.
+        assert!(budget.serves(asker(2)));
+        assert!(budget.serves(asker(3)));
+        assert!(budget.serves(asker(4)));
+        assert!(!budget.serves(asker(5)));
+        // The next poll starts afresh.
+        budget = Budget::default();
+        assert!(budget.serves(asker(5)));
+        // Nobody is served once a poll's pieces are all sent.
+        budget.pieces = MOST_PIECES;
+        assert!(!budget.serves(asker(6)));
     }
 }
