@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use fossps_assets::{Bounds, LightKind, Scene, Transform};
 
+use super::place::Snap;
 use crate::map::{self, MAP_FILE, Map};
 
 /// How wide the two side panels start out, in `egui` points.
@@ -18,6 +19,11 @@ const INSPECTOR_WIDTH: f32 = 300.0;
 /// How to fly, said along the bottom of the window.
 const KEYS: &str = "Look: hold the right mouse button    Fly: W A S D    Up, down: E, Q    \
                     Faster: hold Shift    Speed: mouse wheel";
+const EDIT_KEYS: &str = "Move: drag a mark (Alt: up and down, Ctrl: off the grid)    \
+                         Turn: drag the tip of its line, or Z and C    Place: P    \
+                         Carry, put down: F    Put back: Esc    Snap: G";
+const EDIT_GAMEPAD: &str = "A places where you look, X carries what you look at and puts it \
+                            down, B puts it back, LB and RB turn it, Y changes the snap";
 const GAMEPAD: &str = "Gamepad: the sticks fly and look, the triggers go down and up, \
                        pressing the left stick is faster, d-pad up and down change the speed";
 
@@ -319,6 +325,8 @@ pub(crate) struct LevelPanels {
     typed_for: String,
     /// The type the next thing placed gets: the last one placed or chosen.
     next_type: String,
+    /// Whether a click on the ground in the picture places something.
+    pub(crate) placing: bool,
     /// How many rows of the list were placed entities, last frame.
     placed_rows: usize,
     /// What the list is called: the level's file, or that it is a stand-in.
@@ -344,6 +352,7 @@ impl LevelPanels {
             type_text: String::new(),
             typed_for: String::new(),
             next_type: map::SPAWN.to_owned(),
+            placing: false,
             placed_rows: 0,
             title: if stand_in {
                 "Stand-in level"
@@ -390,6 +399,24 @@ impl LevelPanels {
         }
     }
 
+    /// Chooses the placed entity with this ID, as a click on its row does.
+    pub(crate) fn choose_placed(&mut self, id: &str) {
+        if self.chosen_placed() != Some(id) {
+            self.selected = Some(Pick::Placed(id.to_owned()));
+        }
+    }
+
+    /// Places one more of what was placed or chosen last in `map`, at
+    /// `spot` and turned `facing` degrees to the left, and chooses it. Says
+    /// whether it could: a map can be full.
+    pub(crate) fn place(&mut self, map: &mut Map, spot: [f32; 3], facing: f32) -> bool {
+        let Some(id) = map.place(&self.next_type, spot, facing) else {
+            return false;
+        };
+        self.selected = Some(Pick::Placed(id.to_owned()));
+        true
+    }
+
     /// Everything in the level file that is listed.
     #[cfg(test)]
     pub(crate) fn entities(&self) -> &[Entity] {
@@ -409,8 +436,9 @@ impl LevelPanels {
     /// (the camera's speed and place) in the bottom corner.
     ///
     /// `map` is what is placed in the level, which the panels change;
-    /// `saved` says how saving it went, and `spot` is where the next thing
-    /// placed goes and how far it is turned to the left, in degrees.
+    /// `saved` says how saving it went, `spot` is where the next thing
+    /// placed goes and how far it is turned to the left, in degrees, and
+    /// `snap` is what things snap to, which a button changes.
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -418,6 +446,7 @@ impl LevelPanels {
         map: &mut Map,
         saved: &str,
         spot: ([f32; 3], f32),
+        snap: &mut Snap,
     ) -> Asked {
         let mut asked = Asked::default();
         // Something else may have saved the map without what was chosen.
@@ -435,12 +464,14 @@ impl LevelPanels {
                     ui.label(status);
                 });
             });
+            ui.label(EDIT_KEYS);
             ui.weak(GAMEPAD);
+            ui.weak(EDIT_GAMEPAD);
         });
         egui::Panel::left(egui::Id::new("fossps level list"))
             .resizable(true)
             .default_size(LIST_WIDTH)
-            .show(ui, |ui| self.list(ui, &mut asked, map, saved, spot));
+            .show(ui, |ui| self.list(ui, &mut asked, map, saved, spot, snap));
         egui::Panel::right(egui::Id::new("fossps inspector"))
             .resizable(true)
             .default_size(INSPECTOR_WIDTH)
@@ -457,6 +488,7 @@ impl LevelPanels {
         map: &mut Map,
         saved: &str,
         spot: ([f32; 3], f32),
+        snap: &mut Snap,
     ) {
         ui.heading(self.title);
         ui.weak(count_words(&self.entities));
@@ -473,15 +505,26 @@ impl LevelPanels {
         let place = ui
             .button(format!("Place a {} here", self.next_type))
             .on_hover_text(
-                "Puts one on the ground where the camera looks. Change what it is on the \
-                 right; the next one placed is the same.",
+                "Puts one on the ground where the camera looks, as P and A on a gamepad do. \
+                 Change what it is on the right; the next one placed is the same.",
             );
         self.mark("place", &place);
-        if place.clicked()
-            && let Some(id) = map.place(&self.next_type, spot.0, spot.1)
-        {
-            self.selected = Some(Pick::Placed(id.to_owned()));
-            asked.changed = true;
+        if place.clicked() {
+            asked.changed |= self.place(map, spot.0, spot.1);
+        }
+        let placing = ui
+            .checkbox(&mut self.placing, "Click in the picture to place")
+            .on_hover_text(
+                "While this is on, a click on the ground puts one there. Esc turns it off.",
+            );
+        self.mark("placing", &placing);
+        let snapping = ui.button(snap.words()).on_hover_text(
+            "What things land on when they are placed, moved and turned. A click, G, or Y \
+             on a gamepad changes it; holding Ctrl while dragging goes without.",
+        );
+        self.mark("snap", &snapping);
+        if snapping.clicked() {
+            *snap = snap.next();
         }
         if !saved.is_empty() {
             ui.add(egui::Label::new(egui::RichText::new(saved).weak()).wrap());
