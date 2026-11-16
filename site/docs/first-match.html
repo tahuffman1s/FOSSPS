@@ -269,7 +269,9 @@ main.luau is fine: it loaded and ran for 60 ticks (1 second of game time) with n
       <pre class="out" tabindex="0"><code>[INFO] Looking for games on this network...
 [INFO] Found first-match (0 of 64 players).
 [INFO] Joining localhost...
-[INFO] Joined as Player 1. Close the window to leave.</code></pre>
+[INFO] Getting the level from the server (42 KB)...
+[INFO] Got the level. It is kept in … so it is not fetched again.
+[INFO] Joined as Player 1, in the server's level (22 shapes placed, 744 triangles). Close the window to leave.</code></pre>
     </div>
     <p>Look back at the first terminal. The server saw you arrive and your own rules ran on it; the first line is the server's, the next two are yours, and the last comes after a five-second warm-up:</p>
     <div class="code">
@@ -279,7 +281,7 @@ main.luau is fine: it loaded and ran for 60 ticks (1 second of game time) with n
     </div>
   </div>
   <p>That is a networked match: the server holds the teams, the score and the clock, and you are a player in it. Notice that <code>fossps join</code> was given no address. It found the game by itself, and it does the same from any other computer on your network that has FOSSPS installed. Try it with a friend: they will be Player 2, on Blue.</p>
-  <p>The joined window shows the engine's test floor, not your level. A player who joins has no copy of the level yet, so the server, which does have it, stops them at walls they cannot see.</p>
+  <p>The joined window shows your level, though the second terminal was not in the game's folder. A player who joins needs no copy of the game: the server sent the level, and it is kept on the player's computer so the next visit starts at once. Your script was not sent. It runs on the server only.</p>
   <p>Close the window to leave, and press <kbd>Ctrl</kbd>+<kbd>C</kbd> in the first terminal to stop the server.</p>
   <details>
     <summary>It says <code>No games were found on this network</code></summary>

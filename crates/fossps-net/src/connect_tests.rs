@@ -167,8 +167,8 @@ fn a_made_up_number_does_not_join() {
     let mut pair = Pair::new();
     assert_eq!(pair.ask(Duration::ZERO), None);
     // Change the number the server sent before the link reads it.
-    let last = pair.to_link.len() - 1;
-    pair.to_link[last] ^= 1;
+    // It sits after the kind, the version and the player's own number.
+    pair.to_link[17] ^= 1;
     assert_eq!(pair.answer(Duration::ZERO), None);
     assert_eq!(pair.ask(Duration::ZERO), None);
     assert!(pair.to_link.is_empty());

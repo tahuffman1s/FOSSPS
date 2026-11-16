@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use fossps_net::{
     Client, ClientSettings, Closed, Gone, HostEvent, HostSettings, LinkEvent, LinkSettings,
-    PlayerId, PlayerInput, Received, Refusal, Server, ServerSettings, UdpHost, UdpLink,
+    MAX_SHARED_FILES, Offer, PlayerId, PlayerInput, Received, Refusal, Server, ServerSettings,
+    UdpHost, UdpLink, hash_of,
 };
 use fossps_physics::{Level, MoveInput, MoveSettings, Player};
 
@@ -108,6 +109,11 @@ struct Joining {
     packet: Vec<u8>,
     matched: usize,
     closed: Option<Closed>,
+    /// The files fetched from the server, by slot.
+    files: Vec<(usize, Vec<u8>)>,
+    offer: Offer,
+    /// Whether to fetch what the server offers.
+    fetches: bool,
 }
 
 impl Joining {
@@ -120,13 +126,22 @@ impl Joining {
             packet: Vec::new(),
             matched: 0,
             closed: None,
+            files: Vec::new(),
+            offer: Offer::default(),
+            fetches: false,
         }
     }
 
     fn tick(&mut self) {
         while let Some(event) = self.link.poll() {
+            let mut offer = None;
             match event {
                 LinkEvent::Joined(_) => {}
+                LinkEvent::Offered(offered) => offer = Some(offered),
+                LinkEvent::Fetched(slot, file) => {
+                    self.files.push((slot, file.to_vec()));
+                    offer = Some(Offer::default());
+                }
                 LinkEvent::Packet(snapshot) => {
                     if self.client.receive(&self.level, &self.rules, snapshot)
                         == Ok(Received::Matched)
@@ -135,6 +150,16 @@ impl Joining {
                     }
                 }
                 LinkEvent::Closed(why) => self.closed = Some(why),
+            }
+            if let (Some(offer), true) = (offer, self.fetches) {
+                self.offer = if offer.is_empty() { self.offer } else { offer };
+                let held = &self.files;
+                let next = (0..MAX_SHARED_FILES).find(|slot| {
+                    self.offer.file(*slot).is_some() && held.iter().all(|(had, _)| had != slot)
+                });
+                if let Some(slot) = next {
+                    assert!(self.link.fetch(slot));
+                }
             }
         }
         if self.link.id().is_some() {
@@ -182,6 +207,47 @@ fn two_players_join_walk_and_see_each_other() {
     for (id, on_server) in hosted.server.players() {
         assert!(on_server.position[2] < -0.5, "player {id} never moved");
     }
+}
+
+#[test]
+fn a_player_fetches_the_servers_files_before_joining_and_another_does_not() {
+    let mut hosted = Hosted::new(HostSettings::default());
+    let level: Vec<u8> = (0..3_000_000_usize)
+        .map(|at| (at.wrapping_mul(31) ^ (at >> 9)) as u8)
+        .collect();
+    let map = b"version = 1\n".to_vec();
+    hosted.host.share(0, level.clone()).unwrap();
+    hosted.host.share(1, map.clone()).unwrap();
+
+    let mut fetching = Joining::new(&hosted.address(), LinkSettings::default());
+    fetching.fetches = true;
+    let mut plain = Joining::new(&hosted.address(), LinkSettings::default());
+    let mut most = 0;
+    until("the files to arrive and both to join", || {
+        hosted.tick();
+        fetching.tick();
+        plain.tick();
+        if let Some((fetched, whole)) = fetching.link.progress() {
+            assert!(fetched <= whole);
+            most = most.max(fetched);
+            // Nobody has a place while they are still fetching.
+            assert_eq!(fetching.link.id(), None);
+        }
+        fetching.link.id().is_some() && plain.link.id().is_some()
+    });
+    assert_eq!(fetching.closed, None);
+    assert_eq!(fetching.files.len(), 2);
+    assert!(most > 0, "progress was never reported");
+    assert_eq!(fetching.files[0].0, 0);
+    assert_eq!(hash_of(&fetching.files[0].1), hash_of(&level));
+    assert_eq!(fetching.files[1], (1, map));
+    assert!(plain.files.is_empty());
+    // The one who fetched nothing was not kept waiting by the one who did.
+    assert_eq!(hosted.joined.len(), 2);
+    assert_eq!(
+        hosted.host.address(hosted.joined[0]),
+        plain.link.local_addr().ok()
+    );
 }
 
 #[test]
