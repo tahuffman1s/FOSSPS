@@ -80,10 +80,14 @@ gets this by itself when the view moves more than 5 m in one frame.
 If the graphics card lacks the two features below, or FSR cannot start, a
 warning is logged and the game is drawn at full size without it.
 
-Not done yet: textures are not drawn, so there is no texture sharpening for
-upscaling (mip bias, #141); nothing transparent or animated is drawn, so
-FSR's reactive mask is not written; the frame rate does not yet pick the
-size (#139).
+Textures are read sharper to make up for the smaller picture: the mip bias
+is the FSR manual's, `log2(drawn width / shown width) - 1`, worked out once
+when the view is made (`view.rs`) and applied in the mesh shader, so no
+sampler has to be remade when the size changes.
+
+Not done yet: see-through surfaces are drawn but FSR's reactive mask is not
+written for them (#239), so what moves behind glass can smear; nothing
+animated is drawn; the frame rate does not yet pick the size (#139).
 
 ## Limits
 

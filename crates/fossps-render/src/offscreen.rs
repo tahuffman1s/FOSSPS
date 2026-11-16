@@ -23,11 +23,11 @@ use crate::ui_pass::UiPass;
 use crate::upscale::Upscaling;
 use crate::view::SceneView;
 
-const SIZE: u32 = 64;
+pub(crate) const SIZE: u32 = 64;
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
 /// Connects to a graphics card, or returns `None` if this computer has none that will do.
-fn gpu() -> Option<Arc<Gpu>> {
+pub(crate) fn gpu() -> Option<Arc<Gpu>> {
     // SAFETY: there is no window, so nothing has to outlive the `Gpu`.
     match unsafe { Gpu::new(None) } {
         Ok(gpu) => {
@@ -330,29 +330,29 @@ fn frames(
 
 /// Draws `scene` as `camera` sees it, `stops` brighter than it is, into a
 /// `SIZE` by `SIZE` image with no upscaling, and returns its RGBA pixels.
-fn draw(gpu: &Arc<Gpu>, scene: &Scene, camera: &Camera, stops: f32) -> Vec<u8> {
+pub(crate) fn draw(gpu: &Arc<Gpu>, scene: &Scene, camera: &Camera, stops: f32) -> Vec<u8> {
     frames(gpu, scene, &[*camera], stops, SIZE, Upscaling::Off).pixels
 }
 
 /// The red, green and blue of the pixel at `x`, `y`, counted from the top left.
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 3] {
+pub(crate) fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 3] {
     let start = ((y * SIZE + x) * 4) as usize;
     [pixels[start], pixels[start + 1], pixels[start + 2]]
 }
 
 /// Whether a pixel is the dark background: sRGB #181C24 with the tone
 /// curve's toe taken off is about 2, 8, 23 out of 255.
-fn is_background([red, green, blue]: [u8; 3]) -> bool {
+pub(crate) fn is_background([red, green, blue]: [u8; 3]) -> bool {
     red <= 4 && green <= 14 && blue <= 36
 }
 
-const MIDDLE: (u32, u32) = (SIZE / 2, SIZE / 2);
+pub(crate) const MIDDLE: (u32, u32) = (SIZE / 2, SIZE / 2);
 const RED: [f32; 4] = [1.0, 0.25, 0.2, 1.0];
 const GREEN: [f32; 4] = [0.25, 1.0, 0.3, 1.0];
 
 /// The transform that moves a shape by `x`, `y`, `z` metres and makes it
 /// `wide` times as wide.
-fn placed(x: f32, y: f32, z: f32, wide: f32) -> Transform {
+pub(crate) fn placed(x: f32, y: f32, z: f32, wide: f32) -> Transform {
     [
         [wide, 0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -381,7 +381,7 @@ fn square() -> Mesh {
 
 /// A scene of squares: each has a colour, a transform and whether both of
 /// its sides are drawn.
-fn squares(list: &[([f32; 4], Transform, bool)]) -> Scene {
+pub(crate) fn squares(list: &[([f32; 4], Transform, bool)]) -> Scene {
     let mut scene = Scene::default();
     for (number, &(base_color, transform, double_sided)) in list.iter().enumerate() {
         let mut mesh = square();
@@ -404,7 +404,7 @@ fn squares(list: &[([f32; 4], Transform, bool)]) -> Scene {
 }
 
 /// Ends a test: the validation layer must have had nothing to say.
-fn finish(gpu: Arc<Gpu>) {
+pub(crate) fn finish(gpu: Arc<Gpu>) {
     drop(gpu);
     assert_eq!(
         validation_errors(),
@@ -860,6 +860,7 @@ fn overlaid(gpu: &Arc<Gpu>, format: vk::Format, lists: &[DrawList<'_>]) -> Vec<V
                 format,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
                 COLOUR,
+                "testing",
             )
             .unwrap();
         let (buffer, buffer_memory) = readback(gpu, bytes);

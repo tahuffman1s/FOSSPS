@@ -143,9 +143,14 @@ impl Upscale {
             render,
         };
         // Dropping `upscale` cleans up whatever was created.
-        upscale
-            .picture
-            .create(gpu, output, SceneTarget::FORMAT, Self::USAGE, COLOUR)?;
+        upscale.picture.create(
+            gpu,
+            output,
+            SceneTarget::FORMAT,
+            Self::USAGE,
+            COLOUR,
+            crate::scene::DOING,
+        )?;
         Ok(Some(upscale))
     }
 
