@@ -36,6 +36,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use fossps_input::{ActionId, ActionMap, InputFrame};
+use fossps_mode::{SpawnPoint, Stander, choose_spawn};
 use fossps_net::{
     Client, ClientSettings, Closed, HostEvent, HostSettings, LinkEvent, LinkSettings, MAX_PLAYERS,
     PlayerId, PlayerInput, Refusal, RemotePlayer, Server, ServerSettings, SocketError, UdpHost,
@@ -45,6 +46,7 @@ pub use fossps_net::{FoundServer, lan_address};
 use fossps_physics::{Level, MoveInput, MoveSettings, Player};
 
 use crate::game::{Frame, Game};
+use crate::map::Map;
 use crate::script_game::ScriptGame;
 
 /// The UDP port a server opens and a player joins when none is named.
@@ -91,9 +93,45 @@ impl World {
         }
     }
 
-    /// A player where everyone comes into the world.
+    /// A player where everyone comes into the world when the map has no
+    /// spawn points: the middle of the level.
     fn spawn(&self) -> Player {
         Player::at([0.0, 0.0, 0.0], &self.rules)
+    }
+
+    /// A player about to come into the world, at one of `map`'s spawn
+    /// points: one nobody in `standing` is on, and far from them all. With
+    /// no spawn points in the map, in the middle of the level.
+    ///
+    /// Every spawn point is for anyone, and everyone else counts as an
+    /// enemy to keep away from, until teams reach the running game (#171).
+    /// `seed` should differ from one call to the next.
+    fn spawn_in<'a>(
+        &self,
+        map: &Map,
+        standing: impl Iterator<Item = &'a Player>,
+        seed: u32,
+    ) -> Player {
+        let points: Vec<SpawnPoint> = map
+            .spawns()
+            .map(|spawn| SpawnPoint {
+                position: spawn.position,
+                team: None,
+            })
+            .collect();
+        if points.is_empty() {
+            return self.spawn();
+        }
+        let standers: Vec<Stander> = standing
+            .map(|player| Stander {
+                position: player.position,
+                enemy: true,
+            })
+            .collect();
+        match choose_spawn(&points, None, &standers, seed).and_then(|index| points.get(index)) {
+            Some(point) => Player::at(point.position, &self.rules),
+            None => self.spawn(),
+        }
     }
 }
 
@@ -112,6 +150,9 @@ pub struct HostedGame {
     /// Who each place on the server is to the script.
     names: [Option<fossps_script::PlayerId>; MAX_PLAYERS],
     packet: Vec<u8>,
+    /// How many players have been put into the world, so that no two are
+    /// placed by the same chance.
+    spawned: u32,
 }
 
 impl HostedGame {
@@ -136,6 +177,7 @@ impl HostedGame {
             world,
             names: [None; MAX_PLAYERS],
             packet: Vec::new(),
+            spawned: 0,
         })
     }
 
@@ -178,21 +220,27 @@ impl HostedGame {
             server,
             world,
             names,
+            spawned,
             ..
         } = self;
         while let Some(event) = host.poll() {
             match event {
-                HostEvent::Join(request) => match server.join(world.spawn()) {
-                    Ok(id) => {
-                        host.accept(request, id);
-                        let name = format!("Player {}", u32::from(id) + 1);
-                        log::info!("{name} joined from {}.", request.address());
-                        if let Some(slot) = names.get_mut(usize::from(id)) {
-                            *slot = Some(game.host_mut().player_joined(&name));
+                HostEvent::Join(request) => {
+                    *spawned = spawned.wrapping_add(1);
+                    let standing = server.players().map(|(_, player)| player);
+                    let player = world.spawn_in(game.map(), standing, *spawned);
+                    match server.join(player) {
+                        Ok(id) => {
+                            host.accept(request, id);
+                            let name = format!("Player {}", u32::from(id) + 1);
+                            log::info!("{name} joined from {}.", request.address());
+                            if let Some(slot) = names.get_mut(usize::from(id)) {
+                                *slot = Some(game.host_mut().player_joined(&name));
+                            }
                         }
+                        Err(_) => host.refuse(request, Refusal::Full),
                     }
-                    Err(_) => host.refuse(request, Refusal::Full),
-                },
+                }
                 // A packet that cannot be read is one more lost packet.
                 HostEvent::Packet(id, commands) => drop(server.receive(id, commands)),
                 HostEvent::Left(id, why) => {
@@ -207,21 +255,27 @@ impl HostedGame {
     }
 
     /// Puts everyone the match has just brought into the world, at the
-    /// start of a round or after a death, back where players start.
+    /// start of a round or after a death, at one of the map's spawn points.
     fn place_spawned(&mut self) {
-        let Self {
-            game,
-            server,
-            world,
-            names,
-            ..
-        } = self;
-        for spawned in game.host_mut().take_spawns() {
+        // Taken out first: placing reads the map, which the game also holds.
+        let waiting: Vec<fossps_script::PlayerId> = self.game.host_mut().take_spawns().collect();
+        for name in waiting {
             let place = (0..)
-                .zip(names.iter())
-                .find(|(_, name)| **name == Some(spawned));
-            if let Some(player) = place.and_then(|(id, _)| server.player_mut(id)) {
-                *player = world.spawn();
+                .zip(self.names.iter())
+                .find(|(_, held)| **held == Some(name));
+            let Some((id, _)) = place else {
+                continue;
+            };
+            self.spawned = self.spawned.wrapping_add(1);
+            // Everyone but the one being placed is to be kept away from.
+            let standing = self
+                .server
+                .players()
+                .filter(|(other, _)| *other != id)
+                .map(|(_, player)| player);
+            let placed = self.world.spawn_in(self.game.map(), standing, self.spawned);
+            if let Some(player) = self.server.player_mut(id) {
+                *player = placed;
             }
         }
     }

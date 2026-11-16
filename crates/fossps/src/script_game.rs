@@ -7,6 +7,7 @@ use fossps_script::{OpenError, ScriptHost};
 
 use crate::error_overlay::ErrorOverlay;
 use crate::game::{Frame, Game};
+use crate::map::{Map, MapError, MapFile};
 
 /// A [`Game`] that runs the `main.luau` in a game folder, with the scripts
 /// it requires, and loads them again whenever one of them is saved.
@@ -15,6 +16,9 @@ use crate::game::{Frame, Game};
 /// shows it on screen, over the game, until a save loads the script again.
 /// A game run from text has no file to fix, so it shows nothing: its
 /// players did not write it.
+///
+/// A game opened from a folder also has what its `map.toml` places in the
+/// level ([`map`](Self::map)), read again whenever that file is saved.
 ///
 /// ```no_run
 /// use fossps::{Config, ScriptGame};
@@ -32,7 +36,20 @@ pub struct ScriptGame {
     /// Shows the latest script error over the game. Only a game whose
     /// scripts are files that can be fixed and saved has one.
     errors: Option<ErrorOverlay>,
+    /// What is placed in the level.
+    map: Map,
+    /// The map's file, looked at for saves. Only a game opened from a
+    /// folder has one.
+    map_file: Option<MapFile>,
+    /// Why the map file as it now is could not be read, if it could not.
+    map_error: Option<MapError>,
 }
+
+/// Said after a mistake in a map file, by what the game does about it.
+const NOTHING_PLACED: &str = "The game runs with nothing placed in its level. Fix this and \
+                              save the file: the game picks it up by itself.";
+const KEEPS_MAP: &str = "The game keeps the map it had. Fix this and save the file: the \
+                         game picks it up by itself.";
 
 impl ScriptGame {
     /// Opens the game in `folder`. The script reads input through `actions`,
@@ -42,13 +59,30 @@ impl ScriptGame {
     /// shown on screen, and the game waits for the file to be fixed and
     /// saved.
     ///
+    /// The same goes for a mistake in the game's `map.toml`: it is logged,
+    /// nothing is placed, and the game waits for the file to be fixed and
+    /// saved ([`map_error`](Self::map_error) says what is wrong meanwhile).
+    ///
     /// # Errors
     ///
     /// Fails if `folder` has no `main.luau` or the file cannot be read.
     pub fn open(folder: impl AsRef<Path>, actions: &ActionMap) -> Result<Self, OpenError> {
+        let folder = folder.as_ref();
+        let host = ScriptHost::open(folder, actions.clone())?;
+        let (map_file, read) = MapFile::open(folder);
+        let (map, map_error) = match read {
+            Ok(map) => (map, None),
+            Err(error) => {
+                log::error!("{error}\n{NOTHING_PLACED}");
+                (Map::default(), Some(error))
+            }
+        };
         Ok(Self {
-            host: ScriptHost::open(folder, actions.clone())?,
+            host,
             errors: Some(ErrorOverlay::default()),
+            map,
+            map_file: Some(map_file),
+            map_error,
         })
     }
 
@@ -61,6 +95,9 @@ impl ScriptGame {
         Self {
             host: ScriptHost::from_source(source, actions.clone()),
             errors: None,
+            map: Map::default(),
+            map_file: None,
+            map_error: None,
         }
     }
 
@@ -77,6 +114,51 @@ impl ScriptGame {
         Self {
             host: ScriptHost::from_sources(scripts, actions.clone()),
             errors: None,
+            map: Map::default(),
+            map_file: None,
+            map_error: None,
+        }
+    }
+
+    /// Places `map` in the game's level, as a packaged game does with the
+    /// map it was packed with. It takes the place of any map the game had.
+    #[must_use]
+    pub fn with_map(mut self, map: Map) -> Self {
+        self.map = map;
+        self.map_error = None;
+        self
+    }
+
+    /// What is placed in the game's level: its spawn points, zones and
+    /// objectives. For a game opened from a folder this is its `map.toml`
+    /// as last saved without a mistake.
+    #[must_use]
+    pub fn map(&self) -> &Map {
+        &self.map
+    }
+
+    /// What is wrong with the game's `map.toml` as it now is on disk, if it
+    /// could not be read. The game keeps the map it had.
+    #[must_use]
+    pub fn map_error(&self) -> Option<&MapError> {
+        self.map_error.as_ref()
+    }
+
+    /// Reads the map file again if it was saved since it was last read.
+    fn poll_map(&mut self) {
+        let Some(change) = self.map_file.as_mut().and_then(MapFile::changed) else {
+            return;
+        };
+        match change {
+            Ok(map) => {
+                log::info!("Loaded {} again: {}.", crate::map::MAP_FILE, map.summary());
+                self.map = map;
+                self.map_error = None;
+            }
+            Err(error) => {
+                log::error!("{error}\n{KEEPS_MAP}");
+                self.map_error = Some(error);
+            }
         }
     }
 
@@ -96,6 +178,7 @@ impl ScriptGame {
 impl Game for ScriptGame {
     fn tick(&mut self, input: &InputFrame, step: f32) {
         self.host.poll_reload();
+        self.poll_map();
         self.host.tick(input, step);
     }
 

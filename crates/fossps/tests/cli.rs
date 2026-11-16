@@ -279,6 +279,10 @@ fn edit_help_says_how_to_fly_with_a_mouse_and_with_a_gamepad() {
     let said = stdout(&output);
     assert!(said.contains("Hold the right mouse button"), "{said}");
     assert!(said.contains("On a gamepad"), "{said}");
+    assert!(
+        said.contains("saved in\nmap.toml in the game's folder"),
+        "{said}"
+    );
     let listed = stdout(&fossps(&folder, &[]));
     assert!(listed.contains("edit "), "{listed}");
 }
@@ -347,6 +351,73 @@ fn check_reports_a_mistake_that_only_a_match_reaches() {
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn check_reports_a_mistake_that_only_a_press_reaches_and_names_the_action() {
+    let folder = scratch("check-press-mistake");
+    let script = [
+        "game.onTick(function()",
+        "    if game.input.justPressed(\"fire\") then",
+        "        local weapon = nil",
+        "        print(weapon.ammo)",
+        "    end",
+        "    local x, y = game.input.axis(\"move\")",
+        "    if y < -0.5 then",
+        "        print(missing.speed)",
+        "    end",
+        "end)",
+        // Wrong on every tick, pressed or not: no action is blamed for it.
+        "game.onTick(function() print(always.wrong) end)",
+    ];
+    fs::write(folder.join("main.luau"), script.join("\n")).unwrap();
+
+    let output = fossps(&folder, &["check"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let said = stderr(&output);
+    // Both are found in one run: the check carries on after the first.
+    let at = |words: &str| {
+        said.find(words)
+            .unwrap_or_else(|| panic!("{words}: {said}"))
+    };
+    let moved = at("Script error in main.luau, line 8");
+    let pushing = at("That happened while the check was pushing \"move\".");
+    let fired = at("Script error in main.luau, line 4");
+    let pressing = at("That happened while the check was pressing \"fire\".");
+    assert!(
+        moved < pushing && pushing < fired && fired < pressing,
+        "{said}"
+    );
+    assert!(
+        said.contains("Script error in main.luau, line 11"),
+        "{said}"
+    );
+    assert_eq!(said.matches("That happened while").count(), 2, "{said}");
+    assert!(said.contains("run `fossps check` again"), "{said}");
+}
+
+#[test]
+fn check_presses_every_action_of_a_new_game_and_says_so() {
+    let folder = scratch("check-press");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+
+    let output = fossps(&folder, &["check", "game"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    // Jump and fire are each bound to a key and to a gamepad button, and
+    // the new game's script prints on both.
+    for line in ["Jump number 2", "Fire! Moving 0, 0"] {
+        assert!(stderr(&output).contains(line), "{}", stderr(&output));
+    }
+    assert!(!stderr(&output).contains("Jump number 3"));
+    let said = stdout(&output);
+    assert!(
+        said.contains("Each of the 15 actions was also pressed, held and let go"),
+        "{said}"
+    );
+    assert!(!said.contains("Nothing was pressed"), "{said}");
+    assert!(!said.contains("Not pressed"), "{said}");
 }
 
 #[test]
@@ -436,6 +507,75 @@ fn run_and_edit_open_nothing_when_the_level_does_not_load() {
             "{said}"
         );
     }
+}
+
+#[test]
+fn check_reads_the_map_file_and_says_what_is_placed() {
+    let folder = scratch("check-map");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    // A new game has no map file, and nothing is said about one.
+    let output = fossps(&folder, &["check", "game"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("map.toml"));
+
+    fs::write(
+        folder.join("game/map.toml"),
+        "version = 1\n\n[[entity]]\nid = \"a\"\ntype = \"spawn\"\nposition = [4, 0, -12]\n\n\
+         [[entity]]\nid = \"b\"\ntype = \"spawn\"\nposition = [-4, 0, 12]\n\n\
+         [[entity]]\nid = \"c\"\ntype = \"zone\"\nposition = [0, 0, 0]\n",
+    )
+    .unwrap();
+    let output = fossps(&folder, &["check", "game"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(
+            "map.toml is fine: 3 placed: 2 spawn, 1 zone. Players come into the world at \
+             its spawn points."
+        ),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_map_file_with_a_mistake_fails_check_and_package_and_is_not_opened_for_editing() {
+    let folder = scratch("map-mistake");
+    assert!(fossps(&folder, &["new", "game"]).status.success());
+    let map = folder.join("game/map.toml");
+    let written =
+        "version = 1\n\n[[entity]]\nid = \"a\"\ntype = \"spawn\"\npositon = [4, 0, -12]\n";
+    fs::write(&map, written).unwrap();
+
+    let output = fossps(&folder, &["check", "game"]);
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(
+        said.contains("map.toml, line 6: \"positon\" is not something an entity has"),
+        "{said}"
+    );
+    assert!(said.contains("map.toml has a mistake"), "{said}");
+    assert!(said.contains("run `fossps check` again"), "{said}");
+    assert!(!stdout(&output).contains("map.toml is fine"));
+
+    let output = fossps(&folder, &["package", "game", "--target", "linux"]);
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains("line 6: \"positon\""), "{said}");
+    assert!(said.contains("the game was not packaged"), "{said}");
+    assert!(!folder.join("game/dist").exists());
+
+    // The editor saves what it holds, so it does not open a file it could
+    // not read: the file is left exactly as it was.
+    let output = fossps(&folder, &["edit", "game"]);
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains("line 6: \"positon\""), "{said}");
+    assert!(said.contains("Nothing was opened"), "{said}");
+    assert!(
+        said.contains("move map.toml out of the game's folder"),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(&map).unwrap(), written);
 }
 
 #[test]
